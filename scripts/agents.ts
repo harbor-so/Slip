@@ -2,7 +2,7 @@
  * A fake fleet of agents, driving the real server.
  *
  * Nothing here is stubbed below the MCP boundary. Each simulated agent is a real
- * `@modelcontextprotocol/sdk` client speaking Streamable HTTP to the actual Slip
+ * `@modelcontextprotocol/sdk` client speaking Streamable HTTP to the actual Harbor
  * server, calling the actual five tools, against the actual Postgres. The only
  * fiction is that a language model is choosing the work — a `setTimeout` does.
  *
@@ -24,9 +24,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const MCP_URL = process.env.SLIP_MCP_URL ?? "http://localhost:8788/mcp";
-const API_KEY = process.env.SLIP_API_KEY;
-const ROUNDS = Number(process.env.SLIP_DEMO_ROUNDS ?? 8);
+const MCP_URL = process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp";
+const API_KEY = process.env.HARBOR_API_KEY;
+const ROUNDS = Number(process.env.HARBOR_DEMO_ROUNDS ?? 8);
 
 const AGENTS = [
 	"claude-code:wt-1",
@@ -67,7 +67,7 @@ const WORK_NOTES = [
 ];
 
 if (!API_KEY) {
-	console.error("SLIP_API_KEY is required. Run `npm run demo` and export the key it prints.");
+	console.error("HARBOR_API_KEY is required. Run `npm run demo` and export the key it prints.");
 	process.exit(1);
 }
 
@@ -81,7 +81,7 @@ const jitter = (base: number) => base + Math.floor(Math.random() * base);
 const pick = <T>(items: T[]): T => items[Math.floor(Math.random() * items.length)]!;
 
 async function connect(): Promise<Client> {
-	const client = new Client({ name: "slip-demo-agent", version: "0.0.0" });
+	const client = new Client({ name: "harbor-demo-agent", version: "0.0.0" });
 	await client.connect(
 		new StreamableHTTPClientTransport(new URL(MCP_URL), {
 			requestInit: { headers: { Authorization: `Bearer ${API_KEY}` } },
@@ -194,5 +194,5 @@ console.log(`  ${blocked} collisions prevented`);
 console.log(
 	blocked > 0
 		? `\nThose ${blocked} are the product: each one is two agents that would have done the same work.`
-		: "\nNo collisions this run — raise SLIP_DEMO_ROUNDS or shrink the task pool to force contention.",
+		: "\nNo collisions this run — raise HARBOR_DEMO_ROUNDS or shrink the task pool to force contention.",
 );

@@ -1,10 +1,10 @@
 /**
- * How Slip talks to agents.
+ * How Harbor talks to agents.
  *
  * This module is the product's entire value proposition made mechanical.
  * Linear's MCP server exposes ~23 tools over a human-shaped object model —
  * issues, cycles, projects, labels, comments, states — and an agent pays for
- * that schema before it does anything useful. Slip answers the same question in
+ * that schema before it does anything useful. Harbor answers the same question in
  * a handful of lines of text.
  *
  * The rules, each of which is a token decision:
@@ -24,7 +24,7 @@
  * The first four characters of a UUID, which is what agents see and type.
  *
  * Collision within one org's open task list is possible in principle and has
- * not mattered in practice at the scale Slip targets; `resolveTaskId` treats an
+ * not mattered in practice at the scale Harbor targets; `resolveTaskId` treats an
  * ambiguous prefix as an error rather than guessing, so the failure mode is a
  * clear message rather than the wrong task being claimed.
  */

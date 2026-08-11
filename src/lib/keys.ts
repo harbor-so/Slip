@@ -1,7 +1,7 @@
 /**
  * Org API keys.
  *
- * `slip_<32 bytes base64url>`. The database stores only a SHA-256 digest, so a
+ * `hbr_<32 bytes base64url>`. The database stores only a SHA-256 digest, so a
  * leaked table dump grants nothing and a lost key can only be replaced, never
  * recovered — which is the correct trade for a credential that lets an agent
  * claim work on a team's behalf.
@@ -15,7 +15,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 export function mintApiKey(): string {
-	return `slip_${randomBytes(32).toString("base64url")}`;
+	return `hbr_${randomBytes(32).toString("base64url")}`;
 }
 
 export function hashApiKey(key: string): string {

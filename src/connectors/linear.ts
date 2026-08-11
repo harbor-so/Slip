@@ -1,5 +1,5 @@
 /**
- * Linear contributes issue metadata to Slip and receives only completion
+ * Linear contributes issue metadata to Harbor and receives only completion
  * comments. Full two-way state sync is intentionally excluded: competing state
  * machines would make webhook ordering determine which system wins.
  */

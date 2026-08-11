@@ -1,7 +1,7 @@
 /**
  * The MCP server, over Streamable HTTP.
  *
- * HTTP rather than stdio is the deployment decision that makes Slip a shared
+ * HTTP rather than stdio is the deployment decision that makes Harbor a shared
  * service instead of a per-laptop tool: one hosted URL and one API key per team,
  * pasted into every agent's config, so a Conductor worktree spun up at 2am sees
  * the same task list as an engineer's local Claude Code. A stdio fallback lives
@@ -14,7 +14,7 @@
  *
  * Sessions are deliberately not persisted. Each request builds a transport in
  * stateless mode, which means any process can serve any request and a restart
- * loses nothing. Slip has no per-session state worth keeping — a claim lives in
+ * loses nothing. Harbor has no per-session state worth keeping — a claim lives in
  * Postgres, not in a socket.
  */
 
@@ -63,7 +63,7 @@ app.all("/mcp", async (req: Request, res: Response) => {
 	// session id would be issued and then immediately forgotten, and every call
 	// after `initialize` would be refused with "Server not initialized".
 	//
-	// Stateless is also the right shape for Slip. A claim lives in Postgres, not
+	// Stateless is also the right shape for Harbor. A claim lives in Postgres, not
 	// in a socket, so any process can serve any request and a restart loses
 	// nothing — which is what lets this run behind a load balancer as one hosted
 	// URL for a whole team.
@@ -90,7 +90,7 @@ if (process.env.NODE_ENV !== "test") {
 	// bearer token, to anyone who can reach the host. Set HOST=0.0.0.0 to publish
 	// it deliberately.
 	app.listen(PORT, process.env.HOST ?? "127.0.0.1", () => {
-		console.log(`slip mcp on http://localhost:${PORT}/mcp`);
+		console.log(`harbor mcp on http://localhost:${PORT}/mcp`);
 		console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
 	});
 

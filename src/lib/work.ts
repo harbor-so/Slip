@@ -9,7 +9,7 @@
  *
  * The interesting problem is `claim`, and it is a concurrency problem rather
  * than a business-logic one. Two agents will race, and the only acceptable
- * outcomes are one winner and one informative loser. Slip does not solve this
+ * outcomes are one winner and one informative loser. Harbor does not solve this
  * with a read-then-write check — that has a window between the read and the
  * write in which both agents believe they won. It solves it with a partial
  * unique index in Postgres and by treating the resulting unique violation as
@@ -24,7 +24,7 @@ import type { TaskLine } from "./format.js";
 const DEFAULT_LEASE_MINUTES = 30;
 const MAX_LEASE_MINUTES = 8 * 60;
 
-export class SlipError extends Error {}
+export class HarborError extends Error {}
 
 /** How long after its last call an agent still counts as present. */
 export const PRESENCE_WINDOW_MS = 90_000;
@@ -38,7 +38,7 @@ export const PRESENCE_WINDOW_MS = 90_000;
  *
  * The NOTIFY is what makes the dashboard live. Postgres LISTEN/NOTIFY rather
  * than a websocket service or Supabase Realtime because it reuses the one piece
- * of infrastructure Slip already requires — the same database, the same
+ * of infrastructure Harbor already requires — the same database, the same
  * connection string, nothing new to deploy or pay for — and it keeps working
  * unchanged on hosted Postgres.
  */
@@ -80,7 +80,7 @@ export async function touchPresence(
  */
 export async function notifyChange(orgId: string, verb: string): Promise<void> {
 	try {
-		await db.execute(raw`select pg_notify('slip_changes', ${JSON.stringify({ orgId, verb })})`);
+		await db.execute(raw`select pg_notify('harbor_changes', ${JSON.stringify({ orgId, verb })})`);
 	} catch (error) {
 		console.error("[notify] ignored:", error);
 	}
@@ -152,7 +152,7 @@ export async function resolveTaskId(orgId: string, ref: string): Promise<string>
 	// this function promises. Not injection; the fragment binds a parameter. Worse
 	// than injection in practice, because it looked like success.
 	if (!SHORT_ID.test(cleaned)) {
-		throw new SlipError(
+		throw new HarborError(
 			`"${ref}" is not a task id. Use the four-character id shown in list_work, e.g. a1b2.`,
 		);
 	}
@@ -168,9 +168,9 @@ export async function resolveTaskId(orgId: string, ref: string): Promise<string>
 		)
 		.limit(5);
 
-	if (matches.length === 0) throw new SlipError(`No task matching "${ref}".`);
+	if (matches.length === 0) throw new HarborError(`No task matching "${ref}".`);
 	if (matches.length > 1) {
-		throw new SlipError(
+		throw new HarborError(
 			`"${ref}" matches ${matches.length} tasks. Use more characters of the id.`,
 		);
 	}
@@ -325,7 +325,7 @@ export async function claim(
 		const task = await tx.query.tasks.findFirst({
 			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
 		});
-		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
 
 		const expired = await expireStaleClaims(tx, now, taskId);
 		for (const row of expired) {
@@ -395,7 +395,7 @@ export async function claim(
 		// Someone held it a moment ago or the insert would have landed. If they
 		// released in between, say so rather than invent a name to blame.
 		if (!holder) {
-			throw new SlipError("Task was claimed and released concurrently; retry.");
+			throw new HarborError("Task was claimed and released concurrently; retry.");
 		}
 
 		await tx.insert(events).values({
@@ -437,15 +437,15 @@ export async function release(
 		const task = await tx.query.tasks.findFirst({
 			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
 		});
-		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
 
 		const held = await lockActiveClaim(tx, taskId);
-		if (!held) throw new SlipError(`Task [${taskRef}] is not currently claimed.`);
+		if (!held) throw new HarborError(`Task [${taskRef}] is not currently claimed.`);
 		// Releasing somebody else's claim is refused rather than allowed-with-a-warning:
 		// a confused agent freeing another agent's in-flight work is the exact
-		// collision Slip exists to prevent.
+		// collision Harbor exists to prevent.
 		if (held.agentId !== agentId) {
-			throw new SlipError(
+			throw new HarborError(
 				`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}. Not released.`,
 			);
 		}
@@ -461,7 +461,7 @@ export async function release(
 			.where(and(eq(claims.id, held.id), isNull(claims.releasedAt)))
 			.returning({ id: claims.id });
 		if (updated.length === 0) {
-			throw new SlipError(
+			throw new HarborError(
 				`Task [${taskRef}] was taken by another agent while you were working. `
 					+ "Stop work on it; nothing was recorded.",
 			);
@@ -501,12 +501,12 @@ export async function renewClaim(
 		const task = await tx.query.tasks.findFirst({
 			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
 		});
-		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
 
 		const held = await lockActiveClaim(tx, taskId);
-		if (!held) throw new SlipError(`Task [${taskRef}] has no active claim to renew.`);
+		if (!held) throw new HarborError(`Task [${taskRef}] has no active claim to renew.`);
 		if (held.agentId !== agentId) {
-			throw new SlipError(`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}.`);
+			throw new HarborError(`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}.`);
 		}
 		// A lapsed lease is deliberately still renewable by its own holder while the
 		// row survives: the agent is demonstrably alive and mid-flight, and handing
@@ -518,7 +518,7 @@ export async function renewClaim(
 			.where(and(eq(claims.id, held.id), isNull(claims.releasedAt)))
 			.returning({ id: claims.id });
 		if (renewed.length === 0) {
-			throw new SlipError(
+			throw new HarborError(
 				`Task [${taskRef}] was taken by another agent. Stop work on it.`,
 			);
 		}

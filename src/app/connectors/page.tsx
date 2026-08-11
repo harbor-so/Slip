@@ -1,5 +1,5 @@
 /**
- * What Slip is connected to, and what it is allowed to do there.
+ * What Harbor is connected to, and what it is allowed to do there.
  *
  * The largest thing on each card is not a green dot — it is the list of writes
  * the connector may perform. "Is it connected?" is a question people ask once;

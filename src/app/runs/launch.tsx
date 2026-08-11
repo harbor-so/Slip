@@ -8,7 +8,7 @@ import { Card } from "../../components/ui.js";
  * The launch form, and the wall in front of it.
  *
  * When the runner is disabled the form is not merely greyed out — the reason and
- * the exact variables are stated. This is the one endpoint in Slip that executes
+ * the exact variables are stated. This is the one endpoint in Harbor that executes
  * a program rather than writing a row, and somebody enabling it should have to
  * read a sentence about what that means first.
  */
@@ -24,10 +24,10 @@ export function LaunchPanel({ enabled }: { enabled: boolean }) {
 			<Card>
 				<p className="text-sm">Launching agents is off.</p>
 				<p className="mt-2 text-xs text-muted-foreground">
-					Slip spawns a headless agent as a child process on this host — same user,
+					Harbor spawns a headless agent as a child process on this host — same user,
 					same filesystem, no isolation. That is fine on your own machine against
 					your own repo, and unsafe anywhere multi-tenant. Set{" "}
-					<code>SLIP_ENABLE_RUNNER=1</code> and <code>SLIP_WORKSPACE_DIR=/path/to/repo</code>{" "}
+					<code>HARBOR_ENABLE_RUNNER=1</code> and <code>HARBOR_WORKSPACE_DIR=/path/to/repo</code>{" "}
 					to turn it on.
 				</p>
 			</Card>
@@ -75,7 +75,7 @@ export function LaunchPanel({ enabled }: { enabled: boolean }) {
 			<textarea
 				className="min-h-24 w-full rounded-md border border-border bg-background p-3 text-sm"
 				onChange={(event) => setPrompt(event.target.value)}
-				placeholder="What should this agent do? It will claim work through Slip before it starts."
+				placeholder="What should this agent do? It will claim work through Harbor before it starts."
 				value={prompt}
 			/>
 			<div className="flex items-center gap-3">

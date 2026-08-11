@@ -44,7 +44,7 @@ export default async function RunsPage() {
 				{rows.length === 0 ? (
 					<Empty
 						title="Nothing launched yet"
-						hint="A launched agent connects back through Slip's own MCP endpoint, so it claims and releases like any other."
+						hint="A launched agent connects back through Harbor's own MCP endpoint, so it claims and releases like any other."
 					/>
 				) : (
 					<div className="space-y-3">

@@ -1,7 +1,7 @@
 /**
- * Launching an agent from Slip, rather than waiting for one to connect.
+ * Launching an agent from Harbor, rather than waiting for one to connect.
  *
- * What this is: Slip spawns a headless coding agent as a child process on the
+ * What this is: Harbor spawns a headless coding agent as a child process on the
  * host running the server, with its own MCP endpoint injected, pointed at a task
  * it has already claimed. Output streams into `runs` and onto the dashboard.
  *
@@ -52,29 +52,29 @@ export class RunnerDisabledError extends Error {
 }
 
 export function runnerEnabled(): boolean {
-	return process.env.SLIP_ENABLE_RUNNER === "1" && Boolean(process.env.SLIP_WORKSPACE_DIR);
+	return process.env.HARBOR_ENABLE_RUNNER === "1" && Boolean(process.env.HARBOR_WORKSPACE_DIR);
 }
 
 /**
  * Why this is opt-in rather than on by default.
  *
- * Every other endpoint in Slip reads and writes rows. This one executes a
+ * Every other endpoint in Harbor reads and writes rows. This one executes a
  * program. A deployment that turns it on without meaning to has handed anyone who
  * can reach the dashboard the ability to run code as the server user — so the
  * default is off, and the error says exactly what to set rather than failing
  * mysteriously.
  */
 function requireRunner(): string {
-	if (process.env.SLIP_ENABLE_RUNNER !== "1") {
+	if (process.env.HARBOR_ENABLE_RUNNER !== "1") {
 		throw new RunnerDisabledError(
-			"Launching agents is disabled. Set SLIP_ENABLE_RUNNER=1 to enable it — "
+			"Launching agents is disabled. Set HARBOR_ENABLE_RUNNER=1 to enable it — "
 				+ "only on a host where running arbitrary code as the server user is acceptable.",
 		);
 	}
-	const workspace = process.env.SLIP_WORKSPACE_DIR;
+	const workspace = process.env.HARBOR_WORKSPACE_DIR;
 	if (!workspace) {
 		throw new RunnerDisabledError(
-			"SLIP_WORKSPACE_DIR must point at the repository the agent should work in.",
+			"HARBOR_WORKSPACE_DIR must point at the repository the agent should work in.",
 		);
 	}
 	return workspace;
@@ -114,15 +114,15 @@ export async function launchRun(input: LaunchInput): Promise<{ runId: string }> 
 		.returning({ id: runs.id });
 	const runId = run!.id;
 
-	// The agent is given Slip's own MCP endpoint, so the process Slip launched
-	// coordinates through Slip like any other agent — it claims, it releases, it
+	// The agent is given Harbor's own MCP endpoint, so the process Harbor launched
+	// coordinates through Harbor like any other agent — it claims, it releases, it
 	// appears in presence. Anything else would make launched agents the one class
 	// of agent the product cannot see.
 	const mcpConfig = JSON.stringify({
 		mcpServers: {
-			slip: {
+			harbor: {
 				type: "http",
-				url: process.env.SLIP_MCP_URL ?? "http://localhost:8788/mcp",
+				url: process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp",
 				headers: { Authorization: `Bearer ${input.apiKey}` },
 			},
 		},
@@ -135,9 +135,9 @@ export async function launchRun(input: LaunchInput): Promise<{ runId: string }> 
 		shell: false,
 		env: {
 			...process.env,
-			SLIP_API_KEY: input.apiKey,
-			SLIP_AGENT_ID: input.agentId,
-			SLIP_MCP_CONFIG: mcpConfig,
+			HARBOR_API_KEY: input.apiKey,
+			HARBOR_AGENT_ID: input.agentId,
+			HARBOR_MCP_CONFIG: mcpConfig,
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: false,

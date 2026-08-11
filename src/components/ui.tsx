@@ -8,7 +8,7 @@
  * tokens are what carry the visual language across, and those live in
  * globals.css — not in the component library that happened to consume them.
  *
- * If Slip's dashboard grows real interaction — dialogs, menus, focus traps —
+ * If Harbor's dashboard grows real interaction — dialogs, menus, focus traps —
  * take shadcn then. Radix earns its weight on those; it does not on a <span>.
  */
 

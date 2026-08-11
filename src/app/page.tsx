@@ -53,7 +53,7 @@ export default async function ActivityPage() {
 				{present.length === 0 ? (
 					<Empty
 						title="No agents connected"
-						hint={`An agent appears here the moment it calls any Slip tool, and drops off after ${Math.round(PRESENCE_WINDOW_MS / 1000)}s of silence.`}
+						hint={`An agent appears here the moment it calls any Harbor tool, and drops off after ${Math.round(PRESENCE_WINDOW_MS / 1000)}s of silence.`}
 					/>
 				) : (
 					<div className="flex flex-wrap gap-2">

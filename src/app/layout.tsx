@@ -4,12 +4,13 @@ import { currentSession } from "../lib/session.js";
 import "../styles/globals.css";
 
 export const metadata: Metadata = {
-	title: "Slip",
+	title: "Harbor",
 	description: "Coordination for teams running fleets of coding agents.",
 };
 
 const NAV = [
 	{ href: "/", label: "Activity" },
+	{ href: "/sessions", label: "Sessions" },
 	{ href: "/runs", label: "Runs" },
 	{ href: "/digest", label: "Digest" },
 	{ href: "/connectors", label: "Connectors" },
@@ -25,7 +26,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 				<header className="border-b border-border">
 					<div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3">
 						<Link className="font-semibold tracking-tight" href="/">
-							<span className="text-primary">◆</span> Slip
+							<span className="text-primary">◆</span> Harbor
 						</Link>
 						<nav className="flex gap-4 text-sm text-muted-foreground">
 							{NAV.map((item) => (

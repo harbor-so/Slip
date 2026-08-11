@@ -24,13 +24,13 @@ export async function GET(request: Request) {
 	const authorize = new URL("https://github.com/login/oauth/authorize");
 	authorize.searchParams.set("client_id", process.env.GITHUB_CLIENT_ID as string);
 	authorize.searchParams.set("redirect_uri", callback);
-	// `read:user` only. Slip needs an identity to attach a session to and nothing
+	// `read:user` only. Harbor needs an identity to attach a session to and nothing
 	// else — it never reads repositories through a user token.
 	authorize.searchParams.set("scope", "read:user");
 	authorize.searchParams.set("state", state);
 
 	const response = NextResponse.redirect(authorize.toString());
-	response.cookies.set("slip_oauth_state", state, {
+	response.cookies.set("harbor_oauth_state", state, {
 		httpOnly: true,
 		sameSite: "lax",
 		secure: process.env.NODE_ENV === "production",

@@ -23,7 +23,7 @@ import { asc, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { orgs, users } from "../db/schema.js";
 
-const COOKIE = "slip_session";
+const COOKIE = "harbor_session";
 const MAX_AGE_SECONDS = 30 * 86_400;
 
 export interface Session {
@@ -34,7 +34,7 @@ export interface Session {
 	unauthenticated: boolean;
 }
 
-const DEV_SECRET = "slip-dev-secret-not-for-production";
+const DEV_SECRET = "harbor-dev-secret-not-for-production";
 const MIN_SECRET_LENGTH = 32;
 
 /**

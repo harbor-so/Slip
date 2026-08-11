@@ -1,12 +1,12 @@
 /**
- * Slip's visual language.
+ * Harbor's visual language.
  *
  * The oklch palette carries over from the Harbor product design so the two read
  * as one system — same warm-orange primary, same near-black surfaces, same
  * status tones.
  *
  * What deliberately did not come across is the typeface. The source stylesheet
- * sets Neue Montreal, a commercial licence from Pangram Pangram, and Slip is a
+ * sets Neue Montreal, a commercial licence from Pangram Pangram, and Harbor is a
  * public repository — shipping the files, or hard-coding a dependency on them,
  * would put a licensing problem into everybody's clone. The system stack is what
  * renders in their absence anyway, so a team that holds the licence can add one

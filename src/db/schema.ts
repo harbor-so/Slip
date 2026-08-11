@@ -1,7 +1,7 @@
 /**
- * Slip's canonical schema.
+ * Harbor's canonical schema.
  *
- * The one rule that shapes everything here: Slip's own tables are the truth,
+ * The one rule that shapes everything here: Harbor's own tables are the truth,
  * always. Agents never talk to Linear or GitHub — they talk to these tables
  * through five MCP tools. Connectors are sync jobs that keep `tasks` fresh from
  * outside; they are not a layer agents reach through. That is what makes
@@ -14,6 +14,7 @@
 import { relations, sql } from "drizzle-orm";
 import {
 	index,
+	integer,
 	jsonb,
 	pgTable,
 	text,
@@ -74,7 +75,7 @@ export const projects = pgTable("projects", {
  * `scope` is free text on purpose.
  *
  * It is a hint an agent writes about where the work lives — a path, a module, a
- * service name. Slip does not parse it in v1 and does not pretend to detect
+ * service name. Harbor does not parse it in v1 and does not pretend to detect
  * semantic overlap from it; it is shown to the next agent so a human-shaped
  * judgement can be made cheaply. Structured file-level overlap detection is
  * explicitly future work, and making this column structured now would imply a
@@ -160,6 +161,120 @@ export const claims = pgTable(
 );
 
 /**
+ * A room with work in it, and no owner.
+ *
+ * The failure mode this design exists to avoid is a session that belongs to one
+ * person. Tie a session to a single author and "send it to a colleague and let
+ * them take it home" becomes impossible to retrofit — every query, every
+ * permission check and every UI affordance ends up assuming one identity, and
+ * unpicking that later is a rewrite. So there is no `ownerId` column, and
+ * `createdBy` exists purely as provenance: it records who opened the room and
+ * confers nothing.
+ *
+ * `key` is the shareable half of the URL. Possession of the link is what grants
+ * access — the same model as an unlisted document — because requiring an invite
+ * for each participant is the friction that stops anyone sharing at all.
+ */
+export const sessions = pgTable(
+	"sessions",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** Short, URL-safe, unguessable. Appears in /s/<key>. */
+		key: text("key").notNull(),
+		title: text("title").notNull(),
+		taskId: uuid("task_id").references(() => tasks.id),
+		/** Provenance only. Deliberately NOT ownership. */
+		createdBy: text("created_by").notNull(),
+		status: text("status").notNull().default("open"),
+		/**
+		 * The next sequence number to hand out, incremented with RETURNING.
+		 *
+		 * A counter here rather than `max(seq) + 1` over the prompts table, because
+		 * that subquery races: under READ COMMITTED two concurrent transactions
+		 * cannot see one another's uncommitted rows, both compute the same maximum,
+		 * and the unique index rejects the loser — dropping somebody's message in
+		 * exactly the situation multiplayer exists to support. An UPDATE on this row
+		 * takes a row lock, so the second transaction waits and gets the next value.
+		 */
+		nextSeq: integer("next_seq").notNull().default(1),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("sessions_key_idx").on(table.key),
+		index("sessions_org_activity_idx").on(table.orgId, table.lastActivityAt),
+	],
+);
+
+/** Everyone who has opened the link. Joining is the only membership event. */
+export const sessionParticipants = pgTable(
+	"session_participants",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		/** A human handle or an agent id — the room does not distinguish. */
+		participant: text("participant").notNull(),
+		kind: text("kind").notNull().default("human"),
+		joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("participants_session_who_idx").on(table.sessionId, table.participant),
+		index("participants_session_idx").on(table.sessionId),
+	],
+);
+
+/**
+ * Input from any client, queued rather than interleaved.
+ *
+ * Two decisions here, and both are corrections of the obvious design.
+ *
+ * `author` is required on every row. A session with several people steering has
+ * to be able to answer "who asked for this?" months later, and attribution added
+ * afterwards is attribution that is missing for everything already said.
+ *
+ * Prompts QUEUE instead of being injected the moment they arrive. When two people
+ * type at once, splicing both into a running agent's context mid-turn produces
+ * an agent following half of each instruction — the failure is silent and reads
+ * as the model being stupid rather than as a race. A queue makes the ordering
+ * explicit and lets a second thought arrive while the agent is still working on
+ * the first, which is what people actually do.
+ */
+export const sessionPrompts = pgTable(
+	"session_prompts",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		/** Never nullable. Unattributed input is the thing this table exists to prevent. */
+		author: text("author").notNull(),
+		authorKind: text("author_kind").notNull().default("human"),
+		body: text("body").notNull(),
+		status: text("status").notNull().default("queued"),
+		/** Monotonic within a session, so ordering never depends on timestamps. */
+		seq: integer("seq").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+	},
+	(table) => [
+		uniqueIndex("prompts_session_seq_idx").on(table.sessionId, table.seq),
+		index("prompts_session_status_idx").on(table.sessionId, table.status),
+	],
+);
+
+/**
  * Who is alive right now.
  *
  * Deliberately NOT a sixth MCP tool. Presence is a byproduct of the five calls an
@@ -192,10 +307,10 @@ export const agentPresence = pgTable(
 );
 
 /**
- * An agent process Slip started, as opposed to one that merely connected.
+ * An agent process Harbor started, as opposed to one that merely connected.
  *
- * Slip does not own an execution sandbox and this is not the beginning of one. A
- * run is a child process on the host running the server, wired to Slip's own MCP
+ * Harbor does not own an execution sandbox and this is not the beginning of one. A
+ * run is a child process on the host running the server, wired to Harbor's own MCP
  * endpoint — enough to launch work from the dashboard on a laptop or a single
  * box, and deliberately not enough to run somebody else's code. Multi-tenant
  * execution needs an isolation boundary bought from Modal or Daytona, not a
@@ -315,7 +430,7 @@ export const claimsRelations = relations(claims, ({ one }) => ({
 export type Task = typeof tasks.$inferSelect;
 export type Claim = typeof claims.$inferSelect;
 export type Project = typeof projects.$inferSelect;
-export type SlipEvent = typeof events.$inferSelect;
+export type HarborEvent = typeof events.$inferSelect;
 
 /** Closed set. Every consumer switches on these, so they must not drift. */
 export const EVENT_TYPES = [

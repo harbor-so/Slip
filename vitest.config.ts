@@ -10,7 +10,7 @@ export default defineConfig({
 		hookTimeout: 30_000,
 		testTimeout: 30_000,
 		env: {
-			DATABASE_URL: process.env.DATABASE_URL ?? "postgres://slip:slip@localhost:5433/slip",
+			DATABASE_URL: process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor",
 		},
 	},
 });

@@ -19,7 +19,7 @@ export default async function SettingsPage() {
 	if (!session) return <Empty title="No organisation yet" hint="Run npm run db:seed." />;
 
 	const keys = await listApiKeys(session.orgId);
-	const mcpUrl = process.env.SLIP_MCP_URL ?? "http://localhost:8788/mcp";
+	const mcpUrl = process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp";
 
 	return (
 		<div className="space-y-8">
@@ -57,23 +57,23 @@ export default async function SettingsPage() {
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
 {`{
   "mcpServers": {
-    "slip": {
+    "harbor": {
       "type": "http",
       "url": "${mcpUrl}",
-      "headers": { "Authorization": "Bearer \${SLIP_API_KEY}" }
+      "headers": { "Authorization": "Bearer \${HARBOR_API_KEY}" }
     }
   }
 }`}
 					</pre>
 				</Card>
 				<p className="mt-2 text-xs text-muted-foreground">
-					Commit this file. Claude Code interpolates <code>{"${SLIP_API_KEY}"}</code> from the
+					Commit this file. Claude Code interpolates <code>{"${HARBOR_API_KEY}"}</code> from the
 					environment, so the key never enters version control — and a committed
 					<code> .mcp.json</code> is what every Conductor workspace inherits automatically.
 				</p>
 				<p className="mt-2 text-xs text-muted-foreground">
-					Add to CLAUDE.md: “Before starting any task, call slip.list_work() to see what is
-					already claimed, and slip.claim(task_id, agent_id) before beginning work. Release
+					Add to CLAUDE.md: “Before starting any task, call harbor.list_work() to see what is
+					already claimed, and harbor.claim(task_id, agent_id) before beginning work. Release
 					the claim when done, with a summary.”
 				</p>
 			</section>
@@ -82,9 +82,9 @@ export default async function SettingsPage() {
 				<SectionLabel>Codex — ~/.codex/config.toml</SectionLabel>
 				<Card>
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
-{`[mcp_servers.slip]
+{`[mcp_servers.harbor]
 url = "${mcpUrl}"
-bearer_token_env_var = "SLIP_API_KEY"`}
+bearer_token_env_var = "HARBOR_API_KEY"`}
 					</pre>
 				</Card>
 				<p className="mt-2 text-xs text-muted-foreground">
@@ -100,7 +100,7 @@ bearer_token_env_var = "SLIP_API_KEY"`}
 						Nothing to configure. Conductor does not define its own MCP format — it loads
 						whatever Claude Code and Codex load, and a <code>.mcp.json</code> at your repo
 						root is inherited by every workspace it spawns. Commit the block above once and
-						all parallel worktrees see Slip.
+						all parallel worktrees see Harbor.
 					</p>
 				</Card>
 			</section>

@@ -141,7 +141,7 @@ export const MOCK_PREFIX = "[mock digest — no model was called]";
  * plausible-looking summary nobody re-reads is worse than a visible failure —
  * and that reasoning still holds. Labelling is what makes a fake summary safe:
  * it can be shown, screenshotted and demoed, and no one can mistake it for the
- * model's work. Demo mode is opt-in via SLIP_DEMO_MODE precisely so this can
+ * model's work. Demo mode is opt-in via HARBOR_DEMO_MODE precisely so this can
  * never engage by accident on a deployment where somebody forgot the key.
  */
 export function mockDigest(activity: Activity): string {
@@ -186,7 +186,7 @@ export function mockDigest(activity: Activity): string {
 }
 
 export function demoMode(): boolean {
-	return process.env.SLIP_DEMO_MODE === "1";
+	return process.env.HARBOR_DEMO_MODE === "1";
 }
 
 export async function generateDigest(activity: Activity): Promise<string> {

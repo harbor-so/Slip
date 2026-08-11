@@ -11,11 +11,11 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
 
-const url = process.env.DATABASE_URL ?? "postgres://slip:slip@localhost:5433/slip";
+const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
 
 // `max: 1` in scripts avoids a pool that keeps the process alive after the work
 // is done; the server path gets a real pool.
-const isScript = process.env.SLIP_SINGLE_CONNECTION === "1";
+const isScript = process.env.HARBOR_SINGLE_CONNECTION === "1";
 
 export const sql = postgres(url, { max: isScript ? 1 : 10 });
 export const db = drizzle(sql, { schema });

@@ -21,7 +21,7 @@ import { oauthConfigured, sessionCookie, signSession } from "../../../../lib/ses
  */
 function allowedLogins(): Set<string> {
 	return new Set(
-		(process.env.SLIP_ALLOWED_GITHUB_LOGINS ?? "")
+		(process.env.HARBOR_ALLOWED_GITHUB_LOGINS ?? "")
 			.split(",")
 			.map((login) => login.trim().toLowerCase())
 			.filter(Boolean),
@@ -46,7 +46,7 @@ export async function GET(request: Request) {
 
 	// Reject a callback that did not start at /api/auth/login.
 	const cookieHeader = request.headers.get("cookie") ?? "";
-	const cookieState = /(?:^|;\s*)slip_oauth_state=([^;]+)/.exec(cookieHeader)?.[1];
+	const cookieState = /(?:^|;\s*)harbor_oauth_state=([^;]+)/.exec(cookieHeader)?.[1];
 	if (!statesMatch(url.searchParams.get("state") ?? undefined, cookieState)) {
 		return NextResponse.json({ error: "Invalid OAuth state." }, { status: 400 });
 	}
@@ -89,8 +89,8 @@ export async function GET(request: Request) {
 			return NextResponse.json(
 				{
 					error:
-						"This GitHub account is not authorised for this Slip instance. "
-						+ "Ask an administrator to add it to SLIP_ALLOWED_GITHUB_LOGINS.",
+						"This GitHub account is not authorised for this Harbor instance. "
+						+ "Ask an administrator to add it to HARBOR_ALLOWED_GITHUB_LOGINS.",
 				},
 				{ status: 403 },
 			);
@@ -116,6 +116,6 @@ export async function GET(request: Request) {
 
 	const response = NextResponse.redirect(new URL("/", request.url));
 	response.cookies.set(sessionCookie.name, signSession(user!.id), sessionCookie.options);
-	response.cookies.delete("slip_oauth_state");
+	response.cookies.delete("harbor_oauth_state");
 	return response;
 }

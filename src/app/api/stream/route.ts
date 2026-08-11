@@ -9,7 +9,7 @@ import postgres from "postgres";
  * upgrade through whatever proxy sits in front, and is about twenty lines.
  *
  * Postgres LISTEN/NOTIFY rather than Supabase Realtime or a socket service,
- * because it reuses the one piece of infrastructure Slip already requires. The
+ * because it reuses the one piece of infrastructure Harbor already requires. The
  * same DATABASE_URL that runs the product runs the live layer; there is nothing
  * extra to deploy, nothing extra to pay for, and it works identically on hosted
  * Postgres.
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
 	const session = await currentSession();
 	if (!session) return new Response("Not signed in.", { status: 401 });
 
-	const url = process.env.DATABASE_URL ?? "postgres://slip:slip@localhost:5433/slip";
+	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
 	const listener = postgres(url, { max: 1 });
 	const encoder = new TextEncoder();
 
@@ -40,7 +40,7 @@ export async function GET(request: Request) {
 
 			send("ready", { orgId: session.orgId });
 
-			const subscription = await listener.listen("slip_changes", (payload) => {
+			const subscription = await listener.listen("harbor_changes", (payload) => {
 				try {
 					const change = JSON.parse(payload) as { orgId?: string; verb?: string };
 					// Every org shares the one channel, so the filter happens here. A

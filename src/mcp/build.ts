@@ -16,16 +16,16 @@ import { touchPresence } from "../lib/work.js";
 import { toToolError, tools } from "./tools.js";
 
 export const INSTRUCTIONS =
-	"Slip coordinates multiple coding agents working the same backlog. Before "
+	"Harbor coordinates multiple coding agents working the same backlog. Before "
 	+ "starting any work call list_work to see what is already claimed, then claim "
 	+ "the task you intend to do. Release it when you finish, with a summary.";
 
 export function buildServer(orgId: string): McpServer {
 	const server = new McpServer(
-		{ name: "slip", version: "0.1.0" },
+		{ name: "harbor", version: "0.1.0" },
 		{
 			// Declared explicitly rather than inherited. McpServer's default advertises
-			// tools.listChanged: true, which Slip can never honour — the tool list is a
+			// tools.listChanged: true, which Harbor can never honour — the tool list is a
 			// frozen array and each request gets a fresh server on a stateless
 			// transport with no stream to deliver a notification on.
 			capabilities: { tools: {} },

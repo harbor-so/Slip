@@ -21,7 +21,7 @@ export async function GET() {
 /**
  * Launch an agent.
  *
- * The launched process needs a Slip key to coordinate through, and it gets a
+ * The launched process needs a Harbor key to coordinate through, and it gets a
  * fresh one rather than a reused human key: a run is a separate principal, and
  * the day this needs revoking it should be revocable without logging anybody out.
  */
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 			orgId: session.orgId,
 			runtime,
 			prompt,
-			agentId: body.agentId?.trim() || `${runtime}:slip-${Date.now().toString(36)}`,
+			agentId: body.agentId?.trim() || `${runtime}:harbor-${Date.now().toString(36)}`,
 			taskId: body.taskId,
 			apiKey: key,
 		});

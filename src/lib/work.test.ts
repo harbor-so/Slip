@@ -30,7 +30,7 @@ beforeEach(async () => {
 	// TRUNCATE CASCADE rather than ordered DELETEs: immune to foreign-key
 	// ordering, and it resets cleanly even if a previous test left a connection
 	// in a bad state.
-	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table session_prompts, session_participants, sessions, runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 	const [org] = await db.insert(orgs).values({ name: "Test Org" }).returning();
 	orgId = org!.id;
@@ -269,7 +269,7 @@ describe("lost updates against a concurrent claim", () => {
 
 	it("never lets two agents hold one task across 30 interleaved rounds", async () => {
 		for (let round = 0; round < 30; round += 1) {
-			await sql`truncate table runs, agent_presence, events, claims cascade`;
+			await sql`truncate table session_prompts, session_participants, sessions, runs, agent_presence, events, claims cascade`;
 			await db.update(tasks).set({ status: "open" }).where(eq(tasks.id, taskId));
 			await lapsedClaimHeldBy("agent-a");
 

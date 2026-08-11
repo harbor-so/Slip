@@ -34,7 +34,7 @@ let apiKey: string;
 let orgId: string;
 
 async function connect(key: string): Promise<Client> {
-	const client = new Client({ name: "slip-test", version: "0.0.0" });
+	const client = new Client({ name: "harbor-test", version: "0.0.0" });
 	await client.connect(
 		new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
 			requestInit: { headers: { Authorization: `Bearer ${key}` } },
@@ -53,7 +53,7 @@ function textOf(result: unknown): string {
 }
 
 beforeAll(async () => {
-	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table session_prompts, session_participants, sessions, runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 	const [org] = await db.insert(orgs).values({ name: "Protocol Org" }).returning();
 	orgId = org!.id;
@@ -86,7 +86,7 @@ describe("transport", () => {
 	it("completes a real MCP handshake", async () => {
 		const client = await connect(apiKey);
 		const info = client.getServerVersion();
-		expect(info?.name).toBe("slip");
+		expect(info?.name).toBe("harbor");
 		// Instructions are how an agent host learns the claim-before-you-work rule
 		// without the operator having to paste it into a prompt.
 		expect(client.getInstructions()).toMatch(/list_work/);
@@ -96,11 +96,11 @@ describe("transport", () => {
 	it("refuses a bad key at connect time, not at first tool call", async () => {
 		// Failing late would mean an agent starts a task believing it has
 		// coordination and silently has none.
-		await expect(connect("slip_definitely-not-a-real-key")).rejects.toThrow();
+		await expect(connect("hbr_definitely-not-a-real-key")).rejects.toThrow();
 	});
 
 	it("refuses a missing key", async () => {
-		const client = new Client({ name: "slip-test", version: "0.0.0" });
+		const client = new Client({ name: "harbor-test", version: "0.0.0" });
 		await expect(
 			client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`))),
 		).rejects.toThrow();
@@ -229,7 +229,7 @@ describe("tools/call", () => {
 		// Asserting a thrown exception here would have been wrong, and the real
 		// client is what showed it: the SDK answers an unknown tool with an
 		// isError result, so a model that hallucinates `search_issues` — a tool
-		// Linear has and Slip deliberately does not — reads "no such tool" and
+		// Linear has and Harbor deliberately does not — reads "no such tool" and
 		// carries on, instead of the session dying on a protocol error.
 		const client = await connect(apiKey);
 		const result = await client.callTool({ name: "search_issues", arguments: {} });

@@ -5,7 +5,7 @@
  * turn, so the tool list itself is a recurring context cost paid forever.
  * Linear's MCP server exposes ~23 of them over a human-shaped object model —
  * issues, cycles, projects, labels, comments, states — and an agent pays for all
- * of that schema before it does anything useful. Slip's entire surface is five
+ * of that schema before it does anything useful. Harbor's entire surface is five
  * tools whose descriptions fit on a screen.
  *
  * The discipline that keeps it at five: when something new is needed, it becomes
@@ -28,7 +28,7 @@ import {
 	listWork,
 	release,
 	renewClaim,
-	SlipError,
+	HarborError,
 	touchPresence,
 } from "../lib/work.js";
 
@@ -210,13 +210,13 @@ export const tools: ToolDefinition[] = [
 /**
  * Turn a thrown error into something a model can act on.
  *
- * `SlipError` messages are written for an agent to read and are passed through.
- * Anything else is a bug in Slip, and its message could contain a connection
+ * `HarborError` messages are written for an agent to read and are passed through.
+ * Anything else is a bug in Harbor, and its message could contain a connection
  * string or a query — so it is logged server-side and the agent gets a flat
  * sentence. An agent cannot fix our internal error either way.
  */
 export function toToolError(error: unknown): string {
-	if (error instanceof SlipError) return error.message;
-	console.error("[slip] unexpected tool error:", error);
-	return "Slip hit an internal error. The call was not applied; retry once, then report it.";
+	if (error instanceof HarborError) return error.message;
+	console.error("[harbor] unexpected tool error:", error);
+	return "Harbor hit an internal error. The call was not applied; retry once, then report it.";
 }

@@ -30,7 +30,7 @@ const since = new Date("2026-08-03T00:00:00.000Z");
 const until = new Date("2026-08-10T00:00:00.000Z");
 
 beforeEach(async () => {
-	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table session_prompts, session_participants, sessions, runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 	anthropicConstructor.mockClear();
 	delete process.env.ANTHROPIC_API_KEY;
 
@@ -171,11 +171,11 @@ describe("generateDigest", () => {
 });
 
 describe("demo mode", () => {
-	const original = { key: process.env.ANTHROPIC_API_KEY, demo: process.env.SLIP_DEMO_MODE };
+	const original = { key: process.env.ANTHROPIC_API_KEY, demo: process.env.HARBOR_DEMO_MODE };
 
 	afterEach(() => {
 		process.env.ANTHROPIC_API_KEY = original.key;
-		process.env.SLIP_DEMO_MODE = original.demo;
+		process.env.HARBOR_DEMO_MODE = original.demo;
 	});
 
 	const activity = {
@@ -190,13 +190,13 @@ describe("demo mode", () => {
 
 	it("still refuses when demo mode is off and no key is set", async () => {
 		process.env.ANTHROPIC_API_KEY = "";
-		process.env.SLIP_DEMO_MODE = "";
+		process.env.HARBOR_DEMO_MODE = "";
 		await expect(generateDigest(activity)).rejects.toThrow(/ANTHROPIC_API_KEY/);
 	});
 
 	it("produces a digest in demo mode without a key", async () => {
 		process.env.ANTHROPIC_API_KEY = "";
-		process.env.SLIP_DEMO_MODE = "1";
+		process.env.HARBOR_DEMO_MODE = "1";
 		const body = await generateDigest(activity);
 		expect(body).toContain("Fix auth refresh");
 		expect(body).toContain("collision avoided");
@@ -207,14 +207,14 @@ describe("demo mode", () => {
 		// all. If this assertion is ever deleted, the reason for the mock goes
 		// with it.
 		process.env.ANTHROPIC_API_KEY = "";
-		process.env.SLIP_DEMO_MODE = "1";
+		process.env.HARBOR_DEMO_MODE = "1";
 		expect(await generateDigest(activity)).toContain(MOCK_PREFIX);
 		expect(mockDigest(activity).startsWith(MOCK_PREFIX)).toBe(true);
 	});
 
 	it("never mocks when a real key is present, even in demo mode", async () => {
 		process.env.ANTHROPIC_API_KEY = "sk-ant-fake-for-routing-check";
-		process.env.SLIP_DEMO_MODE = "1";
+		process.env.HARBOR_DEMO_MODE = "1";
 		// Reaches the real client and fails on the network/auth rather than
 		// silently returning a mock — a real key must always win.
 		await expect(generateDigest(activity)).rejects.toThrow();
@@ -223,7 +223,7 @@ describe("demo mode", () => {
 
 	it("short-circuits an empty week without calling anything", async () => {
 		process.env.ANTHROPIC_API_KEY = "";
-		process.env.SLIP_DEMO_MODE = "";
+		process.env.HARBOR_DEMO_MODE = "";
 		const body = await generateDigest({ projects: [] });
 		expect(body).not.toContain(MOCK_PREFIX);
 		expect(body.length).toBeGreaterThan(0);

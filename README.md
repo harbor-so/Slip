@@ -1,4 +1,4 @@
-# Slip
+# Harbor
 
 **Coordination for teams running fleets of coding agents.**
 
@@ -27,7 +27,7 @@ exposes roughly two dozen tools over a full human-shaped object model — issues
 cycles, projects, labels, comments, states — and the model re-reads all of it on
 every turn, before doing anything useful.
 
-Slip is one small coordination layer both agents talk to. Linear and GitHub sync
+Harbor is one small coordination layer both agents talk to. Linear and GitHub sync
 *into* it, so they stay optional instead of load-bearing, and agents never have
 to learn anyone's object model.
 
@@ -68,9 +68,9 @@ be shown again — mint another from Settings if you lose it.
 
 ```bash
 npm run demo                              # 10 tasks, 4 agents mid-flight, a week of history
-export SLIP_API_KEY=<the key it prints>
-SLIP_DEMO_MODE=1 npm run mcp              # one terminal
-SLIP_DEMO_MODE=1 npm run dev              # another
+export HARBOR_API_KEY=<the key it prints>
+HARBOR_DEMO_MODE=1 npm run mcp              # one terminal
+HARBOR_DEMO_MODE=1 npm run dev              # another
 npm run demo:agents                       # six simulated agents — watch the dashboard
 ```
 
@@ -88,40 +88,40 @@ database index, the expiries are swept by the real sweeper.
 ```jsonc
 {
   "mcpServers": {
-    "slip": {
+    "harbor": {
       "type": "http",
       "url": "http://localhost:8788/mcp",
-      "headers": { "Authorization": "Bearer ${SLIP_API_KEY}" }
+      "headers": { "Authorization": "Bearer ${HARBOR_API_KEY}" }
     }
   }
 }
 ```
 
-`${SLIP_API_KEY}` is expanded from the environment at connect time, so the file
+`${HARBOR_API_KEY}` is expanded from the environment at connect time, so the file
 is safe to commit — which matters, because committing it is the point.
 
 **Codex** — `~/.codex/config.toml`
 
 ```toml
-[mcp_servers.slip]
+[mcp_servers.harbor]
 url = "http://localhost:8788/mcp"
-bearer_token_env_var = "SLIP_API_KEY"
+bearer_token_env_var = "HARBOR_API_KEY"
 ```
 
 **Conductor** — nothing to configure. Conductor defines no MCP format of its
 own; it loads whatever Claude Code and Codex load, and a repo-root `.mcp.json`
 is inherited by every workspace it spawns. Commit the block above once and all
-your parallel worktrees see Slip — which is exactly the situation Slip exists
+your parallel worktrees see Harbor — which is exactly the situation Harbor exists
 for.
 
 Then add one line to `CLAUDE.md` / `AGENTS.md`:
 
-> Before starting any task, call `slip.list_work()` to see what is already
-> claimed, and `slip.claim(task_id, agent_id)` before beginning work. Release the
+> Before starting any task, call `harbor.list_work()` to see what is already
+> claimed, and `harbor.claim(task_id, agent_id)` before beginning work. Release the
 > claim when done, with a summary.
 
 A stdio transport is available for self-hosting: `npm run mcp:stdio` with
-`SLIP_API_KEY` in the environment. Same tools, same code.
+`HARBOR_API_KEY` in the environment. Same tools, same code.
 
 ## The five tools
 
@@ -190,7 +190,7 @@ create unique index one_active_claim_per_task
 
 Two agents racing both issue an INSERT; Postgres serialises them and exactly one
 lands. The loser isn't an error — it's a `claim_conflict` row, and **that number
-is what Slip is judged by.** Every one is a duplicated day of work that didn't
+is what Harbor is judged by.** Every one is a duplicated day of work that didn't
 happen.
 
 Three details that took an audit to get right:
@@ -207,6 +207,48 @@ Three details that took an audit to get right:
   the digest. That is an ordinary lapsed lease, not an attack, and it reproduced
   in 39 of 40 runs before the fix.
 
+## Multiplayer sessions
+
+A session is a room with work in it. Three properties, and each is a correction
+of the design you'd write first.
+
+**No owner.** `sessions` has no owner column — `createdBy` is provenance and
+confers nothing. Tie a session to one person and "send it to a colleague and let
+them take it home" stops being retrofittable: permission checks, queries and UI
+all quietly assume one identity, and undoing that later is a rewrite. A test
+asserts no `owner` column exists, because the cheapest place to catch that
+regression is the schema.
+
+**Every prompt is attributed.** `author` is NOT NULL. A room with three people
+steering has to answer "who asked for this?" months later, and attribution added
+afterwards is missing for everything already said. The author comes from the
+signed-in viewer, never from the request body — a client that can name its own
+author can put words in a colleague's mouth.
+
+**Input queues rather than interleaving.** When two people type at once,
+splicing both into a running agent's context mid-turn produces an agent
+following half of each instruction. That failure is silent and reads as the model
+being stupid rather than as a race. A queue makes ordering explicit, and the
+composer stays enabled during a run so a second thought can arrive while the
+first is still being worked on.
+
+```
+#1  @rin    delivered   Start with a failing test that reproduces the drop.
+#2  @maya   queued      Also check the retry cap while you're in there.
+#3  @rin    queued      Don't touch the migration in the same PR.
+```
+
+Sessions are link-shareable at `/s/<key>` — 110 bits, and the alphabet drops
+i/l/o/u so a key survives being read aloud or typed from a screenshot. Opening
+the link is joining.
+
+> Sequence numbers come from a counter on the session row bumped with
+> `UPDATE ... RETURNING`, not `max(seq) + 1`. The subquery version races: under
+> READ COMMITTED two simultaneous callers can't see each other's uncommitted
+> rows, both read the same maximum, and the unique index drops one person's
+> message — in exactly the situation multiplayer exists to support. The test for
+> this caught the bug in our own first implementation.
+
 ## Live presence
 
 The dashboard shows who is working right now, updating in well under a second —
@@ -221,21 +263,21 @@ than stored as an online flag — a flag needs somebody to clear it, and the age
 that crashed is exactly the one that will not.
 
 The transport is Postgres `LISTEN/NOTIFY` over Server-Sent Events. Not Supabase
-Realtime, not a socket service: it reuses the one piece of infrastructure Slip
+Realtime, not a socket service: it reuses the one piece of infrastructure Harbor
 already requires, so there is nothing extra to deploy or pay for, and it works
 identically on hosted Postgres.
 
 ## Launching agents
 
-Slip can start an agent, not just wait for one to connect. `/runs` takes a
-prompt, spawns `claude -p` or `codex exec` with Slip's own MCP endpoint injected,
-and streams the output back — so an agent Slip launched claims, releases and
+Harbor can start an agent, not just wait for one to connect. `/runs` takes a
+prompt, spawns `claude -p` or `codex exec` with Harbor's own MCP endpoint injected,
+and streams the output back — so an agent Harbor launched claims, releases and
 appears in presence like any other.
 
 > **This is not a sandbox, and the boundary is the point.** The child process gets
 > the server's user, filesystem and network. That is reasonable on your own
 > machine against your own repo, and unsafe anywhere multi-tenant. It is off
-> unless you set `SLIP_ENABLE_RUNNER=1` and `SLIP_WORKSPACE_DIR`, the runtime must
+> unless you set `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR`, the runtime must
 > be one of two known binaries, and the prompt is passed as an argv element and
 > never through a shell. Real multi-tenant execution needs an isolation boundary
 > bought from Modal or Daytona — shipping `spawn()` and calling it a platform is
@@ -244,10 +286,10 @@ appears in presence like any other.
 ## Dashboard
 
 `/` live activity — tasks, holders, lease countdowns, collisions prevented.
-`/runs` launch and watch agents. `/digest` this week and history. `/connectors` what's connected and precisely
+`/sessions` and `/s/<key>` multiplayer rooms. `/runs` launch and watch agents. `/digest` this week and history. `/connectors` what's connected and precisely
 what it may write. `/settings` API keys and ready-to-paste agent config.
 
-Sign-in is GitHub OAuth, gated on `SLIP_ALLOWED_GITHUB_LOGINS`. An empty
+Sign-in is GitHub OAuth, gated on `HARBOR_ALLOWED_GITHUB_LOGINS`. An empty
 allowlist refuses everybody rather than admitting everybody.
 
 When `GITHUB_CLIENT_ID` is unset **and** `NODE_ENV` is not production, the
@@ -261,15 +303,15 @@ regardless.
 **Supported:** GitHub, Linear. **Planned** (interface ready, not built): Jira,
 Asana, Notion, Slack digest delivery.
 
-Inbound sync only. External issues appear as Slip tasks; agents claim and
-complete them in Slip. Full two-way state sync is an explicit non-goal.
+Inbound sync only. External issues appear as Harbor tasks; agents claim and
+complete them in Harbor. Full two-way state sync is an explicit non-goal.
 
 > **Not yet wired.** `syncOutbound` for Linear — posting a completion comment
 > back — is implemented but nothing calls it, and it would need `sourceRef` to
-> store the issue UUID rather than the `ACM-482` identifier. **Slip currently
+> store the issue UUID rather than the `ACM-482` identifier. **Harbor currently
 > writes nothing to any external system.**
 
-See [CONNECTORS.md](./CONNECTORS.md) for exactly what Slip reads and which scopes
+See [CONNECTORS.md](./CONNECTORS.md) for exactly what Harbor reads and which scopes
 it requests. It is written for a security reviewer.
 
 ## Weekly digest
@@ -280,7 +322,7 @@ Claude, stores the prose.
 
 Requires `ANTHROPIC_API_KEY`. Without it the endpoint fails with a message
 naming the variable rather than returning a plausible-looking fake — nobody
-re-reads a summary that looks fine. `SLIP_DEMO_MODE=1` assembles one from the
+re-reads a summary that looks fine. `HARBOR_DEMO_MODE=1` assembles one from the
 event log instead, always prefixed `[mock digest — no model was called]`. An
 empty week short-circuits without calling the model at all.
 
@@ -290,7 +332,7 @@ No knowledge graph, vector memory, trust ledger, or autonomy promotion. No
 sandboxed multi-tenant execution — see the boundary above.
 
 **No semantic conflict detection**, and that is a decision rather than a backlog
-item. Slip prevents two agents taking the same *task*; it does not detect two
+item. Harbor prevents two agents taking the same *task*; it does not detect two
 agents doing the same *work* under different titles. Benchmarks on adjacent
 problems top out around 55–74% recall, so a naive version would either miss a
 third of real conflicts or spam false positives — and an alert agents learn to
@@ -301,10 +343,10 @@ overlap" hint, never a gate. No SSO/SAML/RBAC. No bidirectional sync. No billing
 
 ```bash
 docker compose up -d
-DATABASE_URL=postgres://slip:slip@localhost:5433/slip npx vitest run
+DATABASE_URL=postgres://harbor:harbor@localhost:5433/harbor npx vitest run
 ```
 
-**52 tests against real Postgres, not mocks.** The guarantee is a database index
+**72 tests against real Postgres, not mocks.** The guarantee is a database index
 and how the code reacts to it; a mock would happily pass a read-then-write check
 that races.
 
@@ -315,6 +357,10 @@ that races.
   `Client` over `StreamableHTTPClientTransport`, the client Claude Code and Codex
   actually use, against a server on an ephemeral port. Hand-written JSON-RPC over
   curl only proves the server answers the requests you thought to write.
+- **20 session** — no-owner schema assertion, mandatory attribution enforced at
+  the database, twelve clients submitting at once with nothing dropped, and
+  `FOR UPDATE SKIP LOCKED` so two agents on one session never take the same
+  prompt.
 - **9 digest** and **6 connector** — signature verification, replay, tampering.
 
 ## Security
@@ -324,7 +370,7 @@ a cross-tenant write through `renew_claim`, an empty `AUTH_SECRET` accepted as
 an HMAC key, unrestricted first-time sign-in, and a missing OAuth `state`.
 
 Known and open: webhook org resolution selects a connector row by type alone, so
-Slip is effectively single-tenant per connector until an external-account column
+Harbor is effectively single-tenant per connector until an external-account column
 lands. Do not run one instance for two orgs sharing a connector type.
 
 ## Licence
