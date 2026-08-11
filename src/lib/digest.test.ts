@@ -7,7 +7,7 @@
  * and never allowed to reach Anthropic.
  */
 
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, sql } from "../db/index.js";
 import { events, orgs, projects, tasks } from "../db/schema.js";
 
@@ -23,12 +23,7 @@ vi.mock("@anthropic-ai/sdk", () => ({
 	},
 }));
 
-import {
-	collectActivity,
-	generateDigest,
-	MissingAnthropicApiKeyError,
-	renderActivityPrompt,
-} from "./digest.js";
+import { MOCK_PREFIX, MissingAnthropicApiKeyError, collectActivity, generateDigest, mockDigest, renderActivityPrompt } from "./digest.js";
 
 let orgId: string;
 const since = new Date("2026-08-03T00:00:00.000Z");
@@ -172,5 +167,65 @@ describe("generateDigest", () => {
 	it("returns an explicit empty-week result without constructing a client", async () => {
 		expect(await generateDigest({ projects: [] })).toBe("No agent activity this week.");
 		expect(anthropicConstructor).not.toHaveBeenCalled();
+	});
+});
+
+describe("demo mode", () => {
+	const original = { key: process.env.ANTHROPIC_API_KEY, demo: process.env.SLIP_DEMO_MODE };
+
+	afterEach(() => {
+		process.env.ANTHROPIC_API_KEY = original.key;
+		process.env.SLIP_DEMO_MODE = original.demo;
+	});
+
+	const activity = {
+		projects: [
+			{
+				project: "backend",
+				completed: [{ task: "Fix auth refresh", agent: "claude-code:wt-1", summary: "Mutex." }],
+				conflicts: [{ task: "Add rate limiting", heldBy: "codex:a", blocked: "codex:b" }],
+			},
+		],
+	};
+
+	it("still refuses when demo mode is off and no key is set", async () => {
+		process.env.ANTHROPIC_API_KEY = "";
+		process.env.SLIP_DEMO_MODE = "";
+		await expect(generateDigest(activity)).rejects.toThrow(/ANTHROPIC_API_KEY/);
+	});
+
+	it("produces a digest in demo mode without a key", async () => {
+		process.env.ANTHROPIC_API_KEY = "";
+		process.env.SLIP_DEMO_MODE = "1";
+		const body = await generateDigest(activity);
+		expect(body).toContain("Fix auth refresh");
+		expect(body).toContain("collision avoided");
+	});
+
+	it("labels every mocked digest so it can never pass for the model's work", async () => {
+		// The label is the whole safety argument for shipping a fake summary at
+		// all. If this assertion is ever deleted, the reason for the mock goes
+		// with it.
+		process.env.ANTHROPIC_API_KEY = "";
+		process.env.SLIP_DEMO_MODE = "1";
+		expect(await generateDigest(activity)).toContain(MOCK_PREFIX);
+		expect(mockDigest(activity).startsWith(MOCK_PREFIX)).toBe(true);
+	});
+
+	it("never mocks when a real key is present, even in demo mode", async () => {
+		process.env.ANTHROPIC_API_KEY = "sk-ant-fake-for-routing-check";
+		process.env.SLIP_DEMO_MODE = "1";
+		// Reaches the real client and fails on the network/auth rather than
+		// silently returning a mock — a real key must always win.
+		await expect(generateDigest(activity)).rejects.toThrow();
+		await expect(generateDigest(activity)).rejects.not.toThrow(/ANTHROPIC_API_KEY is required/);
+	});
+
+	it("short-circuits an empty week without calling anything", async () => {
+		process.env.ANTHROPIC_API_KEY = "";
+		process.env.SLIP_DEMO_MODE = "";
+		const body = await generateDigest({ projects: [] });
+		expect(body).not.toContain(MOCK_PREFIX);
+		expect(body.length).toBeGreaterThan(0);
 	});
 });

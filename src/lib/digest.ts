@@ -127,11 +127,78 @@ export function renderActivityPrompt(activity: Activity): string {
 	return lines.join("\n");
 }
 
+/** Prefix on every mocked digest. Load-bearing — see `mockDigest`. */
+export const MOCK_PREFIX = "[mock digest — no model was called]";
+
+/**
+ * A digest assembled by string concatenation, for demo mode.
+ *
+ * This exists because the whole product should be explorable without an
+ * Anthropic key, and the digest was the one thing that could not run.
+ *
+ * The prefix is not decoration and must not be removed. The original design
+ * refused to produce anything at all without a key, on the grounds that a
+ * plausible-looking summary nobody re-reads is worse than a visible failure —
+ * and that reasoning still holds. Labelling is what makes a fake summary safe:
+ * it can be shown, screenshotted and demoed, and no one can mistake it for the
+ * model's work. Demo mode is opt-in via SLIP_DEMO_MODE precisely so this can
+ * never engage by accident on a deployment where somebody forgot the key.
+ */
+export function mockDigest(activity: Activity): string {
+	const lines: string[] = [MOCK_PREFIX, ""];
+
+	let completed = 0;
+	let conflicts = 0;
+	for (const project of activity.projects) {
+		completed += project.completed.length;
+		conflicts += project.conflicts.length;
+	}
+
+	lines.push(
+		`${completed} ${completed === 1 ? "task" : "tasks"} shipped across `
+			+ `${activity.projects.length} ${activity.projects.length === 1 ? "project" : "projects"}.`,
+		"",
+	);
+
+	for (const project of activity.projects) {
+		if (project.completed.length === 0 && project.conflicts.length === 0) continue;
+		lines.push(`${project.project}`);
+		for (const item of project.completed) {
+			lines.push(`  · ${item.task} — ${item.summary} (${item.agent})`);
+		}
+		for (const item of project.conflicts) {
+			lines.push(
+				`  · collision avoided on ${item.task}: ${item.blocked} was blocked, `
+					+ `${item.heldBy} already held it`,
+			);
+		}
+		lines.push("");
+	}
+
+	if (conflicts > 0) {
+		lines.push(
+			`${conflicts} ${conflicts === 1 ? "collision" : "collisions"} prevented — that is `
+				+ `${conflicts} ${conflicts === 1 ? "piece" : "pieces"} of duplicated work that did not happen.`,
+		);
+	}
+
+	return lines.join("\n").trim();
+}
+
+export function demoMode(): boolean {
+	return process.env.SLIP_DEMO_MODE === "1";
+}
+
 export async function generateDigest(activity: Activity): Promise<string> {
 	if (!hasActivity(activity)) return EMPTY_DIGEST;
 
 	const apiKey = process.env.ANTHROPIC_API_KEY;
-	if (!apiKey) throw new MissingAnthropicApiKeyError();
+	// A real key always wins, even in demo mode: if one is present there is no
+	// reason to show a fake.
+	if (!apiKey) {
+		if (demoMode()) return mockDigest(activity);
+		throw new MissingAnthropicApiKeyError();
+	}
 
 	const client = new Anthropic({ apiKey });
 	const response = await client.messages.create({

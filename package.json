@@ -19,7 +19,8 @@
     "sweep": "tsx scripts/sweep.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "demo:agents": "tsx scripts/agents.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

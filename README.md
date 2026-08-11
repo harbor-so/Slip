@@ -45,6 +45,32 @@ npm run mcp                   # MCP server on :8788/mcp
 npm run dev                   # dashboard on :3000
 ```
 
+## Demo mode — the whole product with no keys
+
+```bash
+npm run demo                              # 10 tasks, 4 agents mid-flight, a week of history
+export SLIP_API_KEY=<the key it prints>
+SLIP_DEMO_MODE=1 npm run mcp              # in one terminal
+SLIP_DEMO_MODE=1 npm run dev              # in another
+npm run demo:agents                       # six simulated agents, then watch the dashboard
+```
+
+`demo:agents` is not a mock of the coordination layer — that would prove nothing
+about the coordination layer. Each simulated agent is a real
+`@modelcontextprotocol/sdk` client speaking Streamable HTTP to the real server,
+calling the real five tools against real Postgres. The only fiction is that a
+`setTimeout` picks the work instead of a model. The claims are real, the
+conflicts are written by the real partial unique index, and the expiries are
+swept by the real sweeper. An agent that finds nothing to claim files new work,
+so the pool sustains itself and all five tools get exercised.
+
+`SLIP_DEMO_MODE=1` also lets the weekly digest run without `ANTHROPIC_API_KEY`,
+by assembling the summary from the event log instead of calling a model. Every
+such digest is prefixed **`[mock digest — no model was called]`** and the prefix
+is asserted by a test. A real key always wins over demo mode, and outside demo
+mode a missing key still fails loudly rather than fabricating prose — a
+plausible summary nobody re-reads is worse than a visible error.
+
 The seed prints an API key once. Only its SHA-256 is stored, so it cannot be
 recovered — make another with the Settings page if you lose it.
 
@@ -195,7 +221,7 @@ docker compose up -d
 DATABASE_URL=postgres://slip:slip@localhost:5433/slip npx vitest run
 ```
 
-37 tests against real Postgres, not mocks — the coordination guarantee is a
+42 tests against real Postgres, not mocks — the coordination guarantee is a
 database index and how the code reacts to it, and a mock would happily pass a
 read-then-write check that races. Includes ten agents contending for one task.
 
