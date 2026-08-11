@@ -26,6 +26,16 @@ const MAX_LEASE_MINUTES = 8 * 60;
 
 export class SlipError extends Error {}
 
+/**
+ * The db handle or a transaction on it.
+ *
+ * Derived from `db.transaction`'s own callback rather than written out, so it
+ * tracks the schema automatically. The alternative — casting a transaction to
+ * `typeof db` — compiles only because the cast silences the difference, and the
+ * difference is real: a transaction has no `$client`.
+ */
+type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 function leaseExpiry(minutes: number | undefined, now: Date): Date {
 	const requested = minutes ?? DEFAULT_LEASE_MINUTES;
 	const bounded = Math.min(Math.max(requested, 1), MAX_LEASE_MINUTES);
@@ -76,7 +86,7 @@ export async function resolveTaskId(orgId: string, ref: string): Promise<string>
  * the event log timely.
  */
 async function expireStaleClaims(
-	tx: typeof db,
+	tx: Executor,
 	now: Date,
 	taskId?: string,
 ): Promise<Array<{ id: string; taskId: string; agentId: string }>> {
@@ -168,7 +178,7 @@ export async function claim(
 		});
 		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
 
-		const expired = await expireStaleClaims(tx as typeof db, now, taskId);
+		const expired = await expireStaleClaims(tx, now, taskId);
 		for (const row of expired) {
 			await tx.insert(events).values({
 				orgId,

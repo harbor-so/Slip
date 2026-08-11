@@ -5,6 +5,7 @@
  * sweeper has something to do the moment it starts.
  */
 
+import { eq } from "drizzle-orm";
 import { db, sql } from "../src/db/index.js";
 import { apiKeys, claims, events, orgs, projects, tasks } from "../src/db/schema.js";
 import { hashApiKey, mintApiKey } from "../src/lib/keys.js";
@@ -87,7 +88,7 @@ await db.insert(claims).values({
 	agentId: "claude-code:wt-2",
 	expiresAt: new Date(now.getTime() + 22 * 60_000),
 });
-await db.update(tasks).set({ status: "claimed" }).where(sql`id = ${seeded[1]!.id}`);
+await db.update(tasks).set({ status: "claimed" }).where(eq(tasks.id, seeded[1]!.id));
 
 // One task whose lease lapsed 10 minutes ago — the sweeper's first job, and the
 // fixture the definition-of-done checks.
@@ -97,7 +98,7 @@ await db.insert(claims).values({
 	claimedAt: new Date(now.getTime() - 45 * 60_000),
 	expiresAt: new Date(now.getTime() - 10 * 60_000),
 });
-await db.update(tasks).set({ status: "claimed" }).where(sql`id = ${seeded[2]!.id}`);
+await db.update(tasks).set({ status: "claimed" }).where(eq(tasks.id, seeded[2]!.id));
 
 // Two finished pieces of work and a prevented collision, so the digest has real
 // material the first time it is generated.
