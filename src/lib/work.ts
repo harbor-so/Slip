@@ -1,0 +1,443 @@
+/**
+ * The five operations, and the transaction discipline that makes them safe.
+ *
+ * Everything an agent can do lives here, and the MCP layer above is a thin
+ * adapter that parses arguments and formats text. That split is deliberate: the
+ * dashboard's REST routes call these same functions, so a task created in the
+ * web UI and a task created by an agent go through one code path and cannot
+ * diverge.
+ *
+ * The interesting problem is `claim`, and it is a concurrency problem rather
+ * than a business-logic one. Two agents will race, and the only acceptable
+ * outcomes are one winner and one informative loser. Slip does not solve this
+ * with a read-then-write check — that has a window between the read and the
+ * write in which both agents believe they won. It solves it with a partial
+ * unique index in Postgres and by treating the resulting unique violation as
+ * the expected path, not an exception to log and swallow.
+ */
+
+import { and, desc, eq, isNull, lt, sql as raw } from "drizzle-orm";
+import { db } from "../db/index.js";
+import { claims, events, projects, tasks } from "../db/schema.js";
+import type { TaskLine } from "./format.js";
+
+const DEFAULT_LEASE_MINUTES = 30;
+const MAX_LEASE_MINUTES = 8 * 60;
+
+export class SlipError extends Error {}
+
+function leaseExpiry(minutes: number | undefined, now: Date): Date {
+	const requested = minutes ?? DEFAULT_LEASE_MINUTES;
+	const bounded = Math.min(Math.max(requested, 1), MAX_LEASE_MINUTES);
+	return new Date(now.getTime() + bounded * 60_000);
+}
+
+/**
+ * Resolve the short id an agent was shown back to a real row.
+ *
+ * Agents see `[a1b2]` and will send exactly that back, but they also sometimes
+ * send the full UUID they saw elsewhere, so both are accepted. An ambiguous
+ * prefix is an error rather than a best guess: claiming the wrong task is worse
+ * than being told to be more specific.
+ */
+export async function resolveTaskId(orgId: string, ref: string): Promise<string> {
+	const cleaned = ref.trim().replace(/^\[|\]$/g, "").toLowerCase();
+	if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(cleaned)) return cleaned;
+
+	const matches = await db
+		.select({ id: tasks.id })
+		.from(tasks)
+		.where(
+			and(
+				eq(tasks.orgId, orgId),
+				raw`replace(${tasks.id}::text, '-', '') like ${`${cleaned}%`}`,
+			),
+		)
+		.limit(5);
+
+	if (matches.length === 0) throw new SlipError(`No task matching "${ref}".`);
+	if (matches.length > 1) {
+		throw new SlipError(
+			`"${ref}" matches ${matches.length} tasks. Use more characters of the id.`,
+		);
+	}
+	return matches[0]!.id;
+}
+
+/**
+ * Release any claim whose lease has run out.
+ *
+ * Called at the top of `claim` inside the same transaction, and separately by
+ * the sweeper. The partial unique index cannot express "and not expired" —
+ * a Postgres index predicate may not call `now()` — so an expired-but-unreleased
+ * row would otherwise hold the slot until the sweeper next ran, which is up to a
+ * minute of a task being wrongly unclaimable. Doing it here means correctness
+ * never depends on a background job being alive; the sweeper only exists to keep
+ * the event log timely.
+ */
+async function expireStaleClaims(
+	tx: typeof db,
+	now: Date,
+	taskId?: string,
+): Promise<Array<{ id: string; taskId: string; agentId: string }>> {
+	const conditions = [isNull(claims.releasedAt), lt(claims.expiresAt, now)];
+	if (taskId) conditions.push(eq(claims.taskId, taskId));
+
+	return tx
+		.update(claims)
+		.set({ releasedAt: now })
+		.where(and(...conditions))
+		.returning({ id: claims.id, taskId: claims.taskId, agentId: claims.agentId });
+}
+
+export async function listWork(
+	orgId: string,
+	filter: { project?: string; status?: string } = {},
+): Promise<TaskLine[]> {
+	const now = new Date();
+
+	const conditions = [eq(tasks.orgId, orgId)];
+	if (filter.status) conditions.push(eq(tasks.status, filter.status));
+	if (filter.project) {
+		conditions.push(raw`lower(${projects.name}) = ${filter.project.toLowerCase()}`);
+	}
+
+	const rows = await db
+		.select({
+			id: tasks.id,
+			title: tasks.title,
+			status: tasks.status,
+			scope: tasks.scope,
+			source: tasks.source,
+			sourceRef: tasks.sourceRef,
+			project: projects.name,
+			claimAgent: claims.agentId,
+			claimExpires: claims.expiresAt,
+		})
+		.from(tasks)
+		.leftJoin(projects, eq(tasks.projectId, projects.id))
+		.leftJoin(claims, and(eq(claims.taskId, tasks.id), isNull(claims.releasedAt)))
+		.where(and(...conditions))
+		.orderBy(desc(tasks.updatedAt))
+		.limit(200);
+
+	return rows.map((row) => ({
+		id: row.id,
+		title: row.title,
+		status: row.status,
+		project: row.project,
+		scope: row.scope,
+		source: row.source,
+		sourceRef: row.sourceRef,
+		claim:
+			row.claimAgent && row.claimExpires
+				? { agentId: row.claimAgent, expiresAt: row.claimExpires }
+				: null,
+	}));
+}
+
+export type ClaimResult =
+	| { ok: true; taskId: string; title: string; expiresAt: Date }
+	| { ok: false; taskId: string; title: string; heldBy: string; expiresAt: Date };
+
+/**
+ * Attempt to take a task, atomically.
+ *
+ * The insert is the lock. If another agent got there first, Postgres raises a
+ * unique violation on `one_active_claim_per_task` and we come back to read who
+ * won — rather than checking first and inserting second, which would leave a
+ * window where two agents both pass the check.
+ *
+ * A conflict is a normal, expected result and is returned as data, never thrown.
+ * It also writes a `claim_conflict` event, which is the single number this
+ * product is judged by: every one of those rows is a duplicate day of work that
+ * did not happen.
+ */
+export async function claim(
+	orgId: string,
+	taskRef: string,
+	agentId: string,
+	leaseMinutes?: number,
+): Promise<ClaimResult> {
+	const taskId = await resolveTaskId(orgId, taskRef);
+	const now = new Date();
+
+	return db.transaction(async (tx) => {
+		const task = await tx.query.tasks.findFirst({
+			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
+		});
+		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+
+		const expired = await expireStaleClaims(tx as typeof db, now, taskId);
+		for (const row of expired) {
+			await tx.insert(events).values({
+				orgId,
+				taskId: row.taskId,
+				agentId: row.agentId,
+				type: "claim_expired",
+				payload: { reason: "lease elapsed, released on contention" },
+			});
+		}
+
+		const expiresAt = leaseExpiry(leaseMinutes, now);
+
+		// ON CONFLICT rather than try/catch, and the difference is not stylistic.
+		// A unique violation raised inside a Postgres transaction aborts the whole
+		// transaction — every subsequent statement fails with 25P02 — so the
+		// natural-looking "catch the violation, then read who holds it" is
+		// impossible: the read is exactly what cannot run. Letting Postgres absorb
+		// the conflict keeps the transaction alive so the same one can look up the
+		// holder and write the conflict event.
+		//
+		// The conflict target has to repeat the index predicate, because the index
+		// is partial; without `targetWhere` Postgres cannot match it and raises the
+		// violation after all.
+		const inserted = await tx
+			.insert(claims)
+			.values({ taskId, agentId, expiresAt })
+			.onConflictDoNothing({
+				target: claims.taskId,
+				// `where`, not `targetWhere` — the latter is the onConflictDoUpdate
+				// spelling and is silently ignored here, which emits a bare
+				// `on conflict (task_id)` that Postgres cannot match to a partial
+				// index (42P10).
+				where: isNull(claims.releasedAt),
+			})
+			.returning({ id: claims.id });
+
+		if (inserted.length > 0) {
+			await tx
+				.update(tasks)
+				.set({ status: "claimed", updatedAt: now })
+				.where(eq(tasks.id, taskId));
+			await tx.insert(events).values({
+				orgId,
+				taskId,
+				agentId,
+				type: "claimed",
+				payload: { expiresAt: expiresAt.toISOString() },
+			});
+			return { ok: true, taskId, title: task.title, expiresAt };
+		}
+
+		const holder = await tx.query.claims.findFirst({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		// Someone held it a moment ago or the insert would have landed. If they
+		// released in between, say so rather than invent a name to blame.
+		if (!holder) {
+			throw new SlipError("Task was claimed and released concurrently; retry.");
+		}
+
+		await tx.insert(events).values({
+			orgId,
+			taskId,
+			agentId,
+			type: "claim_conflict",
+			payload: { heldBy: holder.agentId, expiresAt: holder.expiresAt.toISOString() },
+		});
+
+		return {
+			ok: false,
+			taskId,
+			title: task.title,
+			heldBy: holder.agentId,
+			expiresAt: holder.expiresAt,
+		};
+	});
+}
+
+/**
+ * Give a task back, or finish it.
+ *
+ * A summary means "done" and feeds the weekly digest; no summary means the agent
+ * gave up and the task returns to `open` for someone else. Distinguishing them
+ * matters because a digest that reports abandoned work as completed is worse
+ * than no digest.
+ */
+export async function release(
+	orgId: string,
+	taskRef: string,
+	agentId: string,
+	completionSummary?: string,
+): Promise<{ taskId: string; title: string; completed: boolean }> {
+	const taskId = await resolveTaskId(orgId, taskRef);
+	const now = new Date();
+
+	return db.transaction(async (tx) => {
+		const task = await tx.query.tasks.findFirst({
+			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
+		});
+		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+
+		const held = await tx.query.claims.findFirst({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		if (!held) throw new SlipError(`Task [${taskRef}] is not currently claimed.`);
+		// Releasing somebody else's claim is refused rather than allowed-with-a-warning:
+		// a confused agent freeing another agent's in-flight work is the exact
+		// collision Slip exists to prevent.
+		if (held.agentId !== agentId) {
+			throw new SlipError(
+				`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}. Not released.`,
+			);
+		}
+
+		const completed = Boolean(completionSummary?.trim());
+		await tx
+			.update(claims)
+			.set({ releasedAt: now, completionSummary: completionSummary ?? null })
+			.where(eq(claims.id, held.id));
+		await tx
+			.update(tasks)
+			.set({ status: completed ? "completed" : "open", updatedAt: now })
+			.where(eq(tasks.id, taskId));
+		await tx.insert(events).values({
+			orgId,
+			taskId,
+			agentId,
+			type: completed ? "completed" : "released",
+			payload: completed ? { summary: completionSummary } : {},
+		});
+
+		return { taskId, title: task.title, completed };
+	});
+}
+
+export async function renewClaim(
+	orgId: string,
+	taskRef: string,
+	agentId: string,
+	leaseMinutes?: number,
+): Promise<{ taskId: string; expiresAt: Date }> {
+	const taskId = await resolveTaskId(orgId, taskRef);
+	const now = new Date();
+
+	return db.transaction(async (tx) => {
+		const held = await tx.query.claims.findFirst({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		if (!held) throw new SlipError(`Task [${taskRef}] has no active claim to renew.`);
+		if (held.agentId !== agentId) {
+			throw new SlipError(`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}.`);
+		}
+		// A lapsed lease is deliberately still renewable by its own holder while the
+		// row survives: the agent is demonstrably alive and mid-flight, and handing
+		// its work to someone else because a heartbeat was late helps nobody.
+		const expiresAt = leaseExpiry(leaseMinutes, now);
+		await tx.update(claims).set({ expiresAt }).where(eq(claims.id, held.id));
+		await tx.insert(events).values({
+			orgId,
+			taskId,
+			agentId,
+			type: "claim_renewed",
+			payload: { expiresAt: expiresAt.toISOString() },
+		});
+		return { taskId, expiresAt };
+	});
+}
+
+export async function createTask(
+	orgId: string,
+	input: {
+		title: string;
+		description?: string;
+		project?: string;
+		scope?: string;
+		source?: string;
+		sourceRef?: string;
+	},
+): Promise<{ id: string; title: string; project?: string }> {
+	const now = new Date();
+	return db.transaction(async (tx) => {
+		let projectId: string | null = null;
+		let projectName: string | undefined;
+
+		if (input.project) {
+			const existing = await tx
+				.select({ id: projects.id, name: projects.name })
+				.from(projects)
+				.where(
+					and(
+						eq(projects.orgId, orgId),
+						raw`lower(${projects.name}) = ${input.project.toLowerCase()}`,
+					),
+				)
+				.limit(1);
+
+			if (existing[0]) {
+				projectId = existing[0].id;
+				projectName = existing[0].name;
+			} else {
+				// Auto-create rather than reject. An agent that must first discover
+				// whether a project exists needs a sixth tool to ask, and the whole
+				// design goal is five.
+				const [created] = await tx
+					.insert(projects)
+					.values({ orgId, name: input.project })
+					.returning({ id: projects.id, name: projects.name });
+				projectId = created!.id;
+				projectName = created!.name;
+			}
+		}
+
+		const [task] = await tx
+			.insert(tasks)
+			.values({
+				orgId,
+				projectId,
+				title: input.title,
+				description: input.description ?? null,
+				scope: input.scope ?? null,
+				source: input.source ?? "native",
+				sourceRef: input.sourceRef ?? null,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.returning({ id: tasks.id, title: tasks.title });
+
+		await tx.insert(events).values({
+			orgId,
+			taskId: task!.id,
+			type: "task_created",
+			payload: { source: input.source ?? "native" },
+		});
+
+		return { id: task!.id, title: task!.title, project: projectName };
+	});
+}
+
+/**
+ * Release every lapsed lease and return the tasks to the pool.
+ *
+ * Runs on an interval and is a backstop, not the mechanism — `claim` already
+ * expires a stale holder before it inserts. What this adds is timeliness: a
+ * task whose agent died should read as `open` in the dashboard within a minute,
+ * not the next time somebody happens to contend for it.
+ */
+export async function sweepExpiredClaims(): Promise<number> {
+	const now = new Date();
+	const expired = await db
+		.update(claims)
+		.set({ releasedAt: now })
+		.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
+		.returning({ taskId: claims.taskId, agentId: claims.agentId });
+
+	for (const row of expired) {
+		const task = await db.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
+		if (!task) continue;
+		await db
+			.update(tasks)
+			.set({ status: "open", updatedAt: now })
+			.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+		await db.insert(events).values({
+			orgId: task.orgId,
+			taskId: row.taskId,
+			agentId: row.agentId,
+			type: "claim_expired",
+			payload: { reason: "lease elapsed, swept" },
+		});
+	}
+
+	return expired.length;
+}
