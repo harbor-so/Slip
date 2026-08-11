@@ -52,7 +52,7 @@ export default async function SettingsPage() {
 			</section>
 
 			<section>
-				<SectionLabel>Claude Code — .mcp.json</SectionLabel>
+				<SectionLabel>Claude Code — .mcp.json at your repo root</SectionLabel>
 				<Card>
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
 {`{
@@ -60,12 +60,17 @@ export default async function SettingsPage() {
     "slip": {
       "type": "http",
       "url": "${mcpUrl}",
-      "headers": { "Authorization": "Bearer <YOUR_SLIP_KEY>" }
+      "headers": { "Authorization": "Bearer \${SLIP_API_KEY}" }
     }
   }
 }`}
 					</pre>
 				</Card>
+				<p className="mt-2 text-xs text-muted-foreground">
+					Commit this file. Claude Code interpolates <code>{"${SLIP_API_KEY}"}</code> from the
+					environment, so the key never enters version control — and a committed
+					<code> .mcp.json</code> is what every Conductor workspace inherits automatically.
+				</p>
 				<p className="mt-2 text-xs text-muted-foreground">
 					Add to CLAUDE.md: “Before starting any task, call slip.list_work() to see what is
 					already claimed, and slip.claim(task_id, agent_id) before beginning work. Release
@@ -74,18 +79,32 @@ export default async function SettingsPage() {
 			</section>
 
 			<section>
-				<SectionLabel>Codex — config.toml</SectionLabel>
+				<SectionLabel>Codex — ~/.codex/config.toml</SectionLabel>
 				<Card>
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
 {`[mcp_servers.slip]
 url = "${mcpUrl}"
-http_headers = { Authorization = "Bearer <YOUR_SLIP_KEY>" }`}
+bearer_token_env_var = "SLIP_API_KEY"`}
 					</pre>
 				</Card>
 				<p className="mt-2 text-xs text-muted-foreground">
-					Put the same instruction in AGENTS.md.
+					<code>bearer_token_env_var</code> is purpose-built for this and keeps the key out of
+					the file. Put the same instruction in AGENTS.md.
 				</p>
 			</section>
+
+			<section>
+				<SectionLabel>Conductor</SectionLabel>
+				<Card>
+					<p className="text-xs text-muted-foreground">
+						Nothing to configure. Conductor does not define its own MCP format — it loads
+						whatever Claude Code and Codex load, and a <code>.mcp.json</code> at your repo
+						root is inherited by every workspace it spawns. Commit the block above once and
+						all parallel worktrees see Slip.
+					</p>
+				</Card>
+			</section>
+
 		</div>
 	);
 }

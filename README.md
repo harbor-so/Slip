@@ -56,24 +56,33 @@ recovered — make another with the Settings page if you lose it.
 Authenticated with a per-org bearer token over Streamable HTTP.
 
 ```jsonc
-// .mcp.json — Claude Code
+// .mcp.json at your repo root — Claude Code. Commit this file.
 {
   "mcpServers": {
     "slip": {
       "type": "http",
       "url": "http://localhost:8788/mcp",
-      "headers": { "Authorization": "Bearer <ORG_API_KEY>" }
+      "headers": { "Authorization": "Bearer ${SLIP_API_KEY}" }
     }
   }
 }
 ```
 
+`${SLIP_API_KEY}` is interpolated from the environment at connect time, so the
+file is safe to commit — which matters, because committing it is the point.
+
 ```toml
-# config.toml — Codex
+# ~/.codex/config.toml — Codex
 [mcp_servers.slip]
 url = "http://localhost:8788/mcp"
-http_headers = { Authorization = "Bearer <ORG_API_KEY>" }
+bearer_token_env_var = "SLIP_API_KEY"
 ```
+
+**Conductor needs no configuration at all.** It does not define its own MCP
+format — it loads whatever Claude Code and Codex load — and a `.mcp.json` at the
+repo root is inherited by every workspace it spawns. Commit the block above once
+and all parallel worktrees see Slip, which is exactly the situation Slip exists
+for: five Conductor worktrees on one repo with nothing coordinating them.
 
 Then add to `CLAUDE.md` / `AGENTS.md`:
 
@@ -186,9 +195,17 @@ docker compose up -d
 DATABASE_URL=postgres://slip:slip@localhost:5433/slip npx vitest run
 ```
 
-23 tests against real Postgres, not mocks — the coordination guarantee is a
+37 tests against real Postgres, not mocks — the coordination guarantee is a
 database index and how the code reacts to it, and a mock would happily pass a
 read-then-write check that races. Includes ten agents contending for one task.
+
+14 of those are protocol conformance, driven by `@modelcontextprotocol/sdk`'s own
+`Client` over `StreamableHTTPClientTransport` — the same client implementation
+Claude Code and Codex use — against a server booted on an ephemeral port. Hand-
+written JSON-RPC over curl proves only that the server answers the request you
+happened to write; it cannot catch a capability that is never advertised or a
+header negotiation only the real client performs, and both of those are invisible
+until an agent host fails to connect in front of a customer.
 
 ## Licence
 

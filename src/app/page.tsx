@@ -71,13 +71,27 @@ export default async function ActivityPage() {
 											<td className="px-2 py-2.5 text-xs text-muted-foreground">
 												{task.project ?? "—"}
 											</td>
+											{/* A claim that exists but has lapsed is the interesting case. The
+											    row still says status "claimed" until the sweeper runs, so
+											    rendering `task.status` here would show "claimed" with no holder
+											    and no countdown — while the agent-facing formatter is already
+											    telling agents it is claimable. Two views disagreeing about one
+											    row is how people stop trusting the dashboard. */}
 											<td className="px-2 py-2.5">
-												<Badge tone={live ? "claimed" : (task.status as Tone)}>
-													{live ? task.claim!.agentId : task.status}
-												</Badge>
+												{live ? (
+													<Badge tone="claimed">{task.claim!.agentId}</Badge>
+												) : task.claim ? (
+													<Badge tone="expired">lease expired — claimable</Badge>
+												) : (
+													<Badge tone={task.status as Tone}>{task.status}</Badge>
+												)}
 											</td>
 											<td className="nums w-24 px-4 py-2.5 text-right text-xs text-muted-foreground">
-												{live ? relTime(task.claim!.expiresAt.getTime() - now.getTime()) : ""}
+												{live
+													? relTime(task.claim!.expiresAt.getTime() - now.getTime())
+													: task.claim
+														? `${relTime(now.getTime() - task.claim.expiresAt.getTime())} ago`
+														: ""}
 											</td>
 										</tr>
 									);
