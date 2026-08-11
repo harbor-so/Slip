@@ -30,7 +30,7 @@ const since = new Date("2026-08-03T00:00:00.000Z");
 const until = new Date("2026-08-10T00:00:00.000Z");
 
 beforeEach(async () => {
-	await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 	anthropicConstructor.mockClear();
 	delete process.env.ANTHROPIC_API_KEY;
 

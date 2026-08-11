@@ -12,6 +12,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { touchPresence } from "../lib/work.js";
 import { toToolError, tools } from "./tools.js";
 
 export const INSTRUCTIONS =
@@ -38,7 +39,15 @@ export function buildServer(orgId: string): McpServer {
 			{ description: tool.description, inputSchema: tool.schema },
 			async (args: Record<string, unknown>) => {
 				try {
-					return { content: [{ type: "text" as const, text: await tool.run({ orgId }, args) }] };
+					const text = await tool.run({ orgId }, args);
+					// Presence is recorded here, once, for all five tools — rather than as a
+					// sixth `heartbeat` tool an agent has to remember to call and pays tokens
+					// for. Deliberately not awaited into the response path beyond this point:
+					// an agent's claim must never fail because the dashboard wanted to know
+					// somebody was alive.
+					const agentId = typeof args.agent_id === "string" ? args.agent_id : undefined;
+					if (agentId) void touchPresence(orgId, agentId, tool.name);
+					return { content: [{ type: "text" as const, text }] };
 				} catch (error) {
 					// Returned as content with isError rather than thrown: the model has to
 					// read "that task is held by someone else" and choose differently, and a

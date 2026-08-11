@@ -165,6 +165,20 @@ is a free-text hint about where the work lives, shown to other agents.
 ### `renew_claim(task_id, agent_id, lease_minutes?)`
 Extend a lease for long work. Only the holder can renew.
 
+### Intent — the *why*, on every claim
+`claim` takes an `intent` (one sentence) and an optional `intent_ref` (a spec,
+thread or issue). It rides on the same line other agents already read:
+
+```
+[5b7e] Add rate limiting — claimed by codex:wt-2 (expires in 20m) — why: p99 spike from Tuesday's incident
+```
+
+Attached to the *claim* rather than the task, deliberately: one task can be
+claimed three times for three different reasons, and the reason belongs to the
+attempt. The claim history becomes a queryable record of why work happened, not
+just what changed — the question asked six months later by whoever has to decide
+whether something can be reverted.
+
 ## How the guarantee actually works
 
 One Postgres partial unique index:
@@ -193,10 +207,44 @@ Three details that took an audit to get right:
   the digest. That is an ordinary lapsed lease, not an attack, and it reproduced
   in 39 of 40 runs before the fix.
 
+## Live presence
+
+The dashboard shows who is working right now, updating in well under a second —
+not a status grid that refreshes on a timer.
+
+**Presence is a byproduct of the five tools, not a sixth one.** Every call an
+agent already makes touches its presence row, so an agent cannot forget to
+report, never opts in, and spends no tokens being visible. A `heartbeat` tool was
+the obvious design and would have made every agent pay, on every turn, for the
+dashboard's benefit. Liveness is computed at read time from `last_seen_at` rather
+than stored as an online flag — a flag needs somebody to clear it, and the agent
+that crashed is exactly the one that will not.
+
+The transport is Postgres `LISTEN/NOTIFY` over Server-Sent Events. Not Supabase
+Realtime, not a socket service: it reuses the one piece of infrastructure Slip
+already requires, so there is nothing extra to deploy or pay for, and it works
+identically on hosted Postgres.
+
+## Launching agents
+
+Slip can start an agent, not just wait for one to connect. `/runs` takes a
+prompt, spawns `claude -p` or `codex exec` with Slip's own MCP endpoint injected,
+and streams the output back — so an agent Slip launched claims, releases and
+appears in presence like any other.
+
+> **This is not a sandbox, and the boundary is the point.** The child process gets
+> the server's user, filesystem and network. That is reasonable on your own
+> machine against your own repo, and unsafe anywhere multi-tenant. It is off
+> unless you set `SLIP_ENABLE_RUNNER=1` and `SLIP_WORKSPACE_DIR`, the runtime must
+> be one of two known binaries, and the prompt is passed as an argv element and
+> never through a shell. Real multi-tenant execution needs an isolation boundary
+> bought from Modal or Daytona — shipping `spawn()` and calling it a platform is
+> how you ship an RCE with a dashboard on top.
+
 ## Dashboard
 
 `/` live activity — tasks, holders, lease countdowns, collisions prevented.
-`/digest` this week and history. `/connectors` what's connected and precisely
+`/runs` launch and watch agents. `/digest` this week and history. `/connectors` what's connected and precisely
 what it may write. `/settings` API keys and ready-to-paste agent config.
 
 Sign-in is GitHub OAuth, gated on `SLIP_ALLOWED_GITHUB_LOGINS`. An empty
@@ -239,9 +287,15 @@ empty week short-circuits without calling the model at all.
 ## Non-goals
 
 No knowledge graph, vector memory, trust ledger, or autonomy promotion. No
-semantic conflict detection beyond the free-text `scope` field — Slip prevents
-two agents taking the same *task*, not two agents doing the same *work* under
-different titles. No SSO/SAML/RBAC. No bidirectional sync. No billing.
+sandboxed multi-tenant execution — see the boundary above.
+
+**No semantic conflict detection**, and that is a decision rather than a backlog
+item. Slip prevents two agents taking the same *task*; it does not detect two
+agents doing the same *work* under different titles. Benchmarks on adjacent
+problems top out around 55–74% recall, so a naive version would either miss a
+third of real conflicts or spam false positives — and an alert agents learn to
+ignore is worse than no alert. If it lands it will be a non-blocking "possible
+overlap" hint, never a gate. No SSO/SAML/RBAC. No bidirectional sync. No billing.
 
 ## Tests
 
@@ -250,11 +304,11 @@ docker compose up -d
 DATABASE_URL=postgres://slip:slip@localhost:5433/slip npx vitest run
 ```
 
-**48 tests against real Postgres, not mocks.** The guarantee is a database index
+**52 tests against real Postgres, not mocks.** The guarantee is a database index
 and how the code reacts to it; a mock would happily pass a read-then-write check
 that races.
 
-- **19 coordination** — ten agents contending for one task, plus 30 interleaved
+- **23 coordination** — ten agents contending for one task, plus 30 interleaved
   rounds asserting no state exists where one agent holds a task another has
   marked completed.
 - **14 protocol conformance** — driven by `@modelcontextprotocol/sdk`'s own

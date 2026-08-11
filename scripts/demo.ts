@@ -22,7 +22,7 @@ const MIN = 60_000;
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
-await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 const [org] = await db.insert(orgs).values({ name: "Acme Corp" }).returning();
 const orgId = org!.id;

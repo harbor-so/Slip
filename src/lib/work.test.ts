@@ -12,7 +12,16 @@ import { and, eq, isNull } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { db, sql } from "../db/index.js";
 import { apiKeys, claims, events, orgs, projects, tasks } from "../db/schema.js";
-import { claim, createTask, listWork, release, renewClaim, sweepExpiredClaims } from "./work.js";
+import {
+	claim,
+	createTask,
+	listWork,
+	presentAgents,
+	release,
+	renewClaim,
+	sweepExpiredClaims,
+	touchPresence,
+} from "./work.js";
 
 let orgId: string;
 let taskId: string;
@@ -21,7 +30,7 @@ beforeEach(async () => {
 	// TRUNCATE CASCADE rather than ordered DELETEs: immune to foreign-key
 	// ordering, and it resets cleanly even if a previous test left a connection
 	// in a bad state.
-	await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 	const [org] = await db.insert(orgs).values({ name: "Test Org" }).returning();
 	orgId = org!.id;
@@ -260,7 +269,7 @@ describe("lost updates against a concurrent claim", () => {
 
 	it("never lets two agents hold one task across 30 interleaved rounds", async () => {
 		for (let round = 0; round < 30; round += 1) {
-			await sql`truncate table events, claims cascade`;
+			await sql`truncate table runs, agent_presence, events, claims cascade`;
 			await db.update(tasks).set({ status: "open" }).where(eq(tasks.id, taskId));
 			await lapsedClaimHeldBy("agent-a");
 
@@ -318,3 +327,46 @@ describe("cross-tenant writes", () => {
 		expect(held!.expiresAt.getTime()).toBeLessThan(Date.now() + 30 * 60_000);
 	});
 });
+
+describe("intent", () => {
+	it("records why the work is happening and shows it to the next agent", async () => {
+		await claim(orgId, taskId, "agent-a", {
+			intent: "Blocking three support tickets; fix before Friday.",
+			intentRef: "https://linear.app/acme/issue/ACM-482",
+		});
+
+		const [row] = await listWork(orgId);
+		expect(row!.claim?.intent).toBe("Blocking three support tickets; fix before Friday.");
+		// The reason belongs to the attempt, so it must survive on the claim row
+		// even after the work is finished — that is the whole point of putting it
+		// there rather than on the task.
+		await release(orgId, taskId, "agent-a", "Fixed.");
+		const stored = await db.query.claims.findFirst({ where: eq(claims.taskId, taskId) });
+		expect(stored!.intent).toContain("support tickets");
+		expect(stored!.intentRef).toContain("linear.app");
+	});
+
+	it("keeps the numeric lease argument working for existing callers", async () => {
+		const result = await claim(orgId, taskId, "agent-a", 5);
+		if (!result.ok) throw new Error("expected claim");
+		expect(result.expiresAt.getTime()).toBeLessThan(Date.now() + 6 * 60_000);
+	});
+});
+
+describe("presence", () => {
+	it("reports an agent as present after any tool call and drops it when stale", async () => {
+		await touchPresence(orgId, "claude-code:wt-9", "claim");
+		const present = await presentAgents(orgId);
+		expect(present.map((a) => a.agentId)).toContain("claude-code:wt-9");
+
+		await sql`update agent_presence set last_seen_at = now() - interval '10 minutes'`;
+		expect((await presentAgents(orgId)).map((a) => a.agentId)).not.toContain("claude-code:wt-9");
+	});
+
+	it("keeps presence scoped to one org", async () => {
+		const [other] = await db.insert(orgs).values({ name: "Other" }).returning();
+		await touchPresence(other!.id, "someone-elses-agent", "claim");
+		await touchPresence(orgId, "my-agent", "claim");
+		expect((await presentAgents(orgId)).map((a) => a.agentId)).toEqual(["my-agent"]);
+	});
+})

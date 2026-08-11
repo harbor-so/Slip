@@ -61,7 +61,7 @@ export interface TaskLine {
 	scope?: string | null;
 	source?: string;
 	sourceRef?: string | null;
-	claim?: { agentId: string; expiresAt: Date } | null;
+	claim?: { agentId: string; expiresAt: Date; intent?: string } | null;
 }
 
 /**
@@ -88,6 +88,10 @@ export function formatTask(task: TaskLine, now: Date = new Date()): string {
 		parts.push(task.status);
 	}
 
+	// The intent rides on the same line as the holder. It is the field that tells
+	// the next agent whether the work in flight overlaps its own, and putting it
+	// behind a second call would mean nobody ever reads it.
+	if (task.claim?.intent) parts.push(`why: ${clamp(task.claim.intent, 64)}`);
 	if (task.project) parts.push(`project: ${task.project}`);
 	if (task.scope) parts.push(`scope: ${clamp(task.scope, 48)}`);
 	if (task.source && task.source !== "native") {

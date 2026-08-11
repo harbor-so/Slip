@@ -53,7 +53,7 @@ function textOf(result: unknown): string {
 }
 
 beforeAll(async () => {
-	await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 	const [org] = await db.insert(orgs).values({ name: "Protocol Org" }).returning();
 	orgId = org!.id;

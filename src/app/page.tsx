@@ -9,8 +9,9 @@
 import { conflictsPrevented, recentEvents } from "../lib/dashboard.js";
 import { relTime, shortId } from "../lib/format.js";
 import { currentSession } from "../lib/session.js";
-import { listWork } from "../lib/work.js";
+import { listWork, PRESENCE_WINDOW_MS, presentAgents } from "../lib/work.js";
 import { Badge, Card, Empty, SectionLabel, Stat, type Tone } from "../components/ui.js";
+import { LiveRefresh } from "./live.js";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +32,11 @@ export default async function ActivityPage() {
 		return <Empty title="No organisation yet" hint="Run npm run db:seed to create one." />;
 	}
 
-	const [tasks, feed, conflicts] = await Promise.all([
+	const [tasks, feed, conflicts, present] = await Promise.all([
 		listWork(session.orgId),
 		recentEvents(session.orgId, 25),
 		conflictsPrevented(session.orgId),
+		presentAgents(session.orgId),
 	]);
 
 	const now = new Date();
@@ -43,6 +45,43 @@ export default async function ActivityPage() {
 
 	return (
 		<div className="space-y-8">
+			<section>
+				<div className="mb-3 flex items-center justify-between">
+					<SectionLabel>Active now</SectionLabel>
+					<LiveRefresh />
+				</div>
+				{present.length === 0 ? (
+					<Empty
+						title="No agents connected"
+						hint={`An agent appears here the moment it calls any Slip tool, and drops off after ${Math.round(PRESENCE_WINDOW_MS / 1000)}s of silence.`}
+					/>
+				) : (
+					<div className="flex flex-wrap gap-2">
+						{present.map((agent) => {
+							const idleMs = now.getTime() - agent.lastSeenAt.getTime();
+							return (
+								<Card className="min-w-56 flex-1 py-3" key={agent.agentId}>
+									<div className="flex items-center gap-2">
+										<span
+											className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+												idleMs < 20_000 ? "bg-success" : "bg-primary/60"
+											}`}
+										/>
+										<span className="truncate text-sm font-medium">{agent.agentId}</span>
+										<span className="nums ml-auto shrink-0 text-xs text-muted-foreground">
+											{relTime(idleMs)}
+										</span>
+									</div>
+									<div className="mt-1 truncate pl-4 text-xs text-muted-foreground">
+										{agent.taskTitle ?? agent.lastAction ?? "idle"}
+									</div>
+								</Card>
+							);
+						})}
+					</div>
+				)}
+			</section>
+
 			<div className="flex gap-3">
 				<Stat value={claimed.length} label="in flight" />
 				<Stat value={open.length} label="available" />
@@ -67,7 +106,15 @@ export default async function ActivityPage() {
 											<td className="nums w-16 px-4 py-2.5 text-xs text-muted-foreground">
 												{shortId(task.id)}
 											</td>
-											<td className="px-2 py-2.5">{task.title}</td>
+											<td className="px-2 py-2.5">
+												{task.title}
+												{/* The why, where it is read: next to the what. */}
+												{live && task.claim?.intent ? (
+													<div className="truncate text-xs text-muted-foreground">
+														{task.claim.intent}
+													</div>
+												) : null}
+											</td>
 											<td className="px-2 py-2.5 text-xs text-muted-foreground">
 												{task.project ?? "—"}
 											</td>

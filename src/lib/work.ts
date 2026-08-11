@@ -16,15 +16,102 @@
  * the expected path, not an exception to log and swallow.
  */
 
-import { and, desc, eq, isNull, lt, sql as raw } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, sql as raw } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { claims, events, projects, tasks } from "../db/schema.js";
+import { agentPresence, claims, events, projects, tasks } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
 
 const DEFAULT_LEASE_MINUTES = 30;
 const MAX_LEASE_MINUTES = 8 * 60;
 
 export class SlipError extends Error {}
+
+/** How long after its last call an agent still counts as present. */
+export const PRESENCE_WINDOW_MS = 90_000;
+
+/**
+ * Record that an agent is alive, and wake anything listening.
+ *
+ * Called from the tool layer on every one of the five calls, so presence costs
+ * an agent nothing and cannot be forgotten. Failures here are swallowed on
+ * purpose: presence is a nicety and must never be the reason a claim fails.
+ *
+ * The NOTIFY is what makes the dashboard live. Postgres LISTEN/NOTIFY rather
+ * than a websocket service or Supabase Realtime because it reuses the one piece
+ * of infrastructure Slip already requires — the same database, the same
+ * connection string, nothing new to deploy or pay for — and it keeps working
+ * unchanged on hosted Postgres.
+ */
+export async function touchPresence(
+	orgId: string,
+	agentId: string,
+	action: string,
+	taskId?: string,
+): Promise<void> {
+	try {
+		const now = new Date();
+		await db
+			.insert(agentPresence)
+			.values({
+				orgId,
+				agentId,
+				lastSeenAt: now,
+				lastAction: action,
+				currentTaskId: taskId ?? null,
+				firstSeenAt: now,
+			})
+			.onConflictDoUpdate({
+				target: [agentPresence.orgId, agentPresence.agentId],
+				set: { lastSeenAt: now, lastAction: action, currentTaskId: taskId ?? null },
+			});
+		await notifyChange(orgId, action);
+	} catch (error) {
+		console.error("[presence] ignored:", error);
+	}
+}
+
+/**
+ * Tell listeners something changed in this org.
+ *
+ * The payload is deliberately just an org id and a verb — never the changed row.
+ * NOTIFY payloads are capped at 8000 bytes, and a listener that reads from the
+ * database after being woken cannot serve stale or truncated data the way one
+ * parsing an embedded row can.
+ */
+export async function notifyChange(orgId: string, verb: string): Promise<void> {
+	try {
+		await db.execute(raw`select pg_notify('slip_changes', ${JSON.stringify({ orgId, verb })})`);
+	} catch (error) {
+		console.error("[notify] ignored:", error);
+	}
+}
+
+export interface PresentAgent {
+	agentId: string;
+	lastSeenAt: Date;
+	lastAction: string | null;
+	currentTaskId: string | null;
+	taskTitle: string | null;
+}
+
+/** Agents seen within the presence window, most recent first. */
+export async function presentAgents(orgId: string): Promise<PresentAgent[]> {
+	const cutoff = new Date(Date.now() - PRESENCE_WINDOW_MS);
+	const rows = await db
+		.select({
+			agentId: agentPresence.agentId,
+			lastSeenAt: agentPresence.lastSeenAt,
+			lastAction: agentPresence.lastAction,
+			currentTaskId: agentPresence.currentTaskId,
+			taskTitle: tasks.title,
+		})
+		.from(agentPresence)
+		.leftJoin(tasks, eq(agentPresence.currentTaskId, tasks.id))
+		.where(and(eq(agentPresence.orgId, orgId), gte(agentPresence.lastSeenAt, cutoff)))
+		.orderBy(desc(agentPresence.lastSeenAt))
+		.limit(50);
+	return rows;
+}
 
 /**
  * The db handle or a transaction on it.
@@ -167,6 +254,7 @@ export async function listWork(
 			project: projects.name,
 			claimAgent: claims.agentId,
 			claimExpires: claims.expiresAt,
+			claimIntent: claims.intent,
 		})
 		.from(tasks)
 		.leftJoin(projects, eq(tasks.projectId, projects.id))
@@ -185,7 +273,11 @@ export async function listWork(
 		sourceRef: row.sourceRef,
 		claim:
 			row.claimAgent && row.claimExpires
-				? { agentId: row.claimAgent, expiresAt: row.claimExpires }
+				? {
+						agentId: row.claimAgent,
+						expiresAt: row.claimExpires,
+						intent: row.claimIntent ?? undefined,
+					}
 				: null,
 	}));
 }
@@ -207,12 +299,25 @@ export type ClaimResult =
  * product is judged by: every one of those rows is a duplicate day of work that
  * did not happen.
  */
+export interface ClaimOptions {
+	leaseMinutes?: number;
+	/** Why this agent is doing this work. Becomes part of the permanent record. */
+	intent?: string;
+	/** A spec, doc or thread backing the intent. */
+	intentRef?: string;
+}
+
 export async function claim(
 	orgId: string,
 	taskRef: string,
 	agentId: string,
-	leaseMinutes?: number,
+	options: ClaimOptions | number = {},
 ): Promise<ClaimResult> {
+	// The numeric form is the original signature. Kept because the tests and the
+	// demo fleet call it positionally, and widening a signature is not worth a
+	// mechanical rewrite of every call site.
+	const opts: ClaimOptions = typeof options === "number" ? { leaseMinutes: options } : options;
+	const leaseMinutes = opts.leaseMinutes;
 	const taskId = await resolveTaskId(orgId, taskRef);
 	const now = new Date();
 
@@ -248,7 +353,13 @@ export async function claim(
 		// violation after all.
 		const inserted = await tx
 			.insert(claims)
-			.values({ taskId, agentId, expiresAt })
+			.values({
+				taskId,
+				agentId,
+				expiresAt,
+				intent: opts.intent ?? null,
+				intentRef: opts.intentRef ?? null,
+			})
 			.onConflictDoNothing({
 				target: claims.taskId,
 				// `where`, not `targetWhere` — the latter is the onConflictDoUpdate
@@ -269,7 +380,11 @@ export async function claim(
 				taskId,
 				agentId,
 				type: "claimed",
-				payload: { expiresAt: expiresAt.toISOString() },
+				payload: {
+					expiresAt: expiresAt.toISOString(),
+					intent: opts.intent ?? null,
+					intentRef: opts.intentRef ?? null,
+				},
 			});
 			return { ok: true, taskId, title: task.title, expiresAt };
 		}

@@ -131,6 +131,20 @@ export const claims = pgTable(
 			.notNull()
 			.references(() => tasks.id),
 		agentId: text("agent_id").notNull(),
+		/**
+		 * Why this work is being done, in the claimant's own words.
+		 *
+		 * The event log already records what changed and when; what it could never
+		 * answer is why somebody started — the question asked six months later,
+		 * usually by whoever has to decide whether a change can be reverted.
+		 *
+		 * Attached to the claim rather than the task on purpose: one task can be
+		 * claimed three times for three different reasons, and the reason belongs
+		 * to the attempt, not to the ticket.
+		 */
+		intent: text("intent"),
+		/** A spec, design doc, thread or issue URL backing that intent. */
+		intentRef: text("intent_ref"),
 		claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
 		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 		releasedAt: timestamp("released_at", { withTimezone: true }),
@@ -143,6 +157,71 @@ export const claims = pgTable(
 		index("claims_expiry_idx").on(table.expiresAt).where(sql`${table.releasedAt} is null`),
 		index("claims_agent_idx").on(table.agentId),
 	],
+);
+
+/**
+ * Who is alive right now.
+ *
+ * Deliberately NOT a sixth MCP tool. Presence is a byproduct of the five calls an
+ * agent already makes — every one touches this row — so an agent cannot forget to
+ * report, does not opt in, and spends no extra tokens being visible. A heartbeat
+ * tool was the obvious design and would have made every agent pay, on every turn,
+ * for the dashboard's benefit.
+ *
+ * Liveness is computed at read time from `lastSeenAt` rather than stored as an
+ * online flag, because a flag needs somebody to clear it and the agent that
+ * crashed is precisely the one that will not.
+ */
+export const agentPresence = pgTable(
+	"agent_presence",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		agentId: text("agent_id").notNull(),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+		lastAction: text("last_action"),
+		currentTaskId: uuid("current_task_id"),
+		firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("presence_org_agent_idx").on(table.orgId, table.agentId),
+		index("presence_org_seen_idx").on(table.orgId, table.lastSeenAt),
+	],
+);
+
+/**
+ * An agent process Slip started, as opposed to one that merely connected.
+ *
+ * Slip does not own an execution sandbox and this is not the beginning of one. A
+ * run is a child process on the host running the server, wired to Slip's own MCP
+ * endpoint — enough to launch work from the dashboard on a laptop or a single
+ * box, and deliberately not enough to run somebody else's code. Multi-tenant
+ * execution needs an isolation boundary bought from Modal or Daytona, not a
+ * spawn() call, and pretending otherwise is how you ship an RCE.
+ */
+export const runs = pgTable(
+	"runs",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		taskId: uuid("task_id").references(() => tasks.id),
+		agentId: text("agent_id").notNull(),
+		/** Which binary was launched: "claude-code" | "codex". */
+		runtime: text("runtime").notNull(),
+		prompt: text("prompt").notNull(),
+		status: text("status").notNull().default("starting"),
+		pid: text("pid"),
+		exitCode: text("exit_code"),
+		/** Combined stdout/stderr, bounded. Not a log pipeline. */
+		output: text("output").notNull().default(""),
+		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+		endedAt: timestamp("ended_at", { withTimezone: true }),
+	},
+	(table) => [index("runs_org_started_idx").on(table.orgId, table.startedAt)],
 );
 
 /**

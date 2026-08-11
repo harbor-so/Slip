@@ -21,7 +21,7 @@ import {
 let orgId: string;
 
 beforeEach(async () => {
-	await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 	const [org] = await db.insert(orgs).values({ name: "Connector Test Org" }).returning();
 	if (!org) throw new Error("Test org was not created.");
 	orgId = org.id;

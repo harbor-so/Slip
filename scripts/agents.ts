@@ -47,6 +47,16 @@ const DISCOVERED_WORK = [
 	{ title: "Log lines lose the request id inside worker threads", project: "infra", scope: "infra/logging/**" },
 ];
 
+/** Why an agent says it is taking a task. Populates the intent field. */
+const INTENTS = [
+	"Blocking three support tickets; fix before the Friday release.",
+	"Root cause of the p99 spike we saw in the incident on Tuesday.",
+	"Prerequisite for the billing migration — has to land first.",
+	"Reported twice this week; cheap to fix now, expensive later.",
+	"Cleanup the auth refactor left behind; no behaviour change intended.",
+	"Customer escalation from the enterprise pilot.",
+];
+
 const WORK_NOTES = [
 	"Added a regression test and made the failure deterministic.",
 	"Narrowed the lock to the critical section; contention gone.",
@@ -122,7 +132,12 @@ async function runAgent(agentId: string): Promise<{ claimed: number; blocked: nu
 			const result = text(
 				await client.callTool({
 					name: "claim",
-					arguments: { task_id: target, agent_id: agentId, lease_minutes: 2 },
+					arguments: {
+						task_id: target,
+						agent_id: agentId,
+						lease_minutes: 2,
+						intent: pick(INTENTS),
+					},
 				}),
 			);
 

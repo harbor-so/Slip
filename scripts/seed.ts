@@ -16,7 +16,7 @@ const now = new Date();
 // missed `users`, `connectors` and `digests`, so re-seeding any database where
 // somebody had signed in or run `npm run demo` failed with a foreign-key
 // violation (23503) on the orgs delete.
-await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+await sql`truncate table runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 const [org] = await db.insert(orgs).values({ name: "Acme Corp" }).returning();
 const orgId = org!.id;

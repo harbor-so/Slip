@@ -29,6 +29,7 @@ import {
 	release,
 	renewClaim,
 	SlipError,
+	touchPresence,
 } from "../lib/work.js";
 
 export interface ToolContext {
@@ -80,7 +81,10 @@ export const tools: ToolDefinition[] = [
 			"agent already holds it you get told who and when their lease expires, and you " +
 			"should pick different work rather than proceed. Claims expire automatically " +
 			"(default 30 minutes) so a crashed agent never locks a task forever — call " +
-			"renew_claim if the work runs long.",
+			"renew_claim if the work runs long. Always pass `intent`: one sentence on why " +
+			"you are doing this. Other agents see it before they pick adjacent work, and it " +
+			"is what the team reads months later when deciding whether a change can be " +
+			"reverted.",
 		schema: {
 			task_id: z.string().max(64).describe("Task id as shown in list_work, e.g. 'a1b2'"),
 			agent_id: z
@@ -88,14 +92,23 @@ export const tools: ToolDefinition[] = [
 				.max(128)
 				.describe("Stable identifier for you, e.g. 'claude-code:worktree-3'"),
 			lease_minutes: z.number().int().positive().max(480).optional().describe("Default 30, max 480"),
+			intent: z
+				.string()
+				.max(500)
+				.optional()
+				.describe("One sentence: why this work, and what outcome you are after"),
+			intent_ref: z
+				.string()
+				.max(500)
+				.optional()
+				.describe("Optional link to a spec, design doc, thread or issue"),
 		},
 		run: async (ctx, args) => {
-			const result = await claim(
-				ctx.orgId,
-				args.task_id as string,
-				args.agent_id as string,
-				args.lease_minutes as number | undefined,
-			);
+			const result = await claim(ctx.orgId, args.task_id as string, args.agent_id as string, {
+				leaseMinutes: args.lease_minutes as number | undefined,
+				intent: args.intent as string | undefined,
+				intentRef: args.intent_ref as string | undefined,
+			});
 			const remaining = result.expiresAt.getTime() - Date.now();
 
 			if (result.ok) {
