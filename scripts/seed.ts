@@ -12,12 +12,11 @@ import { hashApiKey, mintApiKey } from "../src/lib/keys.js";
 
 const now = new Date();
 
-await db.delete(events);
-await db.delete(claims);
-await db.delete(tasks);
-await db.delete(projects);
-await db.delete(apiKeys);
-await db.delete(orgs);
+// TRUNCATE CASCADE, matching every other reset in the repo. Ordered DELETEs
+// missed `users`, `connectors` and `digests`, so re-seeding any database where
+// somebody had signed in or run `npm run demo` failed with a foreign-key
+// violation (23503) on the orgs delete.
+await sql`truncate table events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 
 const [org] = await db.insert(orgs).values({ name: "Acme Corp" }).returning();
 const orgId = org!.id;

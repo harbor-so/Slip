@@ -4,11 +4,15 @@
  * Same tools, same code path — this file only swaps how bytes move. The org
  * comes from SLIP_API_KEY in the environment rather than a header, because a
  * stdio server has no request to carry one.
+ *
+ * Imports `buildServer` from build.ts, never from server.ts: importing server.ts
+ * would run its listen-and-log block, and a banner on stdout corrupts the
+ * JSON-RPC channel this transport is speaking on.
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { orgIdForKey } from "../lib/auth.js";
-import { buildServer } from "./server.js";
+import { buildServer } from "./build.js";
 
 const orgId = await orgIdForKey(process.env.SLIP_API_KEY);
 if (!orgId) {

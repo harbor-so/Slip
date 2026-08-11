@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../../../db/index.js";
@@ -5,20 +6,50 @@ import { orgs, users } from "../../../../db/schema.js";
 import { oauthConfigured, sessionCookie, signSession } from "../../../../lib/session.js";
 
 /**
- * Exchange the code, then find or create the user.
+ * Who is allowed to become a member on first sign-in.
  *
- * A first-time signer-in joins the first org rather than creating one. For a
- * single-tenant pilot that is correct and invisible; when Slip has more than one
- * customer this is the line that has to become a real invitation flow, and it is
- * called out here so it is found rather than discovered.
+ * This gate did not exist, and its absence was the most serious hole in the
+ * product: any GitHub user on the internet who reached the deployed URL was
+ * inserted into the first org and could then mint a permanent MCP API key from
+ * the dashboard. Completing GitHub OAuth is unauthenticated by design, so
+ * nothing upstream was stopping them.
+ *
+ * An allowlist rather than an invitations table because a pilot has one team and
+ * a table is a schema, a UI and an email flow to maintain. An empty allowlist in
+ * production is a refusal, never an open door — the failure mode of getting that
+ * backwards is the hole this closes.
  */
+function allowedLogins(): Set<string> {
+	return new Set(
+		(process.env.SLIP_ALLOWED_GITHUB_LOGINS ?? "")
+			.split(",")
+			.map((login) => login.trim().toLowerCase())
+			.filter(Boolean),
+	);
+}
+
+function statesMatch(a: string | undefined, b: string | undefined): boolean {
+	if (!a || !b) return false;
+	const left = Buffer.from(a);
+	const right = Buffer.from(b);
+	return left.length === right.length && timingSafeEqual(left, right);
+}
+
 export async function GET(request: Request) {
 	if (!oauthConfigured()) {
 		return NextResponse.json({ error: "GitHub OAuth is not configured." }, { status: 503 });
 	}
 
-	const code = new URL(request.url).searchParams.get("code");
+	const url = new URL(request.url);
+	const code = url.searchParams.get("code");
 	if (!code) return NextResponse.redirect(new URL("/", request.url));
+
+	// Reject a callback that did not start at /api/auth/login.
+	const cookieHeader = request.headers.get("cookie") ?? "";
+	const cookieState = /(?:^|;\s*)slip_oauth_state=([^;]+)/.exec(cookieHeader)?.[1];
+	if (!statesMatch(url.searchParams.get("state") ?? undefined, cookieState)) {
+		return NextResponse.json({ error: "Invalid OAuth state." }, { status: 400 });
+	}
 
 	const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
 		method: "POST",
@@ -45,7 +76,7 @@ export async function GET(request: Request) {
 		name?: string;
 		email?: string;
 	};
-	if (!profile.id) {
+	if (!profile.id || !profile.login) {
 		return NextResponse.json({ error: "Could not read GitHub profile." }, { status: 401 });
 	}
 
@@ -53,6 +84,18 @@ export async function GET(request: Request) {
 	let user = await db.query.users.findFirst({ where: eq(users.githubId, githubId) });
 
 	if (!user) {
+		const allowed = allowedLogins();
+		if (!allowed.has(profile.login.toLowerCase())) {
+			return NextResponse.json(
+				{
+					error:
+						"This GitHub account is not authorised for this Slip instance. "
+						+ "Ask an administrator to add it to SLIP_ALLOWED_GITHUB_LOGINS.",
+				},
+				{ status: 403 },
+			);
+		}
+
 		const [org] = await db.select().from(orgs).orderBy(asc(orgs.createdAt)).limit(1);
 		if (!org) {
 			return NextResponse.json(
@@ -65,7 +108,7 @@ export async function GET(request: Request) {
 			.values({
 				orgId: org.id,
 				githubId,
-				name: profile.name ?? profile.login ?? null,
+				name: profile.name ?? profile.login,
 				email: profile.email ?? null,
 			})
 			.returning();
@@ -73,5 +116,6 @@ export async function GET(request: Request) {
 
 	const response = NextResponse.redirect(new URL("/", request.url));
 	response.cookies.set(sessionCookie.name, signSession(user!.id), sessionCookie.options);
+	response.cookies.delete("slip_oauth_state");
 	return response;
 }

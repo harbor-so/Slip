@@ -182,3 +182,139 @@ describe("listWork and createTask", () => {
 		expect(await listWork(orgId, { status: "open" })).toHaveLength(2);
 	});
 });
+
+/**
+ * The races that a five-agent review reproduced 39 times out of 40.
+ *
+ * These are regression tests for lost updates in `release` and `renewClaim`. The
+ * shape is always the same: agent A's lease has lapsed but A is still working;
+ * agent B claims the task legitimately; A then finishes and reports. Before the
+ * `FOR UPDATE` lock, A's write landed anyway — so the task read as completed,
+ * A's summary went into the weekly digest as shipped work, and B was left holding
+ * a live claim on a task the product had already declared done.
+ *
+ * The precondition is ordinary, not adversarial: a thirty-minute lease running
+ * out on a job that took longer.
+ */
+describe("lost updates against a concurrent claim", () => {
+	async function lapsedClaimHeldBy(agentId: string) {
+		await claim(orgId, taskId, agentId, 1);
+		await db
+			.update(claims)
+			.set({ expiresAt: new Date(Date.now() - 60_000) })
+			.where(and(eq(claims.taskId, taskId), isNull(claims.releasedAt)));
+	}
+
+	it("refuses a release once another agent has taken the lapsed lease", async () => {
+		await lapsedClaimHeldBy("agent-a");
+
+		const [, releaseOutcome] = await Promise.allSettled([
+			claim(orgId, taskId, "agent-b"),
+			release(orgId, taskId, "agent-a", "I finished it, honest."),
+		]);
+
+		const active = await db.query.claims.findMany({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		const task = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+
+		// The invariant is order-independent, which matters because both orderings
+		// are legitimate: if A releases before B claims, A's release is valid and B
+		// simply takes an open task. What must never happen is B holding a live
+		// claim while the task reads `completed` from A's summary — that is the
+		// state where the digest reports abandoned work as shipped and B is working
+		// on something the product has already declared done.
+		const corrupted =
+			active.length === 1 && active[0]!.agentId === "agent-b" && task!.status === "completed";
+		expect(corrupted, "B holds the task but A's release marked it completed").toBe(false);
+		expect(active.length).toBeLessThanOrEqual(1);
+		if (releaseOutcome.status === "rejected") {
+			expect(String(releaseOutcome.reason)).toMatch(/taken by another agent|not currently claimed/);
+		}
+	});
+
+	it("refuses a renew once another agent has taken the lapsed lease", async () => {
+		await lapsedClaimHeldBy("agent-a");
+
+		const [, renewOutcome] = await Promise.allSettled([
+			claim(orgId, taskId, "agent-b"),
+			renewClaim(orgId, taskId, "agent-a", 480),
+		]);
+
+		const active = await db.query.claims.findMany({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		expect(active).toHaveLength(1);
+		// A's renew must never extend a lease that now belongs to B. An 8-hour
+		// expiry on B's claim is the fingerprint of the lost update.
+		if (active[0]!.agentId === "agent-b") {
+			expect(
+				active[0]!.expiresAt.getTime(),
+				"A's renew extended B's lease",
+			).toBeLessThan(Date.now() + 60 * 60_000);
+		}
+		if (renewOutcome.status === "rejected") {
+			expect(String(renewOutcome.reason)).toMatch(/taken by another agent|held by|No task matching|no active claim/);
+		}
+	});
+
+	it("never lets two agents hold one task across 30 interleaved rounds", async () => {
+		for (let round = 0; round < 30; round += 1) {
+			await sql`truncate table events, claims cascade`;
+			await db.update(tasks).set({ status: "open" }).where(eq(tasks.id, taskId));
+			await lapsedClaimHeldBy("agent-a");
+
+			await Promise.allSettled([
+				claim(orgId, taskId, "agent-b"),
+				release(orgId, taskId, "agent-a", "done"),
+				renewClaim(orgId, taskId, "agent-a", 60),
+			]);
+
+			const active = await db.query.claims.findMany({
+				where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+			});
+			const task = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+			expect(active.length, `round ${round}: two live claims`).toBeLessThanOrEqual(1);
+			const corrupted =
+				active.length === 1 && active[0]!.agentId === "agent-b" && task!.status === "completed";
+			expect(corrupted, `round ${round}: B holds a task marked completed by A`).toBe(false);
+		}
+	});
+});
+
+describe("resolveTaskId hardening", () => {
+	it("refuses LIKE wildcards and the empty string instead of matching everything", async () => {
+		for (const bad of ["", "%", "_", "____", "%%", "zzzz!"]) {
+			await expect(claim(orgId, bad, "agent-a"), `input ${JSON.stringify(bad)}`).rejects.toThrow(
+				/not a task id|No task matching/,
+			);
+		}
+	});
+
+	it("still accepts a real short id and a full uuid", async () => {
+		expect((await claim(orgId, taskId.replace(/-/g, "").slice(0, 4), "agent-a")).ok).toBe(true);
+		await release(orgId, taskId, "agent-a");
+		expect((await claim(orgId, taskId, "agent-b")).ok).toBe(true);
+	});
+});
+
+describe("cross-tenant writes", () => {
+	it("refuses to renew another org's claim even with its exact task uuid", async () => {
+		const [other] = await db.insert(orgs).values({ name: "Victim Org" }).returning();
+		const [victimTask] = await db
+			.insert(tasks)
+			.values({ orgId: other!.id, title: "Rotate production keys", status: "open" })
+			.returning();
+		await claim(other!.id, victimTask!.id, "victim-agent", 5);
+
+		// The attacker holds a valid key for their own org and the victim's task id.
+		await expect(renewClaim(orgId, victimTask!.id, "victim-agent", 480)).rejects.toThrow(
+			/No task matching/,
+		);
+
+		const held = await db.query.claims.findFirst({
+			where: and(eq(claims.taskId, victimTask!.id), isNull(claims.releasedAt)),
+		});
+		expect(held!.expiresAt.getTime()).toBeLessThan(Date.now() + 30 * 60_000);
+	});
+});

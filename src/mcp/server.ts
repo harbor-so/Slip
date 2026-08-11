@@ -19,48 +19,26 @@
  */
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import express, { type Request, type Response } from "express";
 import { orgIdForKey } from "../lib/auth.js";
 import { sweepExpiredClaims } from "../lib/work.js";
-import { toToolError, tools } from "./tools.js";
+import { buildServer } from "./build.js";
+import { tools } from "./tools.js";
 
-const PORT = Number(process.env.PORT ?? 8787);
+export { buildServer };
+
+/**
+ * The port every doc, the Settings page and scripts/agents.ts already name.
+ *
+ * This was 8787 while six other references said 8788 and nothing set PORT, so
+ * the documented happy path — `npm run mcp`, paste the Settings snippet — was
+ * ECONNREFUSED on the first tool call. Exported so the other call sites derive
+ * from it instead of restating it.
+ */
+export const DEFAULT_MCP_PORT = 8788;
+const PORT = Number(process.env.PORT ?? DEFAULT_MCP_PORT);
 const SWEEP_INTERVAL_MS = 60_000;
 
-export function buildServer(orgId: string): McpServer {
-	const server = new McpServer(
-		{ name: "slip", version: "0.1.0" },
-		{
-			instructions:
-				"Slip coordinates multiple coding agents working the same backlog. Before " +
-				"starting any work call list_work to see what is already claimed, then claim " +
-				"the task you intend to do. Release it when you finish, with a summary.",
-		},
-	);
-
-	for (const tool of tools) {
-		server.registerTool(
-			tool.name,
-			{ description: tool.description, inputSchema: tool.schema },
-			async (args: Record<string, unknown>) => {
-				try {
-					return { content: [{ type: "text" as const, text: await tool.run({ orgId }, args) }] };
-				} catch (error) {
-					// Returned as content with isError rather than thrown: the model has to
-					// read "that task is held by someone else" and choose differently, and a
-					// protocol-level exception is not something it can reason about.
-					return {
-						content: [{ type: "text" as const, text: toToolError(error) }],
-						isError: true,
-					};
-				}
-			},
-		);
-	}
-
-	return server;
-}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -107,7 +85,11 @@ app.all("/mcp", async (req: Request, res: Response) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-	app.listen(PORT, () => {
+	// Loopback by default. The previous `listen(PORT)` bound every interface, which
+	// on a laptop on a shared network exposes an endpoint whose only auth is a
+	// bearer token, to anyone who can reach the host. Set HOST=0.0.0.0 to publish
+	// it deliberately.
+	app.listen(PORT, process.env.HOST ?? "127.0.0.1", () => {
 		console.log(`slip mcp on http://localhost:${PORT}/mcp`);
 		console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
 	});

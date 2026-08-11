@@ -11,16 +11,15 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "mcp": "tsx src/mcp/server.ts",
-    "mcp:stdio": "tsx src/mcp/stdio.ts",
+    "mcp": "tsx --env-file-if-exists=.env src/mcp/server.ts",
+    "mcp:stdio": "tsx --env-file-if-exists=.env src/mcp/stdio.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed": "tsx scripts/seed.ts",
-    "sweep": "tsx scripts/sweep.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=.env scripts/seed.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "demo": "tsx scripts/demo.ts",
-    "demo:agents": "tsx scripts/agents.ts"
+    "demo": "tsx --env-file-if-exists=.env scripts/demo.ts",
+    "demo:agents": "tsx --env-file-if-exists=.env scripts/agents.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

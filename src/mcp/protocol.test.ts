@@ -206,12 +206,22 @@ describe("tools/call", () => {
 
 	it("surfaces a user error as isError content rather than a thrown protocol error", async () => {
 		const client = await connect(apiKey);
-		const result = await client.callTool({
+		// "zzzz" is not hex, so it is now rejected by shape before it ever reaches a
+		// LIKE pattern — a strictly better message than the old "No task matching".
+		const badShape = await client.callTool({
 			name: "release",
 			arguments: { task_id: "zzzz", agent_id: "nobody" },
 		});
-		expect(result.isError).toBe(true);
-		expect(textOf(result)).toMatch(/No task matching/);
+		expect(badShape.isError).toBe(true);
+		expect(textOf(badShape)).toMatch(/not a task id/);
+
+		// A well-formed id that simply does not exist still reports the miss.
+		const missing = await client.callTool({
+			name: "release",
+			arguments: { task_id: "beef", agent_id: "nobody" },
+		});
+		expect(missing.isError).toBe(true);
+		expect(textOf(missing)).toMatch(/No task matching/);
 		await client.close();
 	});
 

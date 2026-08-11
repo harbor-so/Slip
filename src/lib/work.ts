@@ -50,9 +50,25 @@ function leaseExpiry(minutes: number | undefined, now: Date): Date {
  * prefix is an error rather than a best guess: claiming the wrong task is worse
  * than being told to be more specific.
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SHORT_ID = /^[0-9a-f]{4,32}$/;
+
 export async function resolveTaskId(orgId: string, ref: string): Promise<string> {
 	const cleaned = ref.trim().replace(/^\[|\]$/g, "").toLowerCase();
-	if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(cleaned)) return cleaned;
+	if (UUID.test(cleaned)) return cleaned;
+
+	// Validate the shape before it reaches a LIKE pattern. `%` and `_` are
+	// wildcards there, so an empty string or a bare `%` used to match every task
+	// in the org and — with exactly one open task — resolve to it silently. The
+	// result was that a model hallucinating an empty task_id would claim or
+	// complete an arbitrary task instead of getting the "be more specific" error
+	// this function promises. Not injection; the fragment binds a parameter. Worse
+	// than injection in practice, because it looked like success.
+	if (!SHORT_ID.test(cleaned)) {
+		throw new SlipError(
+			`"${ref}" is not a task id. Use the four-character id shown in list_work, e.g. a1b2.`,
+		);
+	}
 
 	const matches = await db
 		.select({ id: tasks.id })
@@ -85,6 +101,34 @@ export async function resolveTaskId(orgId: string, ref: string): Promise<string>
  * never depends on a background job being alive; the sweeper only exists to keep
  * the event log timely.
  */
+/**
+ * Read the active claim for a task and hold a row lock until the transaction ends.
+ *
+ * `release` and `renew` used to read this with a plain `findFirst` and then write
+ * keyed on the claim's primary key alone. Under READ COMMITTED that loses
+ * updates: a concurrent `claim()` expires the lapsed row, inserts a fresh one for
+ * a different agent, and the first transaction's blocked UPDATE re-evaluates its
+ * predicate, still matches on primary key, and lands anyway. The result was the
+ * one outcome this product exists to prevent — two agents working the same task,
+ * with the loser's summary recorded as shipped work in the weekly digest.
+ *
+ * The precondition is not adversarial. It is an agent whose thirty-minute lease
+ * lapsed while it was still working, which is the ordinary case.
+ *
+ * `FOR UPDATE` serialises the second transaction behind the first, so by the time
+ * it reads, the row it locked is the row that actually exists. `claim()` already
+ * had this discipline via the unique index; these two never got it.
+ */
+async function lockActiveClaim(tx: Executor, taskId: string) {
+	const [row] = await tx
+		.select()
+		.from(claims)
+		.where(and(eq(claims.taskId, taskId), isNull(claims.releasedAt)))
+		.for("update")
+		.limit(1);
+	return row;
+}
+
 async function expireStaleClaims(
 	tx: Executor,
 	now: Date,
@@ -280,9 +324,7 @@ export async function release(
 		});
 		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
 
-		const held = await tx.query.claims.findFirst({
-			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
-		});
+		const held = await lockActiveClaim(tx, taskId);
 		if (!held) throw new SlipError(`Task [${taskRef}] is not currently claimed.`);
 		// Releasing somebody else's claim is refused rather than allowed-with-a-warning:
 		// a confused agent freeing another agent's in-flight work is the exact
@@ -294,10 +336,22 @@ export async function release(
 		}
 
 		const completed = Boolean(completionSummary?.trim());
-		await tx
+		// `isNull(releasedAt)` stays in the WHERE even though the row was just
+		// locked and read. Belt and braces on the one write that decides whether a
+		// piece of work counts as shipped: if the predicate ever stops holding, the
+		// zero-row check below turns it into a refusal instead of a lost update.
+		const updated = await tx
 			.update(claims)
 			.set({ releasedAt: now, completionSummary: completionSummary ?? null })
-			.where(eq(claims.id, held.id));
+			.where(and(eq(claims.id, held.id), isNull(claims.releasedAt)))
+			.returning({ id: claims.id });
+		if (updated.length === 0) {
+			throw new SlipError(
+				`Task [${taskRef}] was taken by another agent while you were working. `
+					+ "Stop work on it; nothing was recorded.",
+			);
+		}
+
 		await tx
 			.update(tasks)
 			.set({ status: completed ? "completed" : "open", updatedAt: now })
@@ -324,9 +378,17 @@ export async function renewClaim(
 	const now = new Date();
 
 	return db.transaction(async (tx) => {
-		const held = await tx.query.claims.findFirst({
-			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		// Load the task scoped to the org before touching the claim. Without this,
+		// a caller holding one org's API key could renew another org's lease simply
+		// by passing that task's UUID — `resolveTaskId` short-circuits full UUIDs
+		// without a database round trip, so nothing else in this path would have
+		// noticed. claim() and release() already load the task; renew never did.
+		const task = await tx.query.tasks.findFirst({
+			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
 		});
+		if (!task) throw new SlipError(`No task matching "${taskRef}".`);
+
+		const held = await lockActiveClaim(tx, taskId);
 		if (!held) throw new SlipError(`Task [${taskRef}] has no active claim to renew.`);
 		if (held.agentId !== agentId) {
 			throw new SlipError(`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}.`);
@@ -335,7 +397,17 @@ export async function renewClaim(
 		// row survives: the agent is demonstrably alive and mid-flight, and handing
 		// its work to someone else because a heartbeat was late helps nobody.
 		const expiresAt = leaseExpiry(leaseMinutes, now);
-		await tx.update(claims).set({ expiresAt }).where(eq(claims.id, held.id));
+		const renewed = await tx
+			.update(claims)
+			.set({ expiresAt })
+			.where(and(eq(claims.id, held.id), isNull(claims.releasedAt)))
+			.returning({ id: claims.id });
+		if (renewed.length === 0) {
+			throw new SlipError(
+				`Task [${taskRef}] was taken by another agent. Stop work on it.`,
+			);
+		}
+
 		await tx.insert(events).values({
 			orgId,
 			taskId,

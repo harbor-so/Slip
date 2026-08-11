@@ -34,8 +34,43 @@ export interface Session {
 	unauthenticated: boolean;
 }
 
+const DEV_SECRET = "slip-dev-secret-not-for-production";
+const MIN_SECRET_LENGTH = 32;
+
+/**
+ * The HMAC key for session cookies.
+ *
+ * This used to be `process.env.AUTH_SECRET ?? DEV_SECRET`, which is wrong twice.
+ * `??` does not catch the empty string, and `.env.example` shipped a bare
+ * `AUTH_SECRET=` — so the common case was signing with the empty key, which any
+ * reader of this public repo can reproduce byte for byte. Falling back to the
+ * constant is no better: it is also published here. A forged cookie is a full
+ * dashboard session, and the dashboard can mint permanent MCP credentials.
+ *
+ * So: in production a real secret is required and its absence is fatal at the
+ * first request rather than silently insecure. Outside production the dev
+ * constant is used, but only when the variable is genuinely unset — a short or
+ * blank value is a misconfiguration and is rejected everywhere.
+ */
 function secret(): string {
-	return process.env.AUTH_SECRET ?? "slip-dev-secret-not-for-production";
+	const configured = process.env.AUTH_SECRET?.trim();
+
+	if (configured) {
+		if (configured.length < MIN_SECRET_LENGTH) {
+			throw new Error(
+				`AUTH_SECRET must be at least ${MIN_SECRET_LENGTH} characters. `
+					+ "Generate one with: openssl rand -base64 32",
+			);
+		}
+		return configured;
+	}
+
+	if (process.env.NODE_ENV === "production") {
+		throw new Error(
+			"AUTH_SECRET is required in production. Generate one with: openssl rand -base64 32",
+		);
+	}
+	return DEV_SECRET;
 }
 
 /** `<userId>.<hmac>` — signed, not encrypted; it carries no secret of its own. */

@@ -49,11 +49,20 @@ export const tools: ToolDefinition[] = [
 			"List tasks and who is currently working on them. Call this BEFORE starting any " +
 			"work, so you do not duplicate something another agent has already claimed. " +
 			"Returns one short line per task: [id] title — status or holder — project. " +
-			"Optional filters: project name, and status (open, claimed, in_progress, " +
-			"completed). This is the only listing tool; there is no search.",
+			"Optional filters: project name, and status (open, claimed, completed). " +
+			"This is the only listing tool; there is no search.",
 		schema: {
-			project: z.string().optional().describe("Project name, e.g. 'backend'"),
-			status: z.string().optional().describe("open | claimed | in_progress | completed"),
+			project: z.string().max(120).optional().describe("Project name, e.g. 'backend'"),
+			// A closed enum, not a free string. `in_progress` used to be advertised
+			// here and is written by nothing, so an agent that filtered on it got
+			// "No tasks match." — which reads as "nobody is working on anything",
+			// the exact inversion of the truth, on the tool whose whole job is
+			// preventing duplicate work. An enum turns a near-miss into a -32602 the
+			// model self-corrects on instead of a silently empty list.
+			status: z
+				.enum(["open", "claimed", "completed"])
+				.optional()
+				.describe("Filter by status"),
 		},
 		run: async (ctx, args) => {
 			const rows = await listWork(ctx.orgId, {
@@ -73,11 +82,12 @@ export const tools: ToolDefinition[] = [
 			"(default 30 minutes) so a crashed agent never locks a task forever — call " +
 			"renew_claim if the work runs long.",
 		schema: {
-			task_id: z.string().describe("Task id as shown in list_work, e.g. 'a1b2'"),
+			task_id: z.string().max(64).describe("Task id as shown in list_work, e.g. 'a1b2'"),
 			agent_id: z
 				.string()
+				.max(128)
 				.describe("Stable identifier for you, e.g. 'claude-code:worktree-3'"),
-			lease_minutes: z.number().int().positive().optional().describe("Default 30, max 480"),
+			lease_minutes: z.number().int().positive().max(480).optional().describe("Default 30, max 480"),
 		},
 		run: async (ctx, args) => {
 			const result = await claim(
@@ -109,10 +119,11 @@ export const tools: ToolDefinition[] = [
 			"feeds the weekly team digest. Omit it if you are abandoning the work, which " +
 			"returns the task to open for another agent.",
 		schema: {
-			task_id: z.string().describe("Task id, e.g. 'a1b2'"),
-			agent_id: z.string().describe("The same agent_id you claimed with"),
+			task_id: z.string().max(64).describe("Task id, e.g. 'a1b2'"),
+			agent_id: z.string().max(128).describe("The same agent_id you claimed with"),
 			completion_summary: z
 				.string()
+				.max(2000)
 				.optional()
 				.describe("One or two sentences on what you actually changed"),
 		},
@@ -137,10 +148,10 @@ export const tools: ToolDefinition[] = [
 			"project is created if it does not exist. Set scope to where the work lives (a " +
 			"path or module) so other agents can see whether it overlaps theirs.",
 		schema: {
-			title: z.string().min(3).describe("Short imperative title"),
-			description: z.string().optional(),
+			title: z.string().min(3).max(200).describe("Short imperative title"),
+			description: z.string().max(4000).optional(),
 			project: z.string().optional().describe("Created on demand if new"),
-			scope: z.string().optional().describe("e.g. 'src/auth/**' or 'billing service'"),
+			scope: z.string().max(200).optional().describe("e.g. 'src/auth/**' or 'billing service'"),
 		},
 		run: async (ctx, args) => {
 			const created = await createTask(ctx.orgId, {
@@ -166,9 +177,9 @@ export const tools: ToolDefinition[] = [
 			"than expected. Call this before the lease expires; once it lapses another agent " +
 			"may take the task. Only the holder can renew.",
 		schema: {
-			task_id: z.string(),
-			agent_id: z.string(),
-			lease_minutes: z.number().int().positive().optional().describe("Default 30, max 480"),
+			task_id: z.string().max(64),
+			agent_id: z.string().max(128),
+			lease_minutes: z.number().int().positive().max(480).optional().describe("Default 30, max 480"),
 		},
 		run: async (ctx, args) => {
 			const result = await renewClaim(

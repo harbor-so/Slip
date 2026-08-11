@@ -30,7 +30,6 @@ export function cn(...inputs: ClassValue[]) {
 const TONES = {
 	open: "bg-muted text-muted-foreground",
 	claimed: "bg-primary/15 text-primary",
-	in_progress: "bg-primary/15 text-primary",
 	completed: "bg-success/15 text-success",
 	released: "bg-muted text-muted-foreground",
 	expired: "bg-destructive/10 text-destructive",
