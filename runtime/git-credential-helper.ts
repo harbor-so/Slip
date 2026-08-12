@@ -285,6 +285,15 @@ export interface HelperEnvironment {
 	sandboxId: string;
 	sessionId: string;
 	token: string;
+	/**
+	 * The fence, presented on every credential request.
+	 *
+	 * Authentication alone cannot catch the case fencing exists for: a sandbox whose
+	 * lease lapsed still holds a genuine token, and handing that box a push
+	 * credential is two agents pushing to one branch. The broker answers 409 for a
+	 * stale fence, and this helper treats that as final — see `fetchCredential`.
+	 */
+	fencingToken: string;
 	scmHost: string | undefined;
 	traceId: string | undefined;
 }
@@ -294,12 +303,18 @@ export function readHelperEnvironment(env: NodeJS.ProcessEnv): HelperEnvironment
 	const sandboxId = env.HARBOR_SANDBOX_ID ?? "";
 	const sessionId = env.HARBOR_SESSION_ID ?? "";
 	const token = env.HARBOR_SANDBOX_TOKEN ?? "";
-	if (controlUrl === "" || sandboxId === "" || token === "") return null;
+	const fencingToken = (env.HARBOR_FENCING_TOKEN ?? "").trim();
+	// A helper with no fence is a helper every call from which will be refused with
+	// a 409. Returning null here makes that one clear line on stderr at the first
+	// clone instead of an unexplained authentication failure on every git operation
+	// for the life of the box.
+	if (controlUrl === "" || sandboxId === "" || token === "" || fencingToken === "") return null;
 	return {
 		controlUrl,
 		sandboxId,
 		sessionId,
 		token,
+		fencingToken,
 		scmHost: env.HARBOR_SCM_HOST,
 		traceId: env.HARBOR_TRACE_ID,
 	};
@@ -323,6 +338,7 @@ export async function fetchCredential(
 	const headers: Record<string, string> = {
 		authorization: `Bearer ${environment.token}`,
 		"content-type": "application/json",
+		"x-harbor-fencing-token": environment.fencingToken,
 		[correlationHeader("sandbox_id")]: environment.sandboxId,
 	};
 	if (environment.sessionId !== "") headers[correlationHeader("session_id")] = environment.sessionId;
@@ -346,7 +362,12 @@ export async function fetchCredential(
 	// is upstream and transient, and giving up on it turns a thirty-second GitHub
 	// blip into a session that cannot push. Collapsing them is how a helper ends up
 	// either hammering a permanent 403 or abandoning a recoverable outage.
+	// 403 is a policy decision about this repository; 409 is a verdict about this
+	// box. Both are final and neither should be retried, but they are kept apart
+	// because the operator's next move differs: widen the installation, versus
+	// accept that this sandbox has been superseded and stop.
 	if (response.status === 403) return { kind: "refused" };
+	if (response.status === 409) return { kind: "superseded" };
 	if (!response.ok) return { kind: "failed", status: response.status };
 
 	const body = (await response.json()) as Record<string, unknown>;
@@ -368,6 +389,7 @@ export async function fetchCredential(
 export type BrokerResult =
 	| { kind: "minted"; credential: BrokeredCredential }
 	| { kind: "refused" }
+	| { kind: "superseded" }
 	| { kind: "failed"; status: number };
 
 /**
@@ -441,6 +463,13 @@ export async function runHelper(
 		return { stdout: "", note: "credential.broker_unreachable" };
 	}
 	if (result.kind === "refused") return { stdout: "", note: "credential.broker_refused" };
+	if (result.kind === "superseded") {
+		// The fence was rejected: this box's lease lapsed and another agent has
+		// legitimately taken the work. Drop the cache so nothing already minted can be
+		// replayed for the rest of its window.
+		clearCache(path);
+		return { stdout: "", note: "credential.fence_superseded" };
+	}
 	if (result.kind === "failed") {
 		return { stdout: "", note: `credential.broker_failed status=${result.status}` };
 	}

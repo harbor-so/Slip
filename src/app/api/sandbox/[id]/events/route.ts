@@ -6,7 +6,7 @@ import { SANDBOX_EVENT_TYPES } from "../../../../../contracts/index.js";
 import { db } from "../../../../../db/index.js";
 import { sandboxes } from "../../../../../db/schema.js";
 import { assertNever } from "../../../../../sandbox/decisions.js";
-import { validateFence } from "../../../../../sandbox/manager.js";
+import { markSandboxReady, validateFence } from "../../../../../sandbox/manager.js";
 import { appendEvents } from "../../../../../lib/session-events.js";
 import {
 	authenticateSandbox,
@@ -40,6 +40,9 @@ import {
  *     the model being incoherent rather than as two writers.
  */
 export const dynamic = "force-dynamic";
+
+/** The shape `session_prompts.id` has, checked before a payload value reaches it. */
+const PROMPT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The ceiling on one ingest body.
@@ -260,6 +263,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 	}> = [];
 	let ignored = 0;
 	const finishes: Array<{ outcome: "completed" | "failed"; payload: Record<string, unknown> }> = [];
+	let readyReport: { bootMode: string | null } | null = null;
 
 	for (const event of events) {
 		// An unrecognised type is counted and skipped rather than failing the batch.
@@ -292,12 +296,36 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
 		appendable.push({ type: timelineType, payload, actor: "agent" });
 
+		// `boot_ready` is the only event in the batch that carries a *lifecycle*
+		// transition and not just a timeline entry, and it has to be applied to the
+		// sandbox row rather than merely recorded. Without it nothing anywhere writes
+		// `sandboxes.ready_at`, so `evaluateConnectingTimeout` still sees a box that
+		// has never said hello — and `onConnectingTimeout` reaps every healthy sandbox
+		// in the fleet exactly `sandboxBootTimeoutMs` after it was created, mid-turn,
+		// reporting `boot_timeout` for a box that booted successfully minutes earlier.
+		if (event.type === "boot_ready") {
+			const mode = (event.payload as { mode?: unknown } | undefined)?.mode;
+			readyReport = { bootMode: typeof mode === "string" ? mode : null };
+		}
+
 		if (event.type === "agent_finished" || event.type === "agent_failed") {
 			finishes.push({
 				outcome: event.type === "agent_finished" ? "completed" : "failed",
 				payload,
 			});
 		}
+	}
+
+	// Applied before the batch is appended so that a box which reports ready and
+	// then immediately streams output cannot be reaped by a sweep running between
+	// the two writes. `announce: false` because the `sandbox_ready` entry is already
+	// in `appendable`, carrying the bridge's own boot payload.
+	if (readyReport !== null) {
+		await markSandboxReady(auth.sandbox.id, {
+			now,
+			bootMode: readyReport.bootMode,
+			announce: false,
+		});
 	}
 
 	const appended = await appendEvents({
@@ -310,10 +338,28 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 	// puts `prompt_finished` at a lower seq than the agent's last sentence, so a
 	// client that stops rendering at the finish marker loses the end of the answer.
 	for (const finish of finishes) {
+		// The prompt is NAMED, never inferred. `completeTurn` falls back to the oldest
+		// in-flight prompt when it is not told which one, and that fallback closes the
+		// wrong turn under two ordinary conditions: a batch re-sent after its response
+		// was lost (the POST committed, the bridge never saw the 200, and the retry's
+		// `agent_finished` would then finish whatever prompt is running *now*), and a
+		// session with a second prompt already delivered behind the one that just
+		// ended. The visible failure is a running turn marked completed, its lease
+		// handed back, and the answer that arrives afterwards closing yet another
+		// prompt. Naming it makes the retry an exact no-op instead: the named row is no
+		// longer `delivered`, so nothing matches.
+		// Shape-checked before it reaches a `uuid` column: the payload is written by
+		// the sandbox, and a non-uuid there would raise `invalid input syntax for type
+		// uuid` and turn an authenticated caller's typo into a 500. A malformed id
+		// falls back to the oldest in-flight prompt, which is what this endpoint did
+		// for every event before this change.
+		const promptId = finish.payload.prompt_id;
+		const namedPrompt = typeof promptId === "string" && PROMPT_UUID.test(promptId);
 		await completeTurn({
 			orgId: auth.sandbox.orgId,
 			sessionId: auth.sandbox.sessionId,
 			outcome: finish.outcome,
+			...(namedPrompt ? { promptId: promptId as string } : {}),
 			detail: { sandbox_id: auth.sandbox.id, trace_id: finish.payload.trace_id ?? null },
 			now,
 		});

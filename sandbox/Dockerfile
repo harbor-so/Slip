@@ -38,6 +38,10 @@ COPY runtime ./runtime
 COPY src/contracts ./src/contracts
 COPY src/activity ./src/activity
 COPY src/config.ts ./src/config.ts
+# Type-only, and it is here for exactly that: the activity normalizers import
+# `ActivityKind` from the schema. `import type` is erased in the emit, so no
+# drizzle-orm reaches the shipped image — but the compiler still has to resolve it.
+COPY src/db/schema.ts ./src/db/schema.ts
 
 # NodeNext resolution, so `./adapters/index.js` in the source resolves to
 # `adapters/index.ts` at compile time and stays `./adapters/index.js` in the emit —
@@ -61,7 +65,13 @@ RUN cat > tsconfig.sandbox.json <<'EOF'
   "exclude": ["**/*.test.ts"]
 }
 EOF
+# The schema's emit is deleted rather than kept. Nothing imports it at runtime —
+# every reference to it is `import type`, which tsc erases — so shipping the
+# compiled file would put the one module that pulls in drizzle-orm into an image
+# with no node_modules, where loading it throws. Deleting it makes "no database
+# driver in the sandbox" true of the filesystem and not just of the call graph.
 RUN npx tsc -p tsconfig.sandbox.json \
+	&& rm -rf dist/src/db \
 	&& printf '{"type":"module"}\n' > dist/package.json
 
 # ---------------------------------------------------------------------------
@@ -150,7 +160,7 @@ ENV HARBOR_WORKSPACE_ROOT=/workspace \
 	NODE_ENV=production \
 	NO_COLOR=1 \
 	GIT_TERMINAL_PROMPT=0 \
-	PATH=/usr/local/bin:/usr/bin:/bin:/home/harbor/.local/bin
+	PATH=/home/harbor/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # `tini` as PID 1. Without an init, the supervisor inherits every orphaned child an
 # agent leaves behind — a dev server, a watcher, a package manager — and those

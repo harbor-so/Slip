@@ -25,7 +25,7 @@
  */
 
 import { and, eq, isNull, lte, or, sql as raw } from "drizzle-orm";
-import { db } from "../db/index.js";
+import { db, sql } from "../db/index.js";
 import { automationRuns, automations, sessions } from "../db/schema.js";
 import { setting } from "../config.js";
 import { createSession, queuePrompt } from "../lib/sessions.js";
@@ -59,57 +59,86 @@ export async function tickAutomations(now = new Date()): Promise<{
 	skipped: number;
 	paused: number;
 }> {
-	const [lock] = (await db.execute(
-		raw`select pg_try_advisory_lock(hashtext('harbor:automations')) as acquired`,
-	)) as unknown as Array<{ acquired: boolean }>;
-
-	if (!lock?.acquired) return { ran: 0, skipped: 0, paused: 0 };
-
+	// A RESERVED connection, not a pooled one, and this is not a detail.
+	//
+	// An advisory lock taken with `pg_try_advisory_lock` belongs to the connection
+	// that took it. Issue it through the pool and the matching unlock is a separate
+	// statement that may be routed to a different backend, where it does nothing at
+	// all — and the lock is then held until that pooled connection is recycled,
+	// which is indefinitely.
+	//
+	// The symptom is the worst kind: automations run exactly once after a deploy and
+	// then silently never again, with no error anywhere, on work that by definition
+	// nobody is watching. It only reproduces with a pool of more than one connection,
+	// so it would pass every test run against a single-connection script.
+	//
+	// `withSessionLock` in the session runner had this reasoning already; this
+	// function was written afterwards and did not.
+	const reserved = await sql.reserve();
 	try {
-		const due = await db
-			.select()
-			.from(automations)
-			.where(
-				and(
-					eq(automations.enabled, true),
-					isNull(automations.pausedReason),
-					or(isNull(automations.nextRunAt), lte(automations.nextRunAt, now)),
-				),
-			)
-			.limit(100);
+		const [lock] = await reserved`
+			select pg_try_advisory_lock(hashtext('harbor:automations')) as acquired
+		`;
+		if (!lock?.acquired) return { ran: 0, skipped: 0, paused: 0 };
 
-		let ran = 0;
-		let skipped = 0;
-		let paused = 0;
+		try {
+			return await runDueAutomations(now);
+		} finally {
+			// Same reserved connection that took it. In a `finally` so a thrown body
+			// cannot strand the whole deployment's automations.
+			await reserved`select pg_advisory_unlock(hashtext('harbor:automations'))`;
+		}
+	} finally {
+		reserved.release();
+	}
+}
 
-		for (const automation of due) {
-			// Advance the schedule FIRST. See the module header for why this ordering
-			// is the difference between one skipped run and a crash loop that spawns a
-			// sandbox per tick.
-			const scheduled = advanceSchedule(automation, now);
-			await db
-				.update(automations)
-				.set({ nextRunAt: scheduled, lastRunAt: now })
-				.where(eq(automations.id, automation.id));
+async function runDueAutomations(now: Date): Promise<{
+	ran: number;
+	skipped: number;
+	paused: number;
+}> {
+	const due = await db
+		.select()
+		.from(automations)
+		.where(
+			and(
+				eq(automations.enabled, true),
+				isNull(automations.pausedReason),
+				or(isNull(automations.nextRunAt), lte(automations.nextRunAt, now)),
+			),
+		)
+		.limit(100);
 
-			// A first-ever tick computes `nextRunAt` and runs nothing. Without this,
-			// creating an hourly automation fires it immediately, which surprises the
-			// person who created it and is not what "hourly" means.
-			if (!automation.nextRunAt) {
-				skipped += 1;
-				continue;
-			}
+	let ran = 0;
+	let skipped = 0;
+	let paused = 0;
 
-			const outcome = await runAutomation(automation.id);
-			if (outcome === "ran") ran += 1;
-			else skipped += 1;
-			if (outcome === "paused") paused += 1;
+	for (const automation of due) {
+		// Advance the schedule FIRST. See the module header for why this ordering
+		// is the difference between one skipped run and a crash loop that spawns a
+		// sandbox per tick.
+		const scheduled = advanceSchedule(automation, now);
+		await db
+			.update(automations)
+			.set({ nextRunAt: scheduled, lastRunAt: now })
+			.where(eq(automations.id, automation.id));
+
+		// A first-ever tick computes `nextRunAt` and runs nothing. Without this,
+		// creating an hourly automation fires it immediately, which surprises the
+		// person who created it and is not what "hourly" means.
+		if (!automation.nextRunAt) {
+			skipped += 1;
+			continue;
 		}
 
-		return { ran, skipped, paused };
-	} finally {
-		await db.execute(raw`select pg_advisory_unlock(hashtext('harbor:automations'))`);
+		const outcome = await runAutomation(automation.id);
+		if (outcome === "ran") ran += 1;
+		else skipped += 1;
+		if (outcome === "paused") paused += 1;
 	}
+
+	return { ran, skipped, paused };
 }
 
 function advanceSchedule(

@@ -436,28 +436,21 @@ export class LocalSandboxProvider implements EphemeralProvider {
 		if (!record || record.pid !== parsed.pid) return "absent";
 
 		const probe = await probeProcess(record);
-		switch (probe.kind) {
-			case "gone":
-				await removeRecord(dir, record.attemptId);
-				return "already_stopped";
-			case "not_ours":
-				// Refusing to signal is the entire reason the start-time check exists.
-				// SIGTERM to a recycled pid kills whatever now owns it, which on a
-				// developer's laptop is their editor.
-				await removeRecord(dir, record.attemptId);
-				return "already_stopped";
-			case "indeterminate":
-				throw new SandboxProviderError({
-					message:
-						`Cannot confirm that pid ${record.pid} is still the agent we started `
-						+ `(${probe.detail}). Not signalling it: killing a process we cannot identify `
-						+ "is worse than leaving one running.",
-					errorType: "transient",
-					provider: PROVIDER_NAME,
-					operation: "stop",
-				});
-			case "ours_alive":
-				break;
+		const disposition = stopDispositionFor(probe);
+		if (disposition.action === "already_stopped") {
+			await removeRecord(dir, record.attemptId);
+			return "already_stopped";
+		}
+		if (disposition.action === "refuse_to_signal") {
+			throw new SandboxProviderError({
+				message:
+					`Cannot confirm that pid ${record.pid} is still the agent we started `
+					+ `(${disposition.detail}). Not signalling it: killing a process we cannot identify `
+					+ "is worse than leaving one running.",
+				errorType: "transient",
+				provider: PROVIDER_NAME,
+				operation: "stop",
+			});
 		}
 
 		/**
@@ -594,6 +587,43 @@ function stateFromProbe(probe: ProcessProbe): ProviderSandboxState {
 			return "gone";
 		case "indeterminate":
 			return "unknown";
+	}
+	return assertNeverProbe(probe);
+}
+
+/**
+ * What a probe means for `stop`, in a switch that RETURNS on every arm.
+ *
+ * The returns are the point. This replaces a `switch` written inline in `stop`
+ * whose `ours_alive` arm was a bare `break` — which meant TypeScript re-unioned
+ * the arms afterwards instead of narrowing to `never`, so a fifth `ProcessProbe`
+ * member would compile with no case here and **fall straight through to the
+ * SIGTERM below**. That is the one outcome this file argues at length must never
+ * happen on an unidentified process: a pid we cannot prove is ours is, on a
+ * developer's laptop, their editor. Adding a member is now a compile error at the
+ * `assertNeverProbe` line rather than a signal sent to a stranger.
+ */
+type StopDisposition =
+	| { action: "signal" }
+	| { action: "already_stopped" }
+	| { action: "refuse_to_signal"; detail: string };
+
+function stopDispositionFor(probe: ProcessProbe): StopDisposition {
+	switch (probe.kind) {
+		case "ours_alive":
+			return { action: "signal" };
+		case "gone":
+			return { action: "already_stopped" };
+		case "not_ours":
+			// Refusing to signal is the entire reason the start-time check exists.
+			// SIGTERM to a recycled pid kills whatever now owns it. The record is
+			// cleared by the caller because our box is definitively gone.
+			return { action: "already_stopped" };
+		case "indeterminate":
+			// "ps did not answer" is the absence of knowledge, not knowledge that the
+			// process is a stranger, and the two are deliberately not collapsed — see
+			// `ProcessProbe`. Authority fails closed: no signal is sent.
+			return { action: "refuse_to_signal", detail: probe.detail };
 	}
 	return assertNeverProbe(probe);
 }

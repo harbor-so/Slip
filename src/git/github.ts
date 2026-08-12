@@ -745,13 +745,49 @@ export type ScmProviderSelection =
  * holds the policy every caller depends on — imports nothing concrete and cannot
  * acquire an import cycle when a second provider is added.
  */
+/**
+ * The App credentials, read from the environment at call time.
+ *
+ * Read here rather than passed in by every caller, because the one caller that
+ * matters — `mintGitCredential`, on the sandbox's credential broker — constructs a
+ * provider with nothing but a host. Without this the App is always `null`, so
+ * `installationToken` answers `app_not_configured` and **every git operation in
+ * every sandbox fails with a 403**, on a deployment whose `.env` names both
+ * variables and looks correctly configured. That failure is fail-closed and
+ * therefore safe, which is precisely why it would survive review: nothing leaks,
+ * the product simply cannot clone.
+ *
+ * At call time, never at import: a module-level read happens before a test (or a
+ * container that loads its secrets late) can set the variable, and the process then
+ * behaves as though the App were absent for its whole life. Same rule as
+ * `src/config.ts`.
+ *
+ * The PEM keeps its newlines. Deployments that cannot carry a multi-line value
+ * through their secret store commonly substitute `\n`, so that spelling is restored
+ * rather than handed to `createSign`, which would otherwise fail with an opaque
+ * "error:1E08010C:DECODER routines::unsupported" that names nothing.
+ */
+function appFromEnvironment(): { appId: string; privateKey: string } | null {
+	const appId = process.env.GITHUB_APP_ID?.trim();
+	const privateKey = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
+	if (!appId || !privateKey) return null;
+	return { appId, privateKey: privateKey.replace(/\\n/g, "\n") };
+}
+
 export function createScmProvider(options: GitHubProviderOptions = {}): ScmProviderSelection {
 	const resolved = resolveScmProviderId();
 	if (!resolved.ok) return { ok: false, reason: resolved.reason, message: resolved.message };
 
 	switch (resolved.id) {
-		case "github":
-			return { ok: true, provider: new GitHubProvider(options) };
+		case "github": {
+			// An explicitly supplied app wins, so a test that passes one is never
+			// overridden by whatever happens to be in the developer's environment.
+			const app = options.app ?? appFromEnvironment();
+			return {
+				ok: true,
+				provider: new GitHubProvider(app === null ? options : { ...options, app }),
+			};
+		}
 		case "gitlab":
 		case "bitbucket":
 			// Unreachable: resolveScmProviderId already refused these. Kept as explicit

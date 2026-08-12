@@ -37,6 +37,7 @@ import type {
 	AgentAdapter,
 	AgentInterrupt,
 	AgentRuntime,
+	AgentStreamEvent,
 	AgentTurnRequest,
 	AgentUsage,
 } from "../src/contracts/agent.js";
@@ -398,6 +399,10 @@ async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): P
 	env.GIT_TERMINAL_PROMPT = "0";
 	env.HARBOR_SANDBOX_ID = config.sandboxId;
 	env.HARBOR_SESSION_ID = config.sessionId;
+	// The helper runs as a separate process spawned by git, so everything it needs
+	// reaches it through inherited environment and nothing else. A missing fence
+	// here is every git operation in the box failing with a 409.
+	env.HARBOR_FENCING_TOKEN = String(config.fencingToken);
 
 	// The one host the credential helper will authorise. Derived from the primary
 	// repository's own URL when the control plane did not state it, because the
@@ -666,28 +671,47 @@ export function createTurnRunner(
 				child.kill(adapter.interrupt("cancel"));
 			}, invocation.timeoutMs);
 
+			/**
+			 * One normalised agent event → the bridge, in a switch that RETURNS on
+			 * every arm.
+			 *
+			 * The returns are what make this exhaustive, and that is the entire reason
+			 * it is a function rather than a `switch` with `break`s inline in the loop
+			 * below. `AgentStreamEvent` is a closed set in `src/contracts/agent.ts` and
+			 * this is the **only** place in the product that turns one into something a
+			 * user can see. With `break` arms, TypeScript narrows each arm and then
+			 * re-unions them after the switch, so a fifth variant added to the contract
+			 * compiles here without a case — and every event of that new kind is
+			 * silently dropped in the sandbox, never reaches the timeline, and produces
+			 * no error at either end. The symptom is a feature that was implemented,
+			 * shipped, and does nothing. With `return` arms plus `assertNever`, adding
+			 * the variant is a compile error at this exact line.
+			 */
+			const forward = (event: AgentStreamEvent): void => {
+				switch (event.kind) {
+					case "message":
+						bridge.emit({ type: "agent_message", payload: { text: event.text, prompt_id: invocation.promptId } });
+						return;
+					case "tool_call":
+						bridge.emit({
+							type: "agent_tool_call",
+							payload: { tool: event.tool, phase: event.phase, summary: event.summary, prompt_id: invocation.promptId },
+						});
+						return;
+					case "usage":
+						usage = accumulation === "absolute" ? event.usage : addUsage(usage, event.usage);
+						return;
+					case "warning":
+						bridge.emit({ type: "log", payload: { level: "warning", source: adapter.runtime, message: event.message } });
+						return;
+				}
+				return assertNever(event, "AgentStreamEvent in supervisor turn");
+			};
+
 			const lines = createInterface({ input: child.stdout! });
 			lines.on("line", (raw) => {
 				stdout += `${raw}\n`;
-				for (const event of adapter.parseLine(raw)) {
-					switch (event.kind) {
-						case "message":
-							bridge.emit({ type: "agent_message", payload: { text: event.text, prompt_id: invocation.promptId } });
-							break;
-						case "tool_call":
-							bridge.emit({
-								type: "agent_tool_call",
-								payload: { tool: event.tool, phase: event.phase, summary: event.summary, prompt_id: invocation.promptId },
-							});
-							break;
-						case "usage":
-							usage = accumulation === "absolute" ? event.usage : addUsage(usage, event.usage);
-							break;
-						case "warning":
-							bridge.emit({ type: "log", payload: { level: "warning", source: adapter.runtime, message: event.message } });
-							break;
-					}
-				}
+				for (const event of adapter.parseLine(raw)) forward(event);
 			});
 			child.stderr?.on("data", (chunk: Buffer) => {
 				bridge.emit({ type: "log", payload: { level: "info", source: adapter.runtime, line: stripAnsi(chunk.toString("utf8")) } });
@@ -734,7 +758,18 @@ function addUsage(current: AgentUsage | null, next: AgentUsage): AgentUsage {
 // ---------------------------------------------------------------------------
 
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number> {
-	validateConfig();
+	// Validate before anything else, and report rather than throw. An incoherent
+	// timeout set is exactly the class of misconfiguration that produces a box which
+	// dies for no visible reason — a boot timeout shorter than the hooks it has to
+	// wait for kills a sandbox that is behaving exactly as configured, and the
+	// failure gets attributed to the repository. Printed as a config problem so it
+	// lands in the same place, and with the same exit code, as a missing variable.
+	try {
+		validateConfig();
+	} catch (error) {
+		console.error(`[supervisor] config: ${(error as Error).message}`);
+		return 78;
+	}
 
 	const resolution = readSupervisorConfig(env);
 	if (resolution.kind === "invalid") {

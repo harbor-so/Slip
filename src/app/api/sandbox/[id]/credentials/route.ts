@@ -72,6 +72,44 @@ function bodyCeilingChars(): number {
 	return setting("maxEventPayloadChars");
 }
 
+/**
+ * Read the body, refusing rather than buffering past the ceiling.
+ *
+ * `request.text()` is one line and buffers whatever arrives, and a ceiling checked
+ * after the read is not a ceiling: the memory has already been spent by the time it
+ * fires. That matters more here than anywhere else in the product, because this
+ * endpoint is reachable **before authentication** — the sandbox id in the URL and
+ * the token in the header are only examined once the body is in hand — so anybody
+ * who can reach the control plane can otherwise make it buffer a gigabyte per
+ * request, with no credential at all, until the process dies. Cancelling rather
+ * than draining is deliberate: reading the rest to be polite is reading the rest,
+ * which is the thing being refused. Same discipline as the events ingest route.
+ */
+async function readBounded(request: Request, ceiling: number): Promise<string | "too_large"> {
+	const declared = Number(request.headers.get("content-length") ?? "");
+	if (Number.isFinite(declared) && declared > ceiling) return "too_large";
+
+	const body = request.body;
+	if (!body) return "";
+
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let total = 0;
+	let text = "";
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > ceiling) {
+			await reader.cancel().catch(() => {});
+			return "too_large";
+		}
+		text += decoder.decode(value, { stream: true });
+	}
+	text += decoder.decode();
+	return text;
+}
+
 function operationFrom(raw: unknown): GitOperation | null {
 	const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
 	return (GIT_OPERATIONS as readonly string[]).includes(value) ? (value as GitOperation) : null;
@@ -226,8 +264,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
 
-	const raw = await request.text();
-	if (raw.length > bodyCeilingChars()) {
+	const raw = await readBounded(request, bodyCeilingChars());
+	if (raw === "too_large") {
 		return Response.json(
 			{ error: "Payload too large.", reason: "body_too_large" },
 			{ status: 413 },

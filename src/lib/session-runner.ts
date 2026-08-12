@@ -1014,10 +1014,19 @@ export async function completeTurn(input: {
 	const prompt = inFlight[0];
 	if (!prompt) return { finished: [], leaseReleased: false };
 
-	await db
+	// The compare-and-set decides whether this call closed the prompt, and nothing
+	// below runs unless it did. The read and the write are two statements, so two
+	// callers — the bridge retrying an ingest whose response was lost, and the
+	// execution-timeout sweep — both select the same `delivered` row and both reach
+	// here. Only one UPDATE matches. Writing `prompt_finished` regardless puts the
+	// same turn on the timeline twice, and worse, the loser then goes on to read the
+	// queue and hand the lease back on the strength of work it did not finish.
+	const claimed = await db
 		.update(sessionPrompts)
 		.set({ status: input.outcome })
-		.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")));
+		.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
+		.returning({ id: sessionPrompts.id });
+	if (claimed.length === 0) return { finished: [], leaseReleased: false };
 
 	await appendEvent({
 		orgId: input.orgId,

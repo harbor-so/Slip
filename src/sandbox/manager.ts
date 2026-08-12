@@ -71,6 +71,7 @@
  * reaped, fenced-out box gets back onto a session it no longer owns.
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, isNotNull, notInArray, sql as raw } from "drizzle-orm";
 import { type RepoOverrides, setting } from "../config.js";
 import {
@@ -111,6 +112,40 @@ import {
 	isSnapshotProvider,
 } from "./provider.js";
 import { defaultProvider } from "./registry.js";
+
+/**
+ * The digest stored on the sandbox row. Duplicated from `session-runner.ts`
+ * rather than imported, because importing it here would make the lifecycle
+ * manager depend on the request layer, and the boundary test that keeps
+ * `decisions.ts` clean exists precisely because those dependencies are easy to
+ * add and hard to remove.
+ */
+function sha256Hex(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+/**
+ * Where a sandbox should call us back.
+ *
+ * Required, with no localhost default, and the absence is fatal at spawn rather
+ * than at first callback. A box that boots pointing at `http://localhost:3000`
+ * from inside its own container reaches *itself*, not Harbor — so every event it
+ * emits is dropped, its heartbeat never arrives, and the connecting watchdog reaps
+ * it. The symptom is "sandboxes always time out", which is a very long way from
+ * "an environment variable is unset".
+ */
+function controlPlaneUrl(): string {
+	const url = process.env.HARBOR_PUBLIC_URL?.trim();
+	if (!url) {
+		throw new HarborError(
+			"HARBOR_PUBLIC_URL is not set, so a sandbox would have no address to call back "
+				+ "on. It must be a URL reachable FROM INSIDE a sandbox — on Docker that is "
+				+ "usually http://host.docker.internal:3000, not http://localhost:3000, which "
+				+ "from inside a container resolves to the container itself.",
+		);
+	}
+	return url.replace(/\/+$/, "");
+}
 
 type SandboxRow = typeof sandboxes.$inferSelect;
 
@@ -227,13 +262,26 @@ export type FenceVerdict =
  * ordering `openAttempt` maintains and splitting it into `created_at < x or
  * (created_at = x and id <= y)` is the same thing written in a way that is easy to
  * get subtly wrong on the boundary.
+ *
+ * **The boundary is read back from Postgres rather than sent to it, and that is
+ * not a stylistic preference.** `timestamptz` has microsecond resolution; a
+ * JavaScript `Date` has millisecond resolution. A row whose `created_at` is
+ * `…454123` comes back through the driver as `…454000`, and comparing the row
+ * against its own round-tripped timestamp is therefore *false* — so a sandbox did
+ * not count itself, every ordinal was one too low, and `validateFence` refused
+ * every single call from every bridge with `token_mismatch, expected 0`. The
+ * symptom is a product where no sandbox can write to a transcript, push a branch
+ * or fetch a credential, and nothing in the logs points at a rounding error.
+ * Comparing inside SQL means the value never leaves Postgres and cannot lose
+ * precision on the way.
  */
 async function fencingTokenOf(row: SandboxRow): Promise<number> {
 	const result = (await db.execute(raw`
 		select count(*)::int as ordinal
-		from ${sandboxes}
-		where ${sandboxes.sessionId} = ${row.sessionId}::uuid
-			and (${sandboxes.createdAt}, ${sandboxes.id}) <= (${row.createdAt.toISOString()}::timestamptz, ${row.id}::uuid)
+		from ${sandboxes} s
+		where s.session_id = (select session_id from ${sandboxes} where id = ${row.id}::uuid)
+			and (s.created_at, s.id)
+				<= (select created_at, id from ${sandboxes} where id = ${row.id}::uuid)
 	`)) as unknown as Array<{ ordinal: number }>;
 	return Number(result[0]?.ordinal ?? 0);
 }
@@ -696,10 +744,33 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
 			// is to leave the box for the watchdog rather than to attach to it.
 			return { kind: "no_orphan" };
 		case "adopt": {
-			await db
-				.update(sandboxes)
-				.set({ externalId: decision.externalId, status: "spawning", failureReason: null })
-				.where(eq(sandboxes.id, row.id));
+			const claimed = await claimAttempt(row.id, {
+				externalId: decision.externalId,
+				status: "spawning",
+				failureReason: null,
+			});
+			if (!claimed) {
+				// The attempt was closed while we were asking the provider about it — the
+				// connecting watchdog reached it, or somebody stopped the session. The row
+				// is no longer ours to attach a box to, and adopting anyway would put a
+				// live container behind a row that a reaper has already accounted for. The
+				// orphan is stopped here rather than left for a sweep, because a sweep only
+				// examines rows that are not on the dead deny-list and this row now is:
+				// nothing would ever look at it again, and the container would keep
+				// running until somebody read an invoice.
+				await stopOrphan(ctx, decision.externalId);
+				return {
+					kind: "resolved",
+					outcome: {
+						kind: "failed",
+						error_type: "unknown",
+						message:
+							"This spawn attempt was closed while its orphan was being reconciled, so the "
+							+ "orphan was stopped rather than adopted onto a row that no longer owns the "
+							+ "session.",
+					},
+				};
+			}
 			await appendEvent({
 				orgId: ctx.orgId,
 				sessionId: ctx.sessionId,
@@ -773,6 +844,32 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 
 	const boot = await resolveBoot(ctx);
 
+	// Mint the box's own credential, and store only its digest.
+	//
+	// This is the enrolment step, and without it the whole execution plane is
+	// inert: the supervisor exits 78 for want of `HARBOR_SANDBOX_TOKEN`, and a box
+	// that somehow started anyway would be told `sandbox_unenrolled` by
+	// `authenticateSandbox` because the row carries a null digest. Every other part
+	// of the saga can be correct and nothing works.
+	//
+	// The plaintext exists in exactly two places and never a third: this local, and
+	// the environment of the box it belongs to. The row keeps a SHA-256 digest, for
+	// the same reason `api_keys` does and a stronger one — this credential lets a
+	// box write into a session's transcript and fetch git credentials, so a database
+	// dump containing it would hand over both. Unsalted because the search space is
+	// CSPRNG output, and because a salted column cannot be indexed and this is read
+	// on the hot path of every event batch.
+	//
+	// Minted per attempt rather than per session, so a superseded box's token dies
+	// with its row. That is belt to the fencing token's braces: the fence stops a
+	// stale box acting, and a per-attempt token means a leaked one from a box that
+	// has been reaped is worthless rather than merely fenced.
+	const sandboxToken = randomBytes(32).toString("base64url");
+	await db
+		.update(sandboxes)
+		.set({ authTokenHash: sha256Hex(sandboxToken) })
+		.where(eq(sandboxes.id, row.id));
+
 	try {
 		const created = await boot.create({
 			sessionId: ctx.sessionId,
@@ -780,22 +877,51 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			attemptId: row.id,
 			image: ctx.image ?? setting("sandboxImage", ctx.overrides),
 			workspace: ctx.workspace ?? "/workspace",
-			env: ctx.env ?? {},
+			// Caller-supplied secrets first, so nothing a repository configures can
+			// shadow the four variables the supervisor needs to reach us. A repo
+			// secret named HARBOR_CONTROL_URL would otherwise point a sandbox at an
+			// attacker's control plane, which it would then hand its token to.
+			env: {
+				...(ctx.env ?? {}),
+				HARBOR_CONTROL_URL: controlPlaneUrl(),
+				HARBOR_SANDBOX_ID: row.id,
+				HARBOR_SESSION_ID: ctx.sessionId,
+				HARBOR_SANDBOX_TOKEN: sandboxToken,
+				HARBOR_FENCING_TOKEN: String(await currentFencingToken(ctx.sessionId)),
+				HARBOR_BOOT_MODE: boot.mode,
+			},
 			timeoutMs: setting("sandboxBootTimeoutMs", ctx.overrides),
 			features: ctx.features ?? {},
 			command: ctx.command,
 		});
 
-		await db
-			.update(sandboxes)
-			.set({
-				externalId: created.externalId,
-				status: "spawning",
-				bootMode: boot.mode,
-				restoredFrom: boot.restoredFrom,
-				failureReason: null,
-			})
-			.where(eq(sandboxes.id, row.id));
+		const claimed = await claimAttempt(row.id, {
+			externalId: created.externalId,
+			status: "spawning",
+			bootMode: boot.mode,
+			restoredFrom: boot.restoredFrom,
+			failureReason: null,
+		});
+		if (!claimed) {
+			// The lifecycle moved on while the provider was creating the box, and this is
+			// not exotic: `provider.create` is handed `sandboxBootTimeoutMs` and the
+			// connecting watchdog fires on exactly that number, so a create that runs to
+			// its limit races the reaper by construction — and a human cancelling the
+			// session hits the same window. An unconditional write here resurrects the
+			// row from `stopped` to `spawning`, which also un-blocks reconnection: the
+			// box somebody just cancelled comes up, holds the session's newest fence, and
+			// is handed the next prompt. So the box that was created is stopped instead
+			// of persisted, and the failure is reported rather than hidden.
+			await stopOrphan(ctx, created.externalId);
+			return {
+				kind: "failed",
+				error_type: "unknown",
+				message:
+					"This sandbox was created, but its attempt had already been closed — reaped or "
+					+ "stopped — by the time the provider answered, so the box was stopped rather than "
+					+ "attached to a row that no longer owns the session.",
+			};
+		}
 
 		// The breaker is cleared by the thing that proves the provider works, not by a
 		// timer. Left uncleared, a successful half-open probe leaves the row open and
@@ -949,6 +1075,58 @@ async function recordSpawnFailure(
 	return { kind: "failed", error_type: errorType, message };
 }
 
+/**
+ * Attach a created or adopted box to its attempt row, and only while that row is
+ * still the open attempt.
+ *
+ * The predicate is `status = 'requested'`, which is the status `openAttempt`
+ * writes and the only one meaning "nobody has concluded this attempt". Everything
+ * that concludes one — `onConnectingTimeout`, `stopSandbox`, `retireAttempt` —
+ * moves the row off `requested` first, so a zero-row result here is exactly
+ * "somebody closed this attempt while the provider was still thinking", which is
+ * the one state the callers must not write over.
+ */
+async function claimAttempt(
+	sandboxId: string,
+	next: {
+		externalId: string;
+		status: SandboxStatus;
+		failureReason: SandboxFailure | null;
+		bootMode?: string;
+		restoredFrom?: string | null;
+	},
+): Promise<boolean> {
+	const updated = await db
+		.update(sandboxes)
+		.set({
+			externalId: next.externalId,
+			status: next.status,
+			failureReason: next.failureReason,
+			...(next.bootMode !== undefined ? { bootMode: next.bootMode } : {}),
+			...(next.restoredFrom !== undefined ? { restoredFrom: next.restoredFrom } : {}),
+		})
+		.where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, "requested")))
+		.returning({ id: sandboxes.id });
+	return updated.length > 0;
+}
+
+/**
+ * Stop a container that no row will ever point at again, without letting the stop
+ * become the failure that is reported.
+ *
+ * Only reached when `claimAttempt` lost the race, so by definition nothing in the
+ * database will find this box again and nothing else will ever stop it. A throw
+ * here would replace an honest reported failure with an unreported one and still
+ * leak the container.
+ */
+async function stopOrphan(ctx: SpawnContext, externalId: string): Promise<void> {
+	try {
+		await ctx.provider.stop(externalId);
+	} catch (error) {
+		console.error(`[sandbox] orphan stop failed for ${externalId}:`, (error as Error).message);
+	}
+}
+
 /** Close out an attempt that will never produce a box. */
 async function retireAttempt(
 	row: SandboxRow,
@@ -1020,7 +1198,21 @@ export async function heartbeat(sandboxId: string, now: Date = new Date()): Prom
  */
 export async function markSandboxReady(
 	sandboxId: string,
-	options: { now?: Date; bootMode?: string | null; actor?: string | null } = {},
+	options: {
+		now?: Date;
+		bootMode?: string | null;
+		actor?: string | null;
+		/**
+		 * Whether this call is responsible for the `sandbox_ready` timeline event.
+		 *
+		 * The ingest route already writes one carrying the bridge's own boot payload —
+		 * the mode, the warning count, the workspace — so it passes `false` and the
+		 * timeline gets one event with the richer body instead of two events with the
+		 * same meaning a millisecond apart, which reads to a user as the box having
+		 * booted twice.
+		 */
+		announce?: boolean;
+	} = {},
 ): Promise<TransportOutcome> {
 	const now = options.now ?? new Date();
 	const [row] = await db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
@@ -1029,7 +1221,16 @@ export async function markSandboxReady(
 		return { accepted: false, reason: "lifecycle_closed", status: row.status };
 	}
 
-	await db
+	// COMPARE-AND-SET on the status this call observed, for the same reason
+	// `transition` does it below. The read above and the write here are two
+	// statements, and a reaper lands between them: `onInactivity` sees an idle box,
+	// moves it to `stopped` and asks the provider to destroy it, and an
+	// unconditional UPDATE then writes `ready` back over that decision. The row
+	// would claim a healthy box while its container is being killed — `heartbeat`
+	// accepts it, every sweep keeps examining it, and the client is shown a sandbox
+	// to talk to that no longer exists. Zero rows updated means somebody else moved
+	// the lifecycle on, and the honest answer is the one a blocked status gets.
+	const applied = await db
 		.update(sandboxes)
 		.set({
 			status: "ready",
@@ -1038,9 +1239,26 @@ export async function markSandboxReady(
 			failureReason: null,
 			bootMode: options.bootMode ?? row.bootMode,
 		})
-		.where(eq(sandboxes.id, sandboxId));
+		.where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, row.status)))
+		.returning({ id: sandboxes.id });
 
-	if (row.status !== "ready") {
+	if (applied.length === 0) {
+		const [current] = await db
+			.select({ status: sandboxes.status })
+			.from(sandboxes)
+			.where(eq(sandboxes.id, sandboxId))
+			.limit(1);
+		if (!current) return { accepted: false, reason: "unknown_sandbox" };
+		if (isReconnectBlockedStatus(current.status)) {
+			return { accepted: false, reason: "lifecycle_closed", status: current.status };
+		}
+		// Another live transition won the race — a second `boot_ready` from the same
+		// bridge, most likely. The box is up either way and whoever won has already
+		// written the event below, so this is accepted and silent.
+		return { accepted: true };
+	}
+
+	if (row.status !== "ready" && options.announce !== false) {
 		await appendEvent({
 			orgId: row.orgId,
 			sessionId: row.sessionId,
@@ -1168,9 +1386,27 @@ export async function snapshotSandbox(
 	// Snapshotting is a privileged side effect, so it is fenced like the others. A
 	// superseded box taking a snapshot would overwrite the state the *current* box
 	// will restore from, which is data loss with no error attached to it.
+	//
+	// AUTHORITY FAILS CLOSED here too, which is why `state_unknown` refuses
+	// alongside `superseded` rather than falling through. Testing only for
+	// `superseded` reads as "refuse once we have proved it is stale" and therefore
+	// permits the snapshot in the one case where nothing was proved: the fence query
+	// failed while a newer box did in fact exist. `resolveBoot` restores from the
+	// newest row *carrying* a `snapshotRef`, so a stale box that writes one beats a
+	// current box that has not taken one yet, and the next boot silently restores
+	// hours-old state with no error anywhere. `lifecycle_closed` still proceeds on
+	// purpose — capturing state on the way down is what this is for, and
+	// `stopSandbox` persists the dead status before it asks the provider to stop.
 	const fence = await validateFence(row.id, await fencingTokenOf(row));
-	if (!fence.valid && fence.reason === "superseded") {
-		return { kind: "failed", errorType: "invalid_config", message: "sandbox is superseded" };
+	if (!fence.valid && (fence.reason === "superseded" || fence.reason === "state_unknown")) {
+		return {
+			kind: "failed",
+			errorType: "invalid_config",
+			message:
+				fence.reason === "superseded"
+					? "sandbox is superseded"
+					: `the sandbox's fencing position could not be determined: ${fence.detail}`,
+		};
 	}
 
 	try {

@@ -91,9 +91,34 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 			let shutdownSent = false;
 			let pauseSent: string | null = null;
 
+			/**
+			 * Release everything this connection holds, exactly once.
+			 *
+			 * The keep-alive timer and the dedicated LISTEN connection are torn down
+			 * HERE rather than only in the abort handler, because `finish()` is reached
+			 * from inside `drain()` — a reaped box, a vanished row, a refused fence —
+			 * and that path closes the response without the client necessarily ever
+			 * dropping its socket. A zombie bridge is precisely a process that has
+			 * stopped behaving, so waiting for it to hang up before returning a
+			 * connection to Postgres means one leaked backend per stale box that
+			 * reconnects, forever, until the control plane cannot open a connection at
+			 * all. The pieces are captured through mutable slots because the timer is
+			 * created after the first drain, and the drain can finish before it exists.
+			 */
+			let keepAlive: ReturnType<typeof setInterval> | null = null;
+			let releaseListener: (() => void) | null = null;
+
 			const finish = () => {
 				if (closed) return;
 				closed = true;
+				if (keepAlive !== null) {
+					clearInterval(keepAlive);
+					keepAlive = null;
+				}
+				if (releaseListener !== null) {
+					releaseListener();
+					releaseListener = null;
+				}
 				try {
 					controller.close();
 				} catch {
@@ -123,6 +148,33 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 				try {
 					do {
 						dirty = false;
+
+						// THE FENCE IS RE-CHECKED ON EVERY DRAIN, never once at connect.
+						//
+						// A fence validated only at the handshake is a fence this box keeps for
+						// as long as its socket stays open — and an open socket is exactly what
+						// a zombie has. The concrete sequence: a slow boot outruns
+						// `sandboxBootTimeoutMs`, `onConnectingTimeout` marks the row `failed`
+						// and the best-effort provider stop does not land; `failed` is
+						// deliberately NOT reconnect-blocking (see `isReconnectBlockedStatus`)
+						// yet it IS dead for spawn admission, so a second box is created and
+						// takes fence 2 while this one sits here still streaming — and is handed
+						// the next prompt. Two agents on one branch, arriving through the one
+						// verb that starts paid work.
+						//
+						// Authority fails CLOSED, so any verdict other than valid ends the
+						// stream, `state_unknown` included: a privileged delivery allowed on an
+						// unreadable fence is the same as having no fence at all.
+						const current = await validateFence(sandboxId, header.token);
+						if (!current.valid) {
+							if (!shutdownSent) {
+								shutdownSent = true;
+								const command: BridgeCommand = { type: "shutdown", session_id: sessionId };
+								send("command", command);
+							}
+							finish();
+							return;
+						}
 
 						const [box] = await db
 							.select({ status: sandboxes.status })
@@ -225,16 +277,25 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 					// A malformed payload is not worth killing the stream over.
 				}
 			});
+			releaseListener = () => {
+				void subscription.unlisten().catch(() => {});
+				void listener.end({ timeout: 1 }).catch(() => {});
+			};
 
 			send("ready", { sandbox_id: sandboxId, session_id: sessionId, fencing_token: fence.token });
 			await drain();
+			// The first drain can shut the stream down — a box already reaped, a fence
+			// already superseded — and `finish()` has then already released everything.
+			// Registering a timer afterwards would leave one running on a closed stream
+			// with nobody to clear it.
+			if (closed) return;
 
 			// Proxies and load balancers close a silent connection. The interval is the
 			// bridge's own heartbeat period rather than an invented number, so the box
 			// judges this socket dead on exactly the clock it already runs — and
 			// `sandboxStaleHeartbeatMs`, validated at startup to be at least twice this,
 			// is the threshold on both ends.
-			const keepAlive = setInterval(() => {
+			keepAlive = setInterval(() => {
 				if (closed) return;
 				try {
 					controller.enqueue(encoder.encode(": keep-alive\n\n"));
@@ -243,12 +304,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 				}
 			}, setting("sandboxHeartbeatIntervalMs"));
 
-			request.signal.addEventListener("abort", () => {
-				clearInterval(keepAlive);
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
-				finish();
-			});
+			// One cleanup path, so an abort after a drain-initiated close is a no-op
+			// rather than a second `unlisten` on an ended connection.
+			request.signal.addEventListener("abort", finish);
 		},
 	});
 

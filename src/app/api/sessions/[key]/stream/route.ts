@@ -147,11 +147,26 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 			let emittedThrough = 0;
 			let pendingGaps = new Set<number>();
 
+			/**
+			 * Null until the snapshot has been read, and checked rather than assumed.
+			 *
+			 * The subscription is deliberately live before the snapshot is read (see the
+			 * proof above), so a NOTIFY that lands during step 2 calls `drain` before
+			 * the session is known. Reading a `const` declared below this point would
+			 * throw a `ReferenceError` from the temporal dead zone — swallowed by the
+			 * drain's own catch, so the symptom is a confusing log line today and a
+			 * permanently stuck `draining` flag the moment anybody adds an `await`
+			 * before the first use. Returning early is the honest behaviour: nothing is
+			 * lost, because the snapshot read that follows covers everything up to its
+			 * own cursor and step 3 drains the rest.
+			 */
+			let sessionId: string | null = null;
+
 			let draining = false;
 			let dirty = false;
 
 			const drain = async () => {
-				if (closed) return;
+				if (closed || sessionId === null) return;
 				if (draining) {
 					// A wakeup that lands mid-drain sets a flag instead of starting a
 					// second one. Without it, the wakeup is dropped — and the event that
@@ -238,7 +253,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 				finish();
 				return;
 			}
-			const sessionId = snapshot.session.id;
+			sessionId = snapshot.session.id;
 
 			contiguousThrough = snapshot.snapshot_through_seq;
 			// Deliberately the same number, not the highest seq in `snapshot.events`.
