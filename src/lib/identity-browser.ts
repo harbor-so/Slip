@@ -78,6 +78,25 @@ export async function loadKeypair(): Promise<Keypair> {
 }
 
 /**
+ * Forget this device's key, so the next `loadKeypair` mints a fresh identity.
+ *
+ * The one deliberate way to become a different principal on this device. Because
+ * the key is non-extractable, there is no export to take with you first — this
+ * is a clean break, and the panel that calls it says so. It only clears the
+ * local record; the old public key stays a known principal in the org (its
+ * signed history is permanent by design), you simply stop being it here.
+ */
+export async function resetIdentity(): Promise<void> {
+	const db = await openDb();
+	await new Promise<void>((resolve, reject) => {
+		const tx = db.transaction(STORE, "readwrite");
+		tx.objectStore(STORE).delete(RECORD);
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => reject(tx.error);
+	});
+}
+
+/**
  * Load the keypair and make sure the org knows its public half.
  *
  * `register` is idempotent server-side, so calling this on every mount is cheap

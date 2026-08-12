@@ -15,6 +15,11 @@
 
 @import "tailwindcss";
 
+/* The polished frontend lives in a root-level `web/` folder rather than under
+   `src/`, so name it as a source explicitly — Tailwind v4's automatic content
+   detection roots at the stylesheet and would otherwise miss a sibling of `src`. */
+@source "../../web";
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

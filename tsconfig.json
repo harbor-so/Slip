@@ -26,6 +26,9 @@
     "paths": {
       "~/*": [
         "./src/*"
+      ],
+      "@web/*": [
+        "./web/*"
       ]
     },
     "allowJs": true
@@ -34,6 +37,8 @@
     "runtime/**/*.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
+    "web/**/*.ts",
+    "web/**/*.tsx",
     "scripts/**/*.ts",
     "*.ts",
     ".next/types/**/*.ts"

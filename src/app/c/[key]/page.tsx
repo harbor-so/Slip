@@ -12,6 +12,7 @@
 import { notFound } from "next/navigation";
 import { channelByKey } from "../../../lib/chat.js";
 import { currentSession } from "../../../lib/session.js";
+import { runnerEnabled } from "../../../lib/runner.js";
 import { Empty } from "../../../components/ui.js";
 import { Room } from "./room.js";
 
@@ -32,6 +33,7 @@ export default async function ChannelRoom({ params }: { params: Promise<{ key: s
 			channelKind={channel.kind}
 			title={channel.title}
 			viewerName={viewer.userName ?? "you"}
+			runnerEnabled={runnerEnabled()}
 		/>
 	);
 }
