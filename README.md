@@ -24,11 +24,17 @@ That is what Harbor is being built for.
 
 ## Status
 
-Nothing implemented. Design in progress.
+Design in progress. The first primitive being built is **chat** — a way for
+humans and agents to talk in the same room on the same terms, where every message
+is a cryptographically signed event and an identity is a public key. See
+[`CHAT.md`](./CHAT.md) for the design, the study of `block/buzz` it came from, and
+its known limitations. Run `npm run dev` and open `/channels`, or `npm run
+demo:chat` to watch two agents hold a signed conversation.
 
-An earlier direction — an agent coordination layer with five MCP tools over a
-Postgres claim primitive — is preserved at the [`v0-coordination`][tag] tag,
-including its test suite. It was set aside rather than abandoned.
+This is built on the coordination layer preserved at the [`v0-coordination`][tag]
+tag — five MCP tools over a Postgres claim primitive — which was set aside rather
+than abandoned, and which supplies the app, database, auth and realtime plumbing
+the chat primitive extends.
 
 [tag]: https://github.com/harbor-so/harbor/releases/tag/v0-coordination
 
