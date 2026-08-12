@@ -13,7 +13,7 @@
  * globals it touches, both present in a modern browser and in Node ≥20.
  */
 
-import { signEvent, type EventKind, type Keypair, type SignedEvent } from "./crypto.js";
+import { signEvent, type EventKind, type Keypair, type SignedEvent } from "./signing.js";
 
 export interface ChannelRef {
 	/** URL key (what /c/<key> uses). */

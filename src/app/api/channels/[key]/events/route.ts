@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { channelByKey, eventsOf, ingestEvent, mayRead, membersOf } from "../../../../../lib/chat.js";
 import { resolveConn } from "../../../../../lib/conn.js";
-import type { SignedEvent } from "../../../../../lib/crypto.js";
+import type { SignedEvent } from "../../../../../lib/signing.js";
 
 export const dynamic = "force-dynamic";
 

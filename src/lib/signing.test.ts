@@ -13,7 +13,7 @@ import {
 	verifyEvent,
 	type SignedEvent,
 	type UnsignedEvent,
-} from "./crypto.js";
+} from "./signing.js";
 
 async function fixture(overrides: Partial<UnsignedEvent> = {}) {
 	const author = await generateKeypair();

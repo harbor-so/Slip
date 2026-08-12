@@ -11,7 +11,7 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { db, sql } from "../db/index.js";
 import { channels, chatEvents, orgs } from "../db/schema.js";
-import { generateKeypair, signEvent, type Keypair, type UnsignedEvent } from "./crypto.js";
+import { generateKeypair, signEvent, type Keypair, type UnsignedEvent } from "./signing.js";
 import {
 	createChannel,
 	eventsOf,

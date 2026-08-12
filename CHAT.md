@@ -22,7 +22,7 @@ deliberately left, and the gaps we know about.
 - **Verify the event id independently of the signature.** The id is a hash of the
   body; the signature is over the id. Checking the id *first* is what stops a signed
   event being replayed with its body swapped. See `verifyEvent` in
-  `src/lib/crypto.ts`.
+  `src/lib/signing.ts`.
 - **Check access before subscription.** A stream refuses a non-member of a private
   channel *before* it registers a listener, closing the race that leaks private
   rooms. See `src/app/api/channels/[key]/stream/route.ts`.
@@ -39,7 +39,7 @@ deliberately left, and the gaps we know about.
   the protocol lock-in; interop with the Nostr ecosystem is a non-goal.
 - **Kind _integers_.** buzz names these its weak point — a global namespace with no
   compile-time coupling. Our `kind` is a closed TypeScript union an exhaustive
-  switch can check (`EVENT_KINDS` in `src/lib/crypto.ts`).
+  switch can check (`EVENT_KINDS` in `src/lib/signing.ts`).
 - **Redis** for pub/sub, presence and typing. We reuse Postgres `LISTEN/NOTIFY`,
   the one piece of infrastructure Harbor already requires — the same choice the
   coordination dashboard already made. buzz's own Redis tenant-scoping is a
@@ -50,13 +50,13 @@ deliberately left, and the gaps we know about.
 - **The formal-methods stack (TLA+/Tamarin/model checkers).** Right for buzz's
   scale, overkill here. We keep Harbor's lighter discipline: `*.test.ts` beside the
   source proving the concurrency and trust properties (`src/lib/chat.test.ts`,
-  `src/lib/crypto.test.ts`).
+  `src/lib/signing.test.ts`).
 
 ## The primitives
 
 | Primitive | Where | One-line |
 | --- | --- | --- |
-| **Signed event** | `src/lib/crypto.ts` | Ed25519 over a canonical hash; the unit everything else moves. |
+| **Signed event** | `src/lib/signing.ts` | Ed25519 over a canonical hash; the unit everything else moves. |
 | **Principal** | `principals` table | An identity is a public key; humans and agents are the same kind of row. |
 | **Channel** | `channels` table | A room with no owner; `group`/`task` are key-gated, `direct` is a fixed roster. |
 | **Membership** | `channel_members` | The access gate, checked before persist and before fan-out; carries a per-member read cursor. |
@@ -83,7 +83,7 @@ and the five-tool server is left untouched.
 
 ## Does NOT
 
-- `src/lib/crypto.ts` — does NOT store or transmit private keys; verifies the id
+- `src/lib/signing.ts` — does NOT store or transmit private keys; verifies the id
   independently of the signature.
 - `src/lib/chat.ts` — does NOT trust the org from the event body; does NOT persist
   ephemeral (`typing`/`presence`) events; does NOT let a client author membership or

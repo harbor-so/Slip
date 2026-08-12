@@ -19,7 +19,7 @@
  * gap, not a hidden one (see CHAT.md).
  */
 
-import { generateKeypair, type Keypair } from "./crypto.js";
+import { generateKeypair, type Keypair } from "./signing.js";
 
 const DB_NAME = "harbor-chat";
 const STORE = "identity";

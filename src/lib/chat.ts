@@ -1,7 +1,7 @@
 /**
  * Chat: the signed-event ingest pipeline, and the rooms it flows into.
  *
- * This is the server half of the primitive `src/lib/crypto.ts` defines. Its whole
+ * This is the server half of the primitive `src/lib/signing.ts` defines. Its whole
  * job is to be the one place an event is admitted, so the trust boundary lives in
  * exactly one function (`ingestEvent`) and cannot be half-applied on some path.
  *
@@ -25,11 +25,10 @@ import { and, asc, desc, eq, gt, sql as raw } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { channelMembers, channels, chatEvents, principals } from "../db/schema.js";
 import type { Channel, ChannelMember, ChatEvent, Principal } from "../db/schema.js";
-import { EVENT_KINDS, computeId, isEphemeral, verifyEvent } from "./crypto.js";
-import type { EventKind, SignedEvent } from "./crypto.js";
+import { setting } from "../config.js";
+import { EVENT_KINDS, computeId, isEphemeral, verifyEvent } from "./signing.js";
+import type { EventKind, SignedEvent } from "./signing.js";
 import { HarborError } from "./work.js";
-
-const MAX_CONTENT = 8000;
 
 /**
  * Kinds a client is allowed to author.
@@ -432,8 +431,9 @@ export async function ingestEvent(ctx: ConnContext, event: SignedEvent): Promise
 	if (!CLIENT_KINDS.has(event.kind)) {
 		throw new HarborError(`Events of kind "${event.kind}" are authored by the server, not clients.`);
 	}
-	if (typeof event.content !== "string" || event.content.length > MAX_CONTENT) {
-		throw new HarborError(`Content is required and must be at most ${MAX_CONTENT} characters.`);
+	const maxContent = setting("chatMaxContentChars");
+	if (typeof event.content !== "string" || event.content.length > maxContent) {
+		throw new HarborError(`Content is required and must be at most ${maxContent} characters.`);
 	}
 	if (!Array.isArray(event.tags)) throw new HarborError("Tags must be an array.");
 

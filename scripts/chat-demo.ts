@@ -16,7 +16,7 @@
 import { db, sql } from "../src/db/index.js";
 import { apiKeys, orgs } from "../src/db/schema.js";
 import { ChatClient } from "../src/lib/chat-client.js";
-import { generateKeypair } from "../src/lib/crypto.js";
+import { generateKeypair } from "../src/lib/signing.js";
 import { hashApiKey, mintApiKey } from "../src/lib/keys.js";
 
 const BASE = process.env.HARBOR_URL ?? "http://localhost:3000";
@@ -59,7 +59,7 @@ async function main() {
 	};
 
 	console.log(`\n  channel "${channel.title}"  ${BASE}/c/${channel.key}\n`);
-	for (const event of events as Array<{ kind: string; pubkey: string; content: string; seq: number }>) {
+	for (const event of events as unknown as Array<{ kind: string; pubkey: string; content: string; seq: number }>) {
 		const who = names[event.pubkey] ?? `${event.pubkey.slice(0, 8)}…`;
 		if (event.kind === "message") console.log(`  #${event.seq}  ${who.padEnd(8)} ${event.content}`);
 		else console.log(`  #${event.seq}  · ${who} ${event.kind.replace("_", " ")}`);

@@ -61,6 +61,11 @@ export async function listConnectors(orgId: string) {
 			id: connectors.id,
 			type: connectors.type,
 			status: connectors.status,
+			// The tenant key, and safe to show: it is an id the workspace already knows
+			// about itself. `config` is deliberately NOT selected — it holds bot tokens
+			// and webhook secrets, and a column that never leaves this query cannot be
+			// leaked by a page that forgets to omit it.
+			externalAccountId: connectors.externalAccountId,
 			lastSyncedAt: connectors.lastSyncedAt,
 			createdAt: connectors.createdAt,
 		})

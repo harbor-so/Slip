@@ -33,8 +33,29 @@
     {
       "idx": 4,
       "version": "7",
-      "when": 1786501085603,
-      "tag": "0004_little_inertia",
+      "when": 1786492256840,
+      "tag": "0004_brave_anita_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786501658791,
+      "tag": "0005_chubby_ender_wiggin",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786502312971,
+      "tag": "0006_tiny_tana_nile",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786515681929,
+      "tag": "0007_sudden_tinkerer",
       "breakpoints": true
     }
   ]

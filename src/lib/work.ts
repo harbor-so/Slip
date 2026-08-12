@@ -17,6 +17,7 @@
  */
 
 import { and, desc, eq, gte, isNull, lt, sql as raw } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { agentPresence, claims, events, projects, tasks } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
@@ -26,8 +27,15 @@ const MAX_LEASE_MINUTES = 8 * 60;
 
 export class HarborError extends Error {}
 
-/** How long after its last call an agent still counts as present. */
-export const PRESENCE_WINDOW_MS = 90_000;
+/**
+ * How long after its last call an agent still counts as present.
+ *
+ * Read through `setting()` rather than fixed here, because a deployment whose
+ * agents work in long silent stretches needs a wider window and should not have
+ * to fork the project to get one. Exported as a function rather than a constant
+ * so callers cannot capture a value from before the environment was configured.
+ */
+export const presenceWindowMs = (): number => setting("presenceWindowMs");
 
 /**
  * Record that an agent is alive, and wake anything listening.
@@ -96,7 +104,7 @@ export interface PresentAgent {
 
 /** Agents seen within the presence window, most recent first. */
 export async function presentAgents(orgId: string): Promise<PresentAgent[]> {
-	const cutoff = new Date(Date.now() - PRESENCE_WINDOW_MS);
+	const cutoff = new Date(Date.now() - presenceWindowMs());
 	const rows = await db
 		.select({
 			agentId: agentPresence.agentId,

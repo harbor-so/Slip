@@ -1,233 +1,182 @@
 /**
- * Signed events: the one primitive the whole chat model is built on.
+ * The encryption envelope. AES-256-GCM, and nothing hand-rolled.
  *
- * The bet here is `block/buzz`'s (a Nostr relay for humans + agents): every
- * message is a cryptographically signed event, and identity IS a public key. One
- * primitive then gives attribution, integrity, an audit trail, and a single
- * identity model for humans and agents — because a human and an agent are both
- * just a keypair, and the room never has to tell them apart.
+ * Every secret Harbor stores — repository secrets injected into a sandbox, a
+ * user's source-control token, connector OAuth credentials — goes through these
+ * two functions and no others.
  *
- * Two decisions differ from buzz on purpose:
+ * ## The envelope format, and the field that is here before it is needed
  *
- *   1. Ed25519, not secp256k1 Schnorr. Ed25519 is in WebCrypto natively, so the
- *      exact same module signs in a browser tab and verifies on the server with
- *      no dependency and no second implementation to drift. Nostr's curve would
- *      have forced a library into both.
+ *     v1.<key_id>.<base64url(iv ‖ ciphertext ‖ tag)>
  *
- *   2. The `kind` is a closed TypeScript union, not a magic integer. buzz's own
- *      assessment names kind-integers as its weak point: a global namespace with
- *      no compile-time coupling to behaviour. A string union an exhaustive switch
- *      can check is strictly better at Harbor's scale.
+ * `key_id` is present from the first migration even though key rotation is not
+ * implemented and is not on the roadmap. It costs one short string per row now.
+ * Retrofitting it later costs a migration of every secret and token in the
+ * system, and worse, that migration can only be performed by decrypting
+ * everything with the key you are trying to retire — which is to say, at the
+ * exact moment you most want to rotate (a suspected compromise), the format
+ * forces you to load the suspect key into memory and touch every row with it.
  *
- * The event id is a hash of the canonical serialization and is verified
- * INDEPENDENTLY of the signature (see `verifyEvent`). The signature proves the
- * author signed *some* payload; the id check proves it is *this* payload. Skipping
- * the second step is the subtle bug that lets a signed event be replayed with its
- * body swapped, and buzz calls it out specifically.
+ * A ciphertext that cannot name its own key is a ciphertext that cannot be
+ * rotated incrementally. The field is trivial now and impossible later, so it is
+ * now.
  *
- * This module has no Node imports and touches only `globalThis.crypto.subtle`, so
- * it is safe to import from a React client component and from server code alike.
+ * `v1` is the same argument applied to the algorithm.
+ *
+ * ## Choices
+ *
+ * A fresh random 96-bit IV per encryption, prepended. 96 bits is GCM's native
+ * nonce size — anything else makes the implementation derive one, which is a
+ * different code path with different properties. Random rather than a counter
+ * because a counter needs durable state that survives a restart, and an IV reused
+ * under one key in GCM does not degrade gracefully: it leaks the XOR of the two
+ * plaintexts and, worse, allows forgery of the authentication tag.
+ *
+ * GCM rather than CBC because the tag means a corrupted or tampered ciphertext
+ * fails loudly at decrypt. There is a test for exactly that, because "we use
+ * AES" with an unauthenticated mode is how a ciphertext-manipulation bug hides.
  */
 
-/**
- * The closed set of event kinds.
- *
- * Durable kinds are appended to the channel's ordered log; ephemeral kinds fan
- * out to live listeners and are never stored (see `isEphemeral`). Adding a
- * capability is adding a member here and a branch that handles it — the compiler
- * then finds every place that must learn about it.
- */
-export const EVENT_KINDS = [
-	"message",
-	"reaction",
-	"join",
-	"leave",
-	"system",
-	"channel_create",
-	"typing",
-	"presence",
-] as const;
-export type EventKind = (typeof EVENT_KINDS)[number];
+import {
+	createCipheriv,
+	createDecipheriv,
+	createHash,
+	randomBytes,
+	timingSafeEqual,
+} from "node:crypto";
 
-/** Kinds that fan out to live listeners but are never persisted. */
-const EPHEMERAL_KINDS = new Set<EventKind>(["typing", "presence"]);
+const VERSION = "v1";
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
+const KEY_BYTES = 32;
 
-export function isEphemeral(kind: EventKind): boolean {
-	return EPHEMERAL_KINDS.has(kind);
-}
-
-/**
- * The signable half of an event: everything the author commits to.
- *
- * `pubkey` is the author's identity. `createdAt` is unix seconds and is the
- * author's own clock — the server records its own receive time separately, and
- * never trusts this one for ordering (that is what per-channel `seq` is for).
- */
-export interface UnsignedEvent {
-	pubkey: string;
-	channelId: string;
-	kind: EventKind;
-	createdAt: number;
-	content: string;
-	/** Free-form references: `["reply", <eventId>]`, `["mention", <pubkey>]`, … */
-	tags: string[][];
-}
-
-export interface SignedEvent extends UnsignedEvent {
-	/** SHA-256 hex of the canonical serialization. The event's name. */
-	id: string;
-	/** Ed25519 signature over the 32 id bytes, hex. */
-	sig: string;
-}
-
-/**
- * Canonical serialization as a positional array, never an object.
- *
- * An array sidesteps the entire problem buzz solves with a `BTreeMap`: object key
- * ordering is not guaranteed by JSON and two encoders can disagree, which would
- * make the same event hash differently on two clients. A fixed-order array has one
- * encoding by construction, so the id is reproducible anywhere.
- */
-export function canonicalize(event: UnsignedEvent): string {
-	return JSON.stringify([
-		0,
-		event.pubkey,
-		event.channelId,
-		event.kind,
-		event.createdAt,
-		event.tags,
-		event.content,
-	]);
-}
-
-const encoder = new TextEncoder();
-
-/**
- * Copy bytes into a fresh `ArrayBuffer` for a WebCrypto call.
- *
- * TypeScript's DOM lib types `BufferSource` as backed by `ArrayBuffer`
- * specifically, while `TextEncoder.encode` and friends now return
- * `Uint8Array<ArrayBufferLike>` (which could in principle be a `SharedArrayBuffer`).
- * A one-time copy makes the type exact and the intent obvious, at a cost that does
- * not matter for 32–64 byte payloads.
- */
-function toBuffer(bytes: Uint8Array): ArrayBuffer {
-	const copy = new ArrayBuffer(bytes.byteLength);
-	new Uint8Array(copy).set(bytes);
-	return copy;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-	let hex = "";
-	for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
-	return hex;
-}
-
-function hexToBytes(hex: string): Uint8Array {
-	if (hex.length % 2 !== 0) throw new Error("Odd-length hex string.");
-	const bytes = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < bytes.length; i++) {
-		const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-		if (Number.isNaN(byte)) throw new Error("Invalid hex string.");
-		bytes[i] = byte;
+export class CryptoError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CryptoError";
 	}
-	return bytes;
-}
-
-/** The 32 id bytes: SHA-256 of the canonical serialization. */
-async function idBytes(event: UnsignedEvent): Promise<Uint8Array> {
-	const digest = await crypto.subtle.digest("SHA-256", toBuffer(encoder.encode(canonicalize(event))));
-	return new Uint8Array(digest);
-}
-
-/** The event id an author and a verifier must independently agree on. */
-export async function computeId(event: UnsignedEvent): Promise<string> {
-	return bytesToHex(await idBytes(event));
 }
 
 /**
- * A keypair, with the public half already reduced to the hex string used as an
- * identity everywhere else. The private key stays a `CryptoKey` so a browser can
- * hold a non-extractable one it can sign with but never read out.
- */
-export interface Keypair {
-	publicKeyHex: string;
-	publicKey: CryptoKey;
-	privateKey: CryptoKey;
-}
-
-export async function generateKeypair(extractable = false): Promise<Keypair> {
-	const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, extractable, [
-		"sign",
-		"verify",
-	])) as CryptoKeyPair;
-	const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
-	return { publicKeyHex: bytesToHex(raw), publicKey: pair.publicKey, privateKey: pair.privateKey };
-}
-
-/** Import a public key from the hex identity for verification. */
-export async function importPublicKey(publicKeyHex: string): Promise<CryptoKey> {
-	return crypto.subtle.importKey("raw", toBuffer(hexToBytes(publicKeyHex)), { name: "Ed25519" }, true, [
-		"verify",
-	]);
-}
-
-/**
- * JWK is the one private-key form WebCrypto will export for Ed25519 (`raw` is
- * refused), so it is how a non-browser holder — a script, an agent runtime —
- * persists a key between runs. A browser should prefer storing the non-extractable
- * `CryptoKey` itself in IndexedDB and never call this.
- */
-export async function exportPrivateKeyJwk(privateKey: CryptoKey): Promise<JsonWebKey> {
-	return crypto.subtle.exportKey("jwk", privateKey);
-}
-
-export async function importPrivateKeyJwk(jwk: JsonWebKey): Promise<CryptoKey> {
-	return crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
-}
-
-/** Compute the id, then sign it. The returned event is ready to send. */
-export async function signEvent(
-	event: UnsignedEvent,
-	privateKey: CryptoKey,
-): Promise<SignedEvent> {
-	const id = await idBytes(event);
-	const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, toBuffer(id)));
-	return { ...event, id: bytesToHex(id), sig: bytesToHex(sig) };
-}
-
-/**
- * Verify an event end to end, and say why it failed.
+ * The active key and its id.
  *
- * The order matters and is the whole point: recompute the id from the body FIRST
- * and reject a mismatch, THEN check the signature against that id. A verifier that
- * only checks the signature over the *claimed* id accepts an event whose body was
- * swapped after signing — the signature still covers the old id, and nothing
- * notices the content no longer hashes to it.
+ * `HARBOR_ENCRYPTION_KEY` is 32 bytes, base64. There is deliberately no
+ * development fallback and no generate-one-if-missing: a key that Harbor invented
+ * on boot is a key that changes on the next boot, and every secret in the
+ * database becomes permanently unreadable with no error until somebody tries to
+ * start a session. Failing at startup with a command to run is the kinder
+ * failure by a wide margin.
+ *
+ * The id is derived from the key rather than configured separately, so an
+ * operator cannot label two different keys with the same id — which would defeat
+ * the entire purpose of having the field.
  */
-export async function verifyEvent(event: SignedEvent): Promise<{ ok: true } | { ok: false; reason: string }> {
-	let recomputed: Uint8Array;
+function activeKey(): { id: string; key: Buffer } {
+	const raw = process.env.HARBOR_ENCRYPTION_KEY?.trim();
+	if (!raw) {
+		throw new CryptoError(
+			"HARBOR_ENCRYPTION_KEY is not set. Generate one with:\n"
+				+ "  openssl rand -base64 32\n"
+				+ "Harbor will not invent a key: one generated at boot changes on the next boot, "
+				+ "and every secret already stored becomes silently unreadable.",
+		);
+	}
+
+	const key = Buffer.from(raw, "base64");
+	if (key.length !== KEY_BYTES) {
+		throw new CryptoError(
+			`HARBOR_ENCRYPTION_KEY must decode to ${KEY_BYTES} bytes, got ${key.length}. `
+				+ "Generate one with: openssl rand -base64 32",
+		);
+	}
+
+	// A short, stable fingerprint. Not a secret — it identifies which key was
+	// used, which is exactly what an attacker already learns from the envelope.
+	const id = createHash("sha256").update(key).digest("hex").slice(0, 8);
+
+	return { id, key };
+}
+
+/** True when a key is configured. Used to fail fast at startup rather than at use. */
+export function encryptionConfigured(): boolean {
 	try {
-		recomputed = await idBytes(event);
+		activeKey();
+		return true;
 	} catch {
-		return { ok: false, reason: "Event is not serializable." };
+		return false;
 	}
-	if (bytesToHex(recomputed) !== event.id) {
-		return { ok: false, reason: "Event id does not match its contents." };
+}
+
+export function encrypt(plaintext: string): string {
+	const { id, key } = activeKey();
+	const iv = randomBytes(IV_BYTES);
+	const cipher = createCipheriv("aes-256-gcm", key, iv);
+	const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+	const tag = cipher.getAuthTag();
+	return `${VERSION}.${id}.${Buffer.concat([iv, body, tag]).toString("base64url")}`;
+}
+
+export function decrypt(envelope: string): string {
+	const parts = envelope.split(".");
+	if (parts.length !== 3) {
+		throw new CryptoError("Malformed envelope: expected `version.key_id.payload`.");
 	}
-	let publicKey: CryptoKey;
-	let sig: Uint8Array;
+	const [version, keyId, payload] = parts as [string, string, string];
+
+	if (version !== VERSION) {
+		throw new CryptoError(
+			`Envelope version ${version} is not supported by this build (expected ${VERSION}).`,
+		);
+	}
+
+	const { id, key } = activeKey();
+	if (keyId !== id) {
+		// Named explicitly rather than folded into a generic decryption failure.
+		// "The tag did not verify" and "this was encrypted with a different key"
+		// have completely different remedies, and an operator who has just rotated
+		// a key needs to be told which one they are looking at.
+		throw new CryptoError(
+			`This value was encrypted with key ${keyId}, but HARBOR_ENCRYPTION_KEY is key ${id}. `
+				+ "Restore the original key to read it. Harbor does not support decrypting with "
+				+ "multiple keys yet, but the envelope records which key was used so that "
+				+ "incremental rotation is possible without re-encrypting everything at once.",
+		);
+	}
+
+	const buffer = Buffer.from(payload, "base64url");
+	if (buffer.length < IV_BYTES + TAG_BYTES) {
+		throw new CryptoError("Malformed envelope: payload is shorter than an IV plus a tag.");
+	}
+
+	const iv = buffer.subarray(0, IV_BYTES);
+	const tag = buffer.subarray(buffer.length - TAG_BYTES);
+	const body = buffer.subarray(IV_BYTES, buffer.length - TAG_BYTES);
+
+	const decipher = createDecipheriv("aes-256-gcm", key, iv);
+	decipher.setAuthTag(tag);
 	try {
-		publicKey = await importPublicKey(event.pubkey);
-		sig = hexToBytes(event.sig);
+		return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
 	} catch {
-		return { ok: false, reason: "Malformed public key or signature." };
+		// `final()` throws when the tag does not verify. That is the authenticated
+		// part of authenticated encryption doing its job, and the message says so
+		// rather than reporting a generic failure that reads like a bug in Harbor.
+		throw new CryptoError(
+			"Authentication failed: this ciphertext was modified, truncated, or is not "
+				+ "Harbor's. It has not been decrypted and no partial plaintext was returned.",
+		);
 	}
-	const valid = await crypto.subtle.verify(
-		{ name: "Ed25519" },
-		publicKey,
-		toBuffer(sig),
-		toBuffer(recomputed),
-	);
-	return valid ? { ok: true } : { ok: false, reason: "Signature does not verify." };
+}
+
+/**
+ * Constant-time comparison for anything derived from a secret.
+ *
+ * Exported here rather than reimplemented at three call sites, because the
+ * length check in front of `timingSafeEqual` is easy to forget and the function
+ * throws on a length mismatch rather than returning false.
+ */
+export function secretEquals(a: string, b: string): boolean {
+	const left = Buffer.from(a);
+	const right = Buffer.from(b);
+	if (left.length !== right.length) return false;
+	return timingSafeEqual(left, right);
 }

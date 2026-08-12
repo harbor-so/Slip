@@ -9,7 +9,7 @@
 import { conflictsPrevented, recentEvents } from "../lib/dashboard.js";
 import { relTime, shortId } from "../lib/format.js";
 import { currentSession } from "../lib/session.js";
-import { listWork, PRESENCE_WINDOW_MS, presentAgents } from "../lib/work.js";
+import { listWork, presenceWindowMs, presentAgents } from "../lib/work.js";
 import { Badge, Card, Empty, SectionLabel, Stat, type Tone } from "../components/ui.js";
 import { LiveRefresh } from "./live.js";
 
@@ -53,7 +53,7 @@ export default async function ActivityPage() {
 				{present.length === 0 ? (
 					<Empty
 						title="No agents connected"
-						hint={`An agent appears here the moment it calls any Harbor tool, and drops off after ${Math.round(PRESENCE_WINDOW_MS / 1000)}s of silence.`}
+						hint={`An agent appears here the moment it calls any Harbor tool, and drops off after ${Math.round(presenceWindowMs() / 1000)}s of silence.`}
 					/>
 				) : (
 					<div className="flex flex-wrap gap-2">
