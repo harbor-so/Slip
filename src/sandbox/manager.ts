@@ -84,7 +84,7 @@ import {
 } from "../contracts/index.js";
 import { db } from "../db/index.js";
 import { claims, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
-import { budgetStatus, finalizeReservation, reserveBudget } from "../lib/cost.js";
+import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
@@ -672,7 +672,10 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 		queueDepth,
 		sessionPausedReason: session.pausedReason,
 		circuit,
-		estimateMicroUsd: input.estimateMicroUsd ?? 0,
+		// The operator's per-spawn estimate, so the daily cap can gate spawns and
+		// not only the token spend recorded after the fact. Zero by default — an
+		// honest zero; see the setting's derivation.
+		estimateMicroUsd: input.estimateMicroUsd ?? setting("sandboxSpawnEstimateMicroUsd", overrides),
 		image: input.image,
 		workspace: input.workspace,
 		env: input.env,
@@ -1516,10 +1519,15 @@ export async function snapshotSandbox(
 
 	try {
 		const ref = await provider.snapshot(row.externalId);
-		// The ref and its `sandbox_snapshotted` event commit together. A snapshot
-		// used to be invisible: nothing on the timeline said state was captured, so
-		// a session that restored from one looked like it resumed from nowhere, and
-		// a snapshot that silently replaced an older one left no record of either.
+		// The ref, its `sandbox_snapshotted` event AND its cost row commit
+		// together. A snapshot used to be invisible twice over: nothing on the
+		// timeline said state was captured, and nothing in cost_events said the
+		// provider did storage work — a spend path with no accounting. The row is
+		// zero-priced for the same reason the spawn estimate defaults to zero
+		// (Harbor cannot know what a snapshot costs on this backend), but it
+		// EXISTS, keyed on the handle so a retried capture is absorbed, which is
+		// what lets an operator attribute provider bills to sessions after the
+		// fact.
 		await db.transaction(async (tx) => {
 			await tx
 				.update(sandboxes)
@@ -1540,6 +1548,21 @@ export async function snapshotSandbox(
 						snapshot_handle: ref.handle,
 						provider: ref.provider,
 					},
+				},
+				{ executor: tx },
+			);
+			await recordCost(
+				{
+					orgId: row.orgId,
+					sessionId: row.sessionId,
+					claimId: null,
+					key: `snapshot:${ref.handle}`,
+					kind: "provider_call",
+					actor: options.actor ?? "harbor",
+					provider: ref.provider,
+					microUsd: 0,
+					quantity: 1,
+					createdAt: options.now ?? new Date(),
 				},
 				{ executor: tx },
 			);

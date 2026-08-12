@@ -373,7 +373,18 @@ export interface CostWriteResult {
  * where a crash would otherwise either lose the charge (record-after) or invent
  * one (record-before) is closed by the retry being a no-op.
  */
-export async function recordCost(input: CostWrite): Promise<CostWriteResult> {
+export async function recordCost(
+	input: CostWrite,
+	options: {
+		/**
+		 * Run the insert on the caller's transaction, so a cost row commits
+		 * atomically with the state change it prices — a snapshot ref and its
+		 * `provider_call` row are one fact. Same contract as `AppendOptions` in
+		 * session-events.ts.
+		 */
+		executor?: Executor;
+	} = {},
+): Promise<CostWriteResult> {
 	const status = input.status ?? "final";
 	const microUsd = normalizeMicroUsd(input.microUsd, "recordCost");
 	const createdAt = input.createdAt ?? new Date();
@@ -405,7 +416,7 @@ export async function recordCost(input: CostWrite): Promise<CostWriteResult> {
 		createdAt,
 	}));
 
-	const inserted = await db
+	const inserted = await (options.executor ?? db)
 		.insert(costEvents)
 		.values(rows)
 		.onConflictDoNothing({ target: costEvents.id })
@@ -452,6 +463,49 @@ export async function recordTokenUsage(
 			+ (input.usage.outputTokens ?? 0)
 			+ (input.usage.cacheReadTokens ?? 0)
 			+ (input.usage.cacheWriteTokens ?? 0),
+		microUsd: quote.microUsd,
+		createdAt: input.createdAt,
+	});
+	return { quote, write };
+}
+
+/**
+ * Price and record what a sandbox agent reported spending, in one call.
+ *
+ * This is the ingest route's cost primitive — the one that closes "model spend
+ * writes no cost_events row". The bridge's `agent_finished`/`agent_failed`
+ * payload carries an `AgentUsage` block, and every one of them lands here as a
+ * `tokens` row: agent-reported money wins over the table price and is stamped
+ * `agent_reported` (the agent's own bill is the fact; our table is the
+ * estimate), `source: "unavailable"` records a zero-priced row that is VISIBLE
+ * rather than invented, and the key is the prompt id so a re-sent batch — a
+ * POST whose 200 was lost — derives the same row ids and is absorbed.
+ */
+export async function recordAgentUsage(
+	input: CostRef & {
+		repoId?: string | null;
+		actor?: string | null;
+		provider?: string | null;
+		usage: Parameters<typeof priceAgentUsage>[0];
+		createdAt?: Date;
+	},
+): Promise<{ quote: PriceQuote; write: CostWriteResult }> {
+	const quote = priceAgentUsage(input.usage);
+	const write = await recordCost({
+		orgId: input.orgId,
+		claimId: input.claimId,
+		sessionId: input.sessionId,
+		key: input.key,
+		kind: "tokens",
+		repoId: input.repoId,
+		actor: input.actor,
+		provider: input.provider ?? (quote.priced ? quote.provider : null),
+		model: stampModel(input.usage.model, quote),
+		quantity:
+			input.usage.input_tokens
+			+ input.usage.output_tokens
+			+ (input.usage.cache_read_tokens ?? 0)
+			+ (input.usage.cache_write_tokens ?? 0),
 		microUsd: quote.microUsd,
 		createdAt: input.createdAt,
 	});

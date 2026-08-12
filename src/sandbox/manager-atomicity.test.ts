@@ -26,11 +26,11 @@ import { and, eq } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { db, sql } from "../db/index.js";
-import { orgs, sandboxes, sessionEvents, sessionPrompts, sessions } from "../db/schema.js";
+import { costEvents, orgs, sandboxes, sessionEvents, sessionPrompts, sessions } from "../db/schema.js";
 import { appendEvent, appendEvents } from "../lib/session-events.js";
 import { completeTurn, takeNextPrompt } from "../lib/session-runner.js";
 import { createSession, queuePrompt } from "../lib/sessions.js";
-import { ensureSandbox, markSandboxReady, onInactivity, stopSandbox } from "./manager.js";
+import { ensureSandbox, markSandboxReady, onInactivity, snapshotSandbox, stopSandbox } from "./manager.js";
 import { SandboxProviderError } from "./provider.js";
 import type {
 	CreateSandboxConfig,
@@ -427,6 +427,60 @@ describe("the inactivity reaper's transition and event are one transaction", () 
 		expect(after!.status).toBe("stopped");
 		expect(await eventsOfType("sandbox_stopped")).toHaveLength(1);
 		expect(fake.stopCalls).toBe(1);
+	});
+});
+
+describe("snapshot ref, its event and its cost row are one transaction", () => {
+	const snapshotProvider = (base: ReturnType<typeof fakeProvider>) =>
+		({
+			...base.provider,
+			kind: "snapshot",
+			async snapshot(externalId: string) {
+				return {
+					provider: "fake",
+					handle: `snap-${externalId}`,
+					sourceExternalId: externalId,
+					takenAt: new Date().toISOString(),
+				};
+			},
+			async restoreFromSnapshot() {
+				throw new Error("not exercised here");
+			},
+		}) as unknown as import("./provider.js").SnapshotProvider;
+
+	it("an aborted event leaves no ref, no event and no cost row; the retry lands all three", async () => {
+		const fake = fakeProvider();
+		const outcome = await ensureSandbox({ orgId, sessionId, provider: fake.provider });
+		if (outcome.kind !== "created") throw new Error(`expected created, got ${outcome.kind}`);
+		await markSandboxReady(outcome.sandbox_id);
+		const provider = snapshotProvider(fake);
+
+		await armAbortOn("sandbox_snapshotted");
+		const failed = await snapshotSandbox(provider, outcome.sandbox_id);
+		expect(failed.kind).toBe("failed");
+
+		const [row] = await sandboxRows();
+		expect(row!.snapshotRef).toBeNull();
+		expect(await eventsOfType("sandbox_snapshotted")).toHaveLength(0);
+		const costBefore = await db
+			.select()
+			.from(costEvents)
+			.where(eq(costEvents.sessionId, sessionId));
+		expect(costBefore.filter((r) => r.kind.includes("provider_call"))).toHaveLength(0);
+
+		// A snapshot used to be doubly invisible: no timeline event and no cost
+		// row. The retry proves all three halves land together.
+		await disarm();
+		const captured = await snapshotSandbox(provider, outcome.sandbox_id);
+		expect(captured.kind).toBe("captured");
+		const [after] = await sandboxRows();
+		expect(after!.snapshotRef).not.toBeNull();
+		expect(await eventsOfType("sandbox_snapshotted")).toHaveLength(1);
+		const costAfter = await db
+			.select()
+			.from(costEvents)
+			.where(eq(costEvents.sessionId, sessionId));
+		expect(costAfter.filter((r) => r.kind.includes("provider_call"))).toHaveLength(1);
 	});
 });
 
