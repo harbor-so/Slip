@@ -62,7 +62,7 @@ export function LaunchPanel({ enabled }: { enabled: boolean }) {
 						className={`rounded-md px-3 py-1.5 text-sm ${
 							runtime === id
 								? "bg-primary text-primary-foreground"
-								: "bg-muted text-muted-foreground"
+								: "bg-raised text-muted-foreground"
 						}`}
 						key={id}
 						onClick={() => setRuntime(id)}

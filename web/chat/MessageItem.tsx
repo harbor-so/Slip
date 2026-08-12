@@ -47,7 +47,7 @@ export function MessageItem({
 	const replyTo = replyTargetOf(event);
 
 	return (
-		<div className="group relative rounded-md px-2 py-0.5 hover:bg-accent/40">
+		<div className="group relative rounded-md px-2 py-0.5 hover:bg-raised/40">
 			{replyTo ? (
 				<div className="mb-0.5 flex items-center gap-1 pl-1 text-xs text-muted-foreground">
 					<span className="text-muted-foreground/60">↳</span>
@@ -69,7 +69,7 @@ export function MessageItem({
 								className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs ${
 									mine
 										? "border-primary/40 bg-primary/15 text-primary"
-										: "border-border bg-muted text-muted-foreground hover:border-primary/30"
+										: "border-border bg-raised text-muted-foreground hover:border-primary/30"
 								}`}
 								key={tally.emoji}
 								onClick={() => onReact(event.id, tally.emoji)}
@@ -96,7 +96,7 @@ export function MessageItem({
 				) : (
 					<div className="flex items-center gap-0.5 rounded-md border border-border bg-popover p-0.5 shadow-sm">
 						<button
-							className="rounded px-1 py-0.5 text-xs hover:bg-accent"
+							className="rounded px-1 py-0.5 text-xs hover:bg-raised"
 							onClick={() => setPicking(true)}
 							title="React"
 							type="button"
@@ -104,7 +104,7 @@ export function MessageItem({
 							😊
 						</button>
 						<button
-							className="rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+							className="rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground"
 							onClick={() => onReply(event)}
 							title="Reply"
 							type="button"

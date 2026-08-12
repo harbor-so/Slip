@@ -28,13 +28,13 @@ export function cn(...inputs: ClassValue[]) {
  * findable by scanning the page rather than by reading it.
  */
 const TONES = {
-	open: "bg-muted text-muted-foreground",
+	open: "bg-raised text-muted-foreground",
 	claimed: "bg-primary/15 text-primary",
 	completed: "bg-success/15 text-success",
-	released: "bg-muted text-muted-foreground",
+	released: "bg-raised text-muted-foreground",
 	expired: "bg-destructive/10 text-destructive",
 	conflict: "bg-destructive/15 text-destructive",
-	neutral: "bg-muted text-muted-foreground",
+	neutral: "bg-raised text-muted-foreground",
 } as const;
 
 export type Tone = keyof typeof TONES;

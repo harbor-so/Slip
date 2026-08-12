@@ -18,7 +18,7 @@ export function QuickReact({ onPick }: { onPick: (emoji: string) => void }) {
 		<div className="flex items-center gap-0.5 rounded-md border border-border bg-popover p-0.5 shadow-sm">
 			{QUICK_REACTIONS.map((emoji) => (
 				<button
-					className="rounded px-1 py-0.5 text-sm hover:bg-accent"
+					className="rounded px-1 py-0.5 text-sm hover:bg-raised"
 					key={emoji}
 					onClick={() => onPick(emoji)}
 					type="button"

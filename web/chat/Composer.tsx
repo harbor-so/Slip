@@ -55,7 +55,7 @@ export function Composer({
 	return (
 		<Card className="space-y-2">
 			{replyTo ? (
-				<div className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1 text-xs">
+				<div className="flex items-center gap-2 rounded-md bg-raised/50 px-2 py-1 text-xs">
 					<span className="text-muted-foreground">Replying to</span>
 					<span className="font-medium">{nameFor(replyTo.pubkey)}</span>
 					<span className="truncate text-muted-foreground">{replyTo.content.slice(0, 60)}</span>

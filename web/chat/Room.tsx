@@ -125,7 +125,7 @@ export function Room(props: {
 						onLaunched={() => setShowLaunch(false)}
 					/>
 					{runnerEnabled ? (
-						<p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+						<p className="rounded-md bg-raised/40 px-3 py-2 text-xs text-muted-foreground">
 							The agent is launched with the prompt above and asked to join this room. Full
 							participation — an agent posting its own signed events here — needs a chat keypair
 							wired into the run, which is a backend follow-up; until then the launch is real but

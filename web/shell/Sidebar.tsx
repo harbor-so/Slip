@@ -97,8 +97,8 @@ export function Sidebar({
 								className={cn(
 									"flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors",
 									active
-										? "bg-muted text-foreground"
-										: "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+										? "bg-raised text-foreground"
+										: "text-muted-foreground hover:bg-raised/60 hover:text-foreground",
 								)}
 							>
 								<Icon className="size-4" />
@@ -124,7 +124,7 @@ export function Sidebar({
 								<li key={account.type}>
 									<Link
 										href="/connectors"
-										className="flex items-center gap-2 rounded-md px-2.5 py-1.5 hover:bg-muted/60"
+										className="flex items-center gap-2 rounded-md px-2.5 py-1.5 hover:bg-raised/60"
 										title={account.type}
 									>
 										<span

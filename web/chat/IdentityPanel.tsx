@@ -74,7 +74,7 @@ export function IdentityPanel({
 				<div>
 					<span className="text-xs text-muted-foreground">Public key</span>
 					<button
-						className="mt-1 block w-full truncate rounded-md border border-border bg-muted/40 px-3 py-1.5 text-left font-mono text-xs hover:border-primary/30"
+						className="mt-1 block w-full truncate rounded-md border border-border bg-raised/40 px-3 py-1.5 text-left font-mono text-xs hover:border-primary/30"
 						onClick={() => {
 							if (pubkey) void navigator.clipboard.writeText(pubkey);
 							setCopied(true);
@@ -87,7 +87,7 @@ export function IdentityPanel({
 					</button>
 				</div>
 
-				<p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+				<p className="rounded-md bg-raised/40 px-3 py-2 text-xs text-muted-foreground">
 					This key lives only in this browser and never reaches the server. It has no backup
 					and no recovery — a different browser is a different person until key portability is
 					built.

@@ -96,7 +96,7 @@ export function CreateForm({ targets, runtimes }: { targets: Target[]; runtimes:
 	if (!open) {
 		return (
 			<button
-				className="rounded border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+				className="rounded border border-border px-3 py-1.5 text-sm text-foreground hover:bg-raised"
 				onClick={() => setOpen(true)}
 				type="button"
 			>
@@ -154,7 +154,7 @@ export function CreateForm({ targets, runtimes }: { targets: Target[]; runtimes:
 									value={secret}
 								/>
 								<button
-									className="shrink-0 rounded border border-border px-2 py-1 text-xs text-foreground hover:bg-muted"
+									className="shrink-0 rounded border border-border px-2 py-1 text-xs text-foreground hover:bg-raised"
 									onClick={() => setSecret(randomSecret())}
 									type="button"
 								>
@@ -276,7 +276,7 @@ export function CreateForm({ targets, runtimes }: { targets: Target[]; runtimes:
 					{pending ? "creating…" : "Create"}
 				</button>
 				<button
-					className="rounded border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted"
+					className="rounded border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-raised"
 					onClick={() => setOpen(false)}
 					type="button"
 				>

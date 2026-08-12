@@ -80,7 +80,7 @@ export function LaunchAgentForm({
 				{RUNTIMES.map((id) => (
 					<button
 						className={`rounded-md px-3 py-1.5 text-sm ${
-							runtime === id ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+							runtime === id ? "bg-primary text-primary-foreground" : "bg-raised text-muted-foreground"
 						}`}
 						key={id}
 						onClick={() => setRuntime(id)}

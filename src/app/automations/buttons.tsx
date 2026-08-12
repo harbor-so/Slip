@@ -41,7 +41,7 @@ export function RunNowButton({ automationId }: { automationId: string }) {
 		<span className="inline-flex items-center gap-2">
 			{result ? <span className="text-xs text-muted-foreground">{result}</span> : null}
 			<button
-				className="rounded border border-border px-2 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+				className="rounded border border-border px-2 py-1 text-xs text-foreground hover:bg-raised disabled:opacity-50"
 				disabled={pending}
 				onClick={run}
 				type="button"

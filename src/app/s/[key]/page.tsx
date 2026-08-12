@@ -55,7 +55,7 @@ export default async function SessionRoom({ params }: { params: Promise<{ key: s
 				<div className="flex flex-wrap gap-2">
 					{people.map((person) => (
 						<span
-							className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground"
+							className="rounded-md bg-raised px-2 py-1 text-xs text-muted-foreground"
 							key={person.id}
 						>
 							{person.participant}

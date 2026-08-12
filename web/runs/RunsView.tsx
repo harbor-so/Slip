@@ -74,7 +74,7 @@ export function RunsView({ seed, enabled }: { seed: RunRow[]; enabled: boolean }
 								</div>
 								<p className="mt-2 text-xs text-muted-foreground">{run.prompt}</p>
 								{run.output ? (
-									<pre className="mt-3 max-h-64 overflow-auto rounded bg-muted/40 p-3 text-xs leading-relaxed">
+									<pre className="mt-3 max-h-64 overflow-auto rounded bg-raised/40 p-3 text-xs leading-relaxed">
 										{run.output.slice(-4000)}
 									</pre>
 								) : null}

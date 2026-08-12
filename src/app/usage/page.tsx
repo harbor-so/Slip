@@ -128,7 +128,7 @@ export default async function UsagePage() {
 							UTC day · {usd(budget.remainingMicroUsd)} remaining
 						</span>
 					</div>
-					<div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+					<div className="mt-2 h-1.5 overflow-hidden rounded-full bg-raised">
 						<div
 							className={budget.exhausted ? "h-full bg-destructive" : "h-full bg-primary"}
 							style={{
