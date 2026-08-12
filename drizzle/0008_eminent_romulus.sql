@@ -1,0 +1,2 @@
+ALTER TABLE "automation_runs" ADD COLUMN "dedupe_key" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "automation_runs_dedupe_idx" ON "automation_runs" USING btree ("automation_id","dedupe_key") WHERE "automation_runs"."dedupe_key" is not null;

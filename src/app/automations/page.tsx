@@ -14,13 +14,15 @@
  * people stop opening.
  */
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { automationRuns, automations, environments, repos } from "../../db/schema.js";
 import { currentSession } from "../../lib/session.js";
+import { AGENT_RUNTIMES } from "../../contracts/agent.js";
 import { nextRun } from "../../triggers/cron.js";
 import { Badge, Card, Empty, SectionLabel } from "../../components/ui.js";
 import { ResumeButton, RunNowButton } from "./buttons.js";
+import { CreateForm } from "./create-form.js";
 
 export const dynamic = "force-dynamic";
 
@@ -57,36 +59,57 @@ export default async function AutomationsPage() {
 	const session = await currentSession();
 	if (!session) return <Empty title="Not signed in." />;
 
-	const rows = await db
-		.select()
-		.from(automations)
-		.where(eq(automations.orgId, session.orgId))
-		.orderBy(automations.name);
-
-	if (rows.length === 0) {
-		return (
-			<Empty
-				title="No automations yet."
-				hint="An automation starts a session on a schedule or on an event — triage new Sentry errors, sweep dependency updates on Monday morning, review every pull request that touches src/api."
-			/>
-		);
-	}
-
-	const [runs, repoRows, envRows] = await Promise.all([
+	const [rows, repoRows, envRows] = await Promise.all([
 		db
 			.select()
-			.from(automationRuns)
-			.where(
-				inArray(
-					automationRuns.automationId,
-					rows.map((row) => row.id),
-				),
-			)
-			.orderBy(desc(automationRuns.startedAt))
-			.limit(rows.length * 6),
+			.from(automations)
+			.where(eq(automations.orgId, session.orgId))
+			.orderBy(automations.name),
 		db.select().from(repos).where(eq(repos.orgId, session.orgId)),
 		db.select().from(environments).where(eq(environments.orgId, session.orgId)),
 	]);
+
+	// Targets and runtimes for the create form, built regardless of whether any
+	// automations exist yet — the form is the only way to create the first one, so
+	// it cannot live behind the "you have automations" branch.
+	const targets = [
+		...repoRows.map((repo) => ({
+			id: repo.id,
+			kind: "repo" as const,
+			label: `${repo.owner}/${repo.name}`,
+		})),
+		...envRows.map((environment) => ({
+			id: environment.id,
+			kind: "environment" as const,
+			label: environment.name,
+		})),
+	];
+	const createForm = <CreateForm targets={targets} runtimes={[...AGENT_RUNTIMES]} />;
+
+	if (rows.length === 0) {
+		return (
+			<div className="space-y-6">
+				<SectionLabel>Automations</SectionLabel>
+				{createForm}
+				<Empty
+					title="No automations yet."
+					hint="An automation starts a session on a schedule or on an event — triage new Sentry errors, sweep dependency updates on Monday morning, review every pull request that touches src/api."
+				/>
+			</div>
+		);
+	}
+
+	const runs = await db
+		.select()
+		.from(automationRuns)
+		.where(
+			inArray(
+				automationRuns.automationId,
+				rows.map((row) => row.id),
+			),
+		)
+		.orderBy(desc(automationRuns.startedAt))
+		.limit(rows.length * 6);
 
 	const targetName = (automation: typeof automations.$inferSelect): string => {
 		if (automation.targetKind === "repo") {
@@ -108,6 +131,7 @@ export default async function AutomationsPage() {
 	return (
 		<div className="space-y-6">
 			<SectionLabel>Automations</SectionLabel>
+			{createForm}
 
 			{ordered.map((automation) => {
 				const mine = runs.filter((run) => run.automationId === automation.id).slice(0, 6);
@@ -131,6 +155,11 @@ export default async function AutomationsPage() {
 								<div className="mt-1 text-xs text-muted-foreground">
 									{describeSource(automation)} → {targetName(automation)}
 								</div>
+								{automation.source !== "cron" ? (
+									<div className="mt-1 font-mono text-xs text-muted-foreground/80">
+										POST /api/triggers/{automation.source}/{automation.id}
+									</div>
+								) : null}
 								<p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
 									{automation.prompt}
 								</p>
