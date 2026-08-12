@@ -23,6 +23,7 @@ import {
 	uniqueIndex,
 	uuid,
 } from "drizzle-orm/pg-core";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 
 export const orgs = pgTable("orgs", {
 	id: uuid("id").primaryKey().defaultRandom(),
@@ -111,13 +112,20 @@ export const tasks = pgTable(
 );
 
 /**
- * The coordination primitive.
+ * The coordination primitive — a lease over a namespaced scope, not a lock on a
+ * task row.
  *
- * The partial unique index is the entire mechanism: at most one row per task
- * with `released_at is null`. Two agents racing to claim the same task both
- * issue an INSERT, Postgres serialises them, and exactly one gets a unique
- * violation. The loser is not an error to swallow — it is a `claim_conflict`
- * event, and that event is the number the product is ultimately judged by.
+ * The partial unique index is the entire mechanism: at most one active row per
+ * `(org_id, scope)` with `released_at is null`. Two agents racing to claim the
+ * same scope both issue an INSERT, Postgres serialises them, and exactly one
+ * gets a unique violation. The loser is not an error to swallow — it is a
+ * `claim_conflict` event, and that event is the number the product is ultimately
+ * judged by.
+ *
+ * `scope` is `<namespace>:<identifier>` and is the only thing the invariant
+ * depends on. `task_id` survives as a nullable convenience for the dashboard's
+ * join, but a lease can exist with no task at all (a `github:` path), so nothing
+ * load-bearing may key on it.
  *
  * Note what the index does NOT cover: expiry. An expired-but-unreleased claim
  * still occupies the slot. That is deliberate — a partial index cannot depend
@@ -129,10 +137,57 @@ export const claims = pgTable(
 	"claims",
 	{
 		id: uuid("id").primaryKey().defaultRandom(),
-		taskId: uuid("task_id")
+		/**
+		 * The tenant this lease belongs to.
+		 *
+		 * Denormalised onto the claim rather than reached through `task_id`, because
+		 * `task_id` is now nullable — a lease can be over a `github:...` path with no
+		 * task row at all — so the org can no longer be recovered by a join. Every
+		 * claim read and write filters on it directly; without the column, an agent
+		 * holding one org's key could touch another org's lease by passing its id.
+		 */
+		orgId: uuid("org_id")
 			.notNull()
-			.references(() => tasks.id),
+			.references(() => orgs.id),
+		/**
+		 * What is leased, as `<namespace>:<identifier>` — the load-bearing key.
+		 *
+		 * The kernel never parses the part after the colon; a per-namespace
+		 * `ScopeResolver` (src/lib/scope.ts) decides containment. This is what
+		 * generalises the lease past "a row in `tasks`": `linear:ENG-4471`,
+		 * `github:acme/api#src/billing/**`. The active-lease uniqueness invariant is
+		 * enforced on `(org_id, scope)`, not on `task_id`.
+		 */
+		scope: text("scope").notNull(),
+		/**
+		 * A nullable convenience foreign key for the dashboard's task join.
+		 *
+		 * Explicitly NOT load-bearing for the claim invariant — that moved to
+		 * `scope`. A lease over a path or an external identifier need not correspond
+		 * to any `tasks` row, so this is null for those and the FK is soft.
+		 */
+		taskId: uuid("task_id").references(() => tasks.id),
 		agentId: text("agent_id").notNull(),
+		/**
+		 * What the holder may do, drawn from {read, write, spawn, publish, merge,
+		 * delegate}. Every lease is currently minted `{read, write}`. Rights never
+		 * widen: `narrow()` (src/lib/rights.ts) refuses a child lease asking for a
+		 * right the parent does not hold. Enforcement of individual rights beyond
+		 * that subset check is future work; the column exists now because adding it
+		 * later means migrating every historical lease blind.
+		 */
+		rights: text("rights")
+			.array()
+			.notNull()
+			.default(sql`'{read,write}'`),
+		/**
+		 * The lease this one was narrowed from, if any. Self-referencing, nullable.
+		 *
+		 * Nothing delegates yet, but revoking a parent must cascade to its children
+		 * (a test asserts it), and that relationship cannot be reconstructed after
+		 * the fact — so the edge is recorded at mint even though no code walks it.
+		 */
+		parentLeaseId: uuid("parent_lease_id").references((): AnyPgColumn => claims.id),
 		/**
 		 * Why this work is being done, in the claimant's own words.
 		 *
@@ -140,11 +195,16 @@ export const claims = pgTable(
 		 * answer is why somebody started — the question asked six months later,
 		 * usually by whoever has to decide whether a change can be reverted.
 		 *
-		 * Attached to the claim rather than the task on purpose: one task can be
+		 * Required at mint (min 10 chars), enforced in `claim()`. This is not
+		 * documentation hygiene: the intent is what makes reading the shared
+		 * substrate cheaper than re-deriving it, so it must be structurally
+		 * impossible to hold a lease without one.
+		 *
+		 * Attached to the claim rather than the task on purpose: one scope can be
 		 * claimed three times for three different reasons, and the reason belongs
 		 * to the attempt, not to the ticket.
 		 */
-		intent: text("intent"),
+		intent: text("intent").notNull(),
 		/** A spec, design doc, thread or issue URL backing that intent. */
 		intentRef: text("intent_ref"),
 		claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
@@ -153,11 +213,17 @@ export const claims = pgTable(
 		completionSummary: text("completion_summary"),
 	},
 	(table) => [
-		uniqueIndex("one_active_claim_per_task")
-			.on(table.taskId)
+		// The entire race mechanism, now keyed on scope-within-org rather than on a
+		// task row: at most one active lease per `(org_id, scope)`. `claim()` targets
+		// this exact partial index in its ON CONFLICT, so two agents racing the same
+		// scope still yield one winner and one `claim_conflict`.
+		uniqueIndex("one_active_lease_per_scope")
+			.on(table.orgId, table.scope)
 			.where(sql`${table.releasedAt} is null`),
+		index("claims_org_idx").on(table.orgId),
 		index("claims_expiry_idx").on(table.expiresAt).where(sql`${table.releasedAt} is null`),
 		index("claims_agent_idx").on(table.agentId),
+		index("claims_parent_idx").on(table.parentLeaseId),
 	],
 );
 
@@ -1037,7 +1103,13 @@ export const tasksRelations = relations(tasks, ({ one, many }) => ({
 }));
 
 export const claimsRelations = relations(claims, ({ one }) => ({
+	org: one(orgs, { fields: [claims.orgId], references: [orgs.id] }),
 	task: one(tasks, { fields: [claims.taskId], references: [tasks.id] }),
+	parent: one(claims, {
+		fields: [claims.parentLeaseId],
+		references: [claims.id],
+		relationName: "lease_parent",
+	}),
 }));
 
 export type Task = typeof tasks.$inferSelect;
@@ -1057,6 +1129,11 @@ export const EVENT_TYPES = [
 	"claim_renewed",
 	"connector_synced",
 	"automation_delivery",
+	// The record shape a verifier layer will one day write to. Only the `stop`
+	// hook produces one today (whether a session ended cleanly). It exists now so
+	// the autonomy ramp — a query over this history — has data to accumulate
+	// before anything reads it. See src/lib/verifier.ts.
+	"verifier_outcome",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

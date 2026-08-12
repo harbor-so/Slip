@@ -475,6 +475,30 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	// -- Coordination --------------------------------------------------------
+
+	minIntentChars: {
+		env: "HARBOR_MIN_INTENT_CHARS",
+		fallback: 10,
+		derivation:
+			"Shortest intent a lease may be minted with. Intent is not documentation "
+			+ "hygiene — it is the mechanism that makes reading the shared substrate "
+			+ "cheaper than re-deriving it, so a lease without a real one is refused. Ten "
+			+ "characters is enough to reject 'wip' and 'fix' while not demanding prose.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	suggestedAlternativesCount: {
+		env: "HARBOR_SUGGESTED_ALTERNATIVES_COUNT",
+		fallback: 3,
+		derivation:
+			"How many unclaimed tasks from the same project a losing claim is handed. A "
+			+ "conflict is not an error — it is a fork in the road, and the agent needs "
+			+ "somewhere to go. Three is enough to offer a choice without turning the "
+			+ "refusal into its own listing.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Runs ----------------------------------------------------------------
 
 	runOutputFlushMs: {

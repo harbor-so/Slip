@@ -130,7 +130,7 @@ describe("agent_finished usage becomes a cost row", () => {
 	it("attributes the row to the active claim on the session's task", async () => {
 		const created = await createTask(orgId, { title: "Attributed" });
 		await db.update(sessions).set({ taskId: created.id }).where(eq(sessions.id, sessionId));
-		const claimed = await claim(orgId, created.id, "runner:cost");
+		const claimed = await claim(orgId, created.id, "runner:cost", { intent: "Hold this task for the sandbox test." });
 		if (!claimed.ok) throw new Error("expected claim");
 
 		const box = await makeSandbox("tok-cost");
@@ -152,7 +152,7 @@ describe("agent_finished usage becomes a cost row", () => {
 	it("lands with a null claim when the lease already lapsed — legal, rolls up to the org", async () => {
 		const created = await createTask(orgId, { title: "Lapsed" });
 		await db.update(sessions).set({ taskId: created.id }).where(eq(sessions.id, sessionId));
-		const claimed = await claim(orgId, created.id, "runner:cost");
+		const claimed = await claim(orgId, created.id, "runner:cost", { intent: "Hold this task for the sandbox test." });
 		if (!claimed.ok) throw new Error("expected claim");
 		await db
 			.update(claims)

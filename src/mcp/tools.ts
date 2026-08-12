@@ -78,25 +78,28 @@ export const tools: ToolDefinition[] = [
 		name: "claim",
 		description:
 			"Take ownership of a task before you start working on it. Atomic: if another " +
-			"agent already holds it you get told who and when their lease expires, and you " +
-			"should pick different work rather than proceed. Claims expire automatically " +
-			"(default 30 minutes) so a crashed agent never locks a task forever — call " +
-			"renew_claim if the work runs long. Always pass `intent`: one sentence on why " +
-			"you are doing this. Other agents see it before they pick adjacent work, and it " +
-			"is what the team reads months later when deciding whether a change can be " +
-			"reverted.",
+			"agent already holds it, that is NOT an error — you get back who holds it, why " +
+			"(their intent), when their lease frees, a link to their live session if any, " +
+			"and a few unclaimed tasks in the same project. Pick one of those rather than " +
+			"retrying. Claims expire automatically (default 30 minutes) so a crashed agent " +
+			"never locks a task forever — call renew_claim if the work runs long. `intent` " +
+			"is required: one sentence (10+ chars) on why you are doing this. Other agents " +
+			"read it before picking adjacent work, and it is what the team reads months " +
+			"later when deciding whether a change can be reverted.",
 		schema: {
 			task_id: z.string().max(64).describe("Task id as shown in list_work, e.g. 'a1b2'"),
 			agent_id: z
 				.string()
 				.max(128)
 				.describe("Stable identifier for you, e.g. 'claude-code:worktree-3'"),
-			lease_minutes: z.number().int().positive().max(480).optional().describe("Default 30, max 480"),
+			// Required, not optional: it is structurally impossible to hold a lease
+			// without a reason, so the host rejects a call that omits one locally.
 			intent: z
 				.string()
+				.min(10)
 				.max(500)
-				.optional()
-				.describe("One sentence: why this work, and what outcome you are after"),
+				.describe("Required. One sentence: why this work, and what outcome you are after"),
+			lease_minutes: z.number().int().positive().max(480).optional().describe("Default 30, max 480"),
 			intent_ref: z
 				.string()
 				.max(500)
@@ -109,18 +112,31 @@ export const tools: ToolDefinition[] = [
 				intent: args.intent as string | undefined,
 				intentRef: args.intent_ref as string | undefined,
 			});
-			const remaining = result.expiresAt.getTime() - Date.now();
 
 			if (result.ok) {
+				const remaining = result.expiresAt.getTime() - Date.now();
 				return `ok claimed [${shortId(result.taskId)}] ${result.title} — expires in ${relTime(remaining)}`;
 			}
-			// A refusal has to be actionable, not just negative. Naming the holder and
-			// the expiry is what lets the agent decide between waiting and moving on.
-			return [
+			// A refusal has to be actionable, not just negative. The holder's intent
+			// tells the model whether waiting is worth it; the alternatives give it
+			// somewhere to go so it does not sit in a retry loop.
+			const c = result.conflict;
+			const remaining = c.expiresAt.getTime() - Date.now();
+			const lines = [
 				`no [${shortId(result.taskId)}] ${result.title}`,
-				`held by ${result.heldBy} — expires in ${relTime(remaining)}`,
-				"Pick different work with list_work, or retry after the lease expires.",
-			].join("\n");
+				`held by ${c.agentId} — frees in ${relTime(remaining)}`,
+			];
+			if (c.intent) lines.push(`their intent: ${c.intent}`);
+			if (c.sessionUrl) lines.push(`watch: ${c.sessionUrl}`);
+			if (c.suggestedAlternatives.length > 0) {
+				lines.push("open instead:");
+				for (const alt of c.suggestedAlternatives) {
+					lines.push(`  [${shortId(alt.id)}] ${alt.title}`);
+				}
+			} else {
+				lines.push("Pick different work with list_work, or retry after the lease frees.");
+			}
+			return lines.join("\n");
 		},
 	},
 

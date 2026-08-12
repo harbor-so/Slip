@@ -16,13 +16,37 @@
  * the expected path, not an exception to log and swallow.
  */
 
-import { and, desc, eq, gte, isNull, lt, sql as raw } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, ne, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
 import { db } from "../db/index.js";
-import { agentPresence, claims, events, projects, tasks } from "../db/schema.js";
+import { agentPresence, claims, events, projects, sessions, tasks } from "../db/schema.js";
+import type { Task } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
+import { DEFAULT_RIGHTS } from "./rights.js";
 
 export class HarborError extends Error {}
+
+/**
+ * The scope a task-backed lease is over.
+ *
+ * A Linear issue leases its external identity (`linear:ENG-4471`) so that a
+ * claim taken here and a claim taken by an agent talking to Linear directly
+ * collide on the same key. Everything else — a native task, a GitHub-sourced
+ * one — leases its Harbor task id (`harbor:<uuid>`), an opaque atom the exact
+ * resolver treats as containing only itself.
+ *
+ * This is the one place the kernel maps a task to a scope. It never maps the
+ * other way: the scope is authoritative for the claim invariant, the task id is
+ * a convenience the dashboard joins on.
+ */
+export function scopeForTask(task: Pick<Task, "id" | "source" | "sourceRef">): string {
+	if (task.source === "linear" && task.sourceRef) return `linear:${task.sourceRef}`;
+	return `harbor:${task.id}`;
+}
+
+function publicBaseUrl(): string {
+	return process.env.HARBOR_PUBLIC_URL?.trim() || "http://localhost:3000";
+}
 
 /**
  * How long after its last call an agent still counts as present.
@@ -211,11 +235,11 @@ export async function resolveTaskId(orgId: string, ref: string): Promise<string>
  * it reads, the row it locked is the row that actually exists. `claim()` already
  * had this discipline via the unique index; these two never got it.
  */
-async function lockActiveClaim(tx: Executor, taskId: string) {
+async function lockActiveClaim(tx: Executor, orgId: string, taskId: string) {
 	const [row] = await tx
 		.select()
 		.from(claims)
-		.where(and(eq(claims.taskId, taskId), isNull(claims.releasedAt)))
+		.where(and(eq(claims.orgId, orgId), eq(claims.taskId, taskId), isNull(claims.releasedAt)))
 		.for("update")
 		.limit(1);
 	return row;
@@ -225,7 +249,7 @@ async function expireStaleClaims(
 	tx: Executor,
 	now: Date,
 	taskId?: string,
-): Promise<Array<{ id: string; taskId: string; agentId: string }>> {
+): Promise<Array<{ id: string; taskId: string | null; agentId: string }>> {
 	const conditions = [isNull(claims.releasedAt), lt(claims.expiresAt, now)];
 	if (taskId) conditions.push(eq(claims.taskId, taskId));
 
@@ -287,6 +311,24 @@ export async function listWork(
 	}));
 }
 
+/**
+ * A losing claim is data, not an error — and to be useful to the agent that
+ * lost, it has to say more than "no". The conflict carries who holds the scope,
+ * why (their intent, verbatim), when it frees, a live session link if one
+ * exists, and somewhere else to go. The tool description tells the model this is
+ * a fork in the road, not a failure to retry.
+ */
+export interface ClaimConflict {
+	agentId: string;
+	intent: string | null;
+	claimedAt: Date;
+	expiresAt: Date;
+	/** The `/s/<key>` page if the holder is driving one, so the loser can watch. */
+	sessionUrl: string | null;
+	/** Up to N unclaimed tasks in the same project the loser can pick up instead. */
+	suggestedAlternatives: Array<{ id: string; title: string }>;
+}
+
 export type ClaimResult =
 	| {
 			ok: true;
@@ -303,13 +345,13 @@ export type ClaimResult =
 			 */
 			claimId: string;
 	  }
-	| { ok: false; taskId: string; title: string; heldBy: string; expiresAt: Date };
+	| { ok: false; taskId: string; title: string; conflict: ClaimConflict };
 
 /**
  * Attempt to take a task, atomically.
  *
  * The insert is the lock. If another agent got there first, Postgres raises a
- * unique violation on `one_active_claim_per_task` and we come back to read who
+ * unique violation on `one_active_lease_per_scope` and we come back to read who
  * won — rather than checking first and inserting second, which would leave a
  * window where two agents both pass the check.
  *
@@ -330,13 +372,28 @@ export async function claim(
 	orgId: string,
 	taskRef: string,
 	agentId: string,
-	options: ClaimOptions | number = {},
+	opts: ClaimOptions = {},
 ): Promise<ClaimResult> {
-	// The numeric form is the original signature. Kept because the tests and the
-	// demo fleet call it positionally, and widening a signature is not worth a
-	// mechanical rewrite of every call site.
-	const opts: ClaimOptions = typeof options === "number" ? { leaseMinutes: options } : options;
+	// The old positional numeric form (a bare `leaseMinutes`) is gone. It could not
+	// carry an intent, and intent is now mandatory — a signature whose only callers
+	// would all fail the first check is worse than no signature. Every caller passes
+	// options.
 	const leaseMinutes = opts.leaseMinutes;
+
+	// Intent is required at mint. Enforced here, before any row is touched, because
+	// this is the kernel — the MCP schema and the dashboard both reach the lease
+	// through this function, so making it structurally impossible to hold a lease
+	// without a reason has to live below all of them, not in one caller's validator.
+	const intent = opts.intent?.trim() ?? "";
+	const minIntent = setting("minIntentChars");
+	if (intent.length < minIntent) {
+		throw new HarborError(
+			`A claim needs an intent of at least ${minIntent} characters — one sentence on why `
+				+ `you are taking this work and what outcome you are after. Other agents read it `
+				+ `before picking adjacent work, and it is what the team reads months later.`,
+		);
+	}
+
 	const taskId = await resolveTaskId(orgId, taskRef);
 	const now = new Date();
 
@@ -345,6 +402,8 @@ export async function claim(
 			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
 		});
 		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
+
+		const scope = scopeForTask(task);
 
 		const expired = await expireStaleClaims(tx, now, taskId);
 		for (const row of expired) {
@@ -368,22 +427,26 @@ export async function claim(
 		// holder and write the conflict event.
 		//
 		// The conflict target has to repeat the index predicate, because the index
-		// is partial; without `targetWhere` Postgres cannot match it and raises the
-		// violation after all.
+		// is partial; without it Postgres cannot match `one_active_lease_per_scope`
+		// and raises the violation after all. The target is `(org_id, scope)` — the
+		// scope is the invariant now, not the task id.
 		const inserted = await tx
 			.insert(claims)
 			.values({
+				orgId,
+				scope,
 				taskId,
 				agentId,
+				rights: [...DEFAULT_RIGHTS],
 				expiresAt,
-				intent: opts.intent ?? null,
+				intent,
 				intentRef: opts.intentRef ?? null,
 			})
 			.onConflictDoNothing({
-				target: claims.taskId,
+				target: [claims.orgId, claims.scope],
 				// `where`, not `targetWhere` — the latter is the onConflictDoUpdate
 				// spelling and is silently ignored here, which emits a bare
-				// `on conflict (task_id)` that Postgres cannot match to a partial
+				// `on conflict (org_id, scope)` that Postgres cannot match to a partial
 				// index (42P10).
 				where: isNull(claims.releasedAt),
 			})
@@ -400,8 +463,9 @@ export async function claim(
 				agentId,
 				type: "claimed",
 				payload: {
+					scope,
 					expiresAt: expiresAt.toISOString(),
-					intent: opts.intent ?? null,
+					intent,
 					intentRef: opts.intentRef ?? null,
 				},
 			});
@@ -409,7 +473,7 @@ export async function claim(
 		}
 
 		const holder = await tx.query.claims.findFirst({
-			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+			where: and(eq(claims.orgId, orgId), eq(claims.scope, scope), isNull(claims.releasedAt)),
 		});
 		// Someone held it a moment ago or the insert would have landed. If they
 		// released in between, say so rather than invent a name to blame.
@@ -417,21 +481,58 @@ export async function claim(
 			throw new HarborError("Task was claimed and released concurrently; retry.");
 		}
 
+		// The conflict is only useful if the loser can act on it. Read the holder's
+		// live session (if any) and a few unclaimed tasks in the same project, in the
+		// same transaction, so the payload is a fork in the road rather than a dead end.
+		const [holderSession] = await tx
+			.select({ key: sessions.key })
+			.from(sessions)
+			.where(and(eq(sessions.orgId, orgId), eq(sessions.taskId, taskId)))
+			.orderBy(desc(sessions.createdAt))
+			.limit(1);
+
+		const alternatives = task.projectId
+			? await tx
+					.select({ id: tasks.id, title: tasks.title })
+					.from(tasks)
+					.leftJoin(claims, and(eq(claims.taskId, tasks.id), isNull(claims.releasedAt)))
+					.where(
+						and(
+							eq(tasks.orgId, orgId),
+							eq(tasks.projectId, task.projectId),
+							eq(tasks.status, "open"),
+							ne(tasks.id, taskId),
+							isNull(claims.id),
+						),
+					)
+					.orderBy(desc(tasks.updatedAt))
+					.limit(setting("suggestedAlternativesCount"))
+			: [];
+
+		const conflict: ClaimConflict = {
+			agentId: holder.agentId,
+			intent: holder.intent,
+			claimedAt: holder.claimedAt,
+			expiresAt: holder.expiresAt,
+			sessionUrl: holderSession ? `${publicBaseUrl()}/s/${holderSession.key}` : null,
+			suggestedAlternatives: alternatives,
+		};
+
 		await tx.insert(events).values({
 			orgId,
 			taskId,
 			agentId,
 			type: "claim_conflict",
-			payload: { heldBy: holder.agentId, expiresAt: holder.expiresAt.toISOString() },
+			payload: {
+				scope,
+				heldBy: holder.agentId,
+				holderIntent: holder.intent,
+				expiresAt: holder.expiresAt.toISOString(),
+				sessionUrl: conflict.sessionUrl,
+			},
 		});
 
-		return {
-			ok: false,
-			taskId,
-			title: task.title,
-			heldBy: holder.agentId,
-			expiresAt: holder.expiresAt,
-		};
+		return { ok: false, taskId, title: task.title, conflict };
 	});
 }
 
@@ -458,7 +559,7 @@ export async function release(
 		});
 		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
 
-		const held = await lockActiveClaim(tx, taskId);
+		const held = await lockActiveClaim(tx, orgId, taskId);
 		if (!held) throw new HarborError(`Task [${taskRef}] is not currently claimed.`);
 		// Releasing somebody else's claim is refused rather than allowed-with-a-warning:
 		// a confused agent freeing another agent's in-flight work is the exact
@@ -512,17 +613,12 @@ export async function renewClaim(
 	const now = new Date();
 
 	return db.transaction(async (tx) => {
-		// Load the task scoped to the org before touching the claim. Without this,
-		// a caller holding one org's API key could renew another org's lease simply
-		// by passing that task's UUID — `resolveTaskId` short-circuits full UUIDs
-		// without a database round trip, so nothing else in this path would have
-		// noticed. claim() and release() already load the task; renew never did.
-		const task = await tx.query.tasks.findFirst({
-			where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId)),
-		});
-		if (!task) throw new HarborError(`No task matching "${taskRef}".`);
-
-		const held = await lockActiveClaim(tx, taskId);
+		// No task pre-load. renew used to fetch the task scoped to the org purely to
+		// close a cross-org hole — `resolveTaskId` short-circuits full UUIDs without a
+		// round trip, so a caller with org A's key could pass org B's task UUID. Now
+		// that `claims` carries `org_id` and the lock filters on it, a cross-org UUID
+		// simply matches no active claim and is refused here, with no extra query.
+		const held = await lockActiveClaim(tx, orgId, taskId);
 		if (!held) throw new HarborError(`Task [${taskRef}] has no active claim to renew.`);
 		if (held.agentId !== agentId) {
 			throw new HarborError(`Task [${taskRef}] is held by ${held.agentId}, not ${agentId}.`);
@@ -550,6 +646,45 @@ export async function renewClaim(
 			payload: { expiresAt: expiresAt.toISOString() },
 		});
 		return { taskId, expiresAt };
+	});
+}
+
+/**
+ * Revoke a lease and everything narrowed from it.
+ *
+ * Nothing delegates yet, so in practice this releases a single lease today — but
+ * the moment a lease hands a subscope to a child, revoking the parent has to take
+ * the children with it, or a revoked capability keeps working through a lease the
+ * parent no longer trusts. The relationship is walked with a recursive CTE over
+ * `parent_lease_id` so an arbitrarily deep delegation tree collapses in one pass,
+ * and `org_id` scopes the whole walk so one tenant can never revoke another's.
+ *
+ * "Revoke" is a release (`released_at` set), not a delete: the row and its intent
+ * stay in the history the digest and the verifier read.
+ */
+export async function revokeLease(
+	orgId: string,
+	leaseId: string,
+): Promise<{ revoked: number }> {
+	const now = new Date();
+	return db.transaction(async (tx) => {
+		const rows = await tx.execute<{ id: string }>(raw`
+			with recursive subtree as (
+				select id from ${claims} where id = ${leaseId} and ${claims.orgId} = ${orgId}
+				union all
+				select c.id from ${claims} c join subtree s on c.parent_lease_id = s.id
+			)
+			select id from subtree
+		`);
+		const ids = Array.from(rows, (row) => row.id);
+		if (ids.length === 0) return { revoked: 0 };
+
+		const updated = await tx
+			.update(claims)
+			.set({ releasedAt: now })
+			.where(and(eq(claims.orgId, orgId), inArray(claims.id, ids), isNull(claims.releasedAt)))
+			.returning({ id: claims.id });
+		return { revoked: updated.length };
 	});
 }
 
@@ -644,21 +779,28 @@ export async function sweepExpiredClaims(): Promise<number> {
 			.update(claims)
 			.set({ releasedAt: now })
 			.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
-			.returning({ taskId: claims.taskId, agentId: claims.agentId });
+			.returning({
+				orgId: claims.orgId,
+				taskId: claims.taskId,
+				agentId: claims.agentId,
+				scope: claims.scope,
+			});
 
 		for (const row of expired) {
-			const task = await tx.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
-			if (!task) continue;
-			await tx
-				.update(tasks)
-				.set({ status: "open", updatedAt: now })
-				.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+			// The org comes off the claim itself now, not a task join — a lease can be
+			// over a scope with no task row, and those must still be swept and logged.
+			if (row.taskId) {
+				await tx
+					.update(tasks)
+					.set({ status: "open", updatedAt: now })
+					.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+			}
 			await tx.insert(events).values({
-				orgId: task.orgId,
+				orgId: row.orgId,
 				taskId: row.taskId,
 				agentId: row.agentId,
 				type: "claim_expired",
-				payload: { reason: "lease elapsed, swept" },
+				payload: { reason: "lease elapsed, swept", scope: row.scope },
 			});
 		}
 

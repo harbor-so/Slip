@@ -412,8 +412,11 @@ describe("claim before spawn", () => {
 			.returning();
 		await db.update(sessions).set({ taskId: task!.id }).where(eq(sessions.id, sessionId));
 		await db.insert(claims).values({
+			orgId,
+			scope: `harbor:${task!.id}`,
 			taskId: task!.id,
 			agentId: "somebody-else",
+			intent: "Already working the retry backoff on this task.",
 			expiresAt: new Date(Date.now() + 600_000),
 		});
 
@@ -445,8 +448,11 @@ describe("claim before spawn", () => {
 		// A lease that has already lapsed. The holder may well still be running —
 		// that is the case the fence exists for — but the task is claimable again.
 		await db.insert(claims).values({
+			orgId,
+			scope: `harbor:${task!.id}`,
 			taskId: task!.id,
 			agentId: "runner/worker-old",
+			intent: "Long job that outran its lease but may still be running.",
 			expiresAt: new Date(Date.now() - 60_000),
 		});
 

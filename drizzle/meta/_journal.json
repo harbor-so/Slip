@@ -71,6 +71,13 @@
       "when": 1786565804063,
       "tag": "0009_complete_richard_fisk",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786571518293,
+      "tag": "0010_shocking_sersi",
+      "breakpoints": true
     }
   ]
 }

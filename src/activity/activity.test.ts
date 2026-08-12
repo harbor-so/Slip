@@ -160,7 +160,7 @@ describe("ingest route", () => {
 			.insert(tasks)
 			.values({ orgId, title: "Wire the widget", status: "open" })
 			.returning();
-		await claim(orgId, task!.id, "claude-code:wt-7", { intent: "build it" });
+		await claim(orgId, task!.id, "claude-code:wt-7", { intent: "Build the widget wiring." });
 
 		await post(
 			"claude-code",

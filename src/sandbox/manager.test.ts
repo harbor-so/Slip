@@ -337,7 +337,9 @@ describe("claim before spawn", () => {
 	 */
 	it("refuses when the lease is held by somebody else", async () => {
 		const task = await createTask(orgId, { title: "Cap the retry loop" });
-		const held = await claim(orgId, task.id, "someone-else", { intent: "on it" });
+		const held = await claim(orgId, task.id, "someone-else", {
+			intent: "Already capping the retry loop on this task.",
+		});
 		expect(held.ok).toBe(true);
 
 		const [taskRow] = await db.select().from(tasks).where(eq(tasks.id, task.id));

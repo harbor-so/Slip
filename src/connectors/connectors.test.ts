@@ -117,7 +117,9 @@ describe("Linear webhooks", () => {
 		};
 		const created = await handleLinearWebhook(base, ctx());
 		if (!created.taskId) throw new Error("Linear task was not created.");
-		await claim(orgId, created.taskId, "codex:connector-test");
+		await claim(orgId, created.taskId, "codex:connector-test", {
+			intent: "Working this synced Linear issue already.",
+		});
 
 		await handleLinearWebhook({
 			...base,

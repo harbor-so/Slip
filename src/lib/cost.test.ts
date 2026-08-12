@@ -83,8 +83,11 @@ beforeEach(async () => {
 	const [claim] = await db
 		.insert(claims)
 		.values({
+			orgId,
+			scope: `harbor:${task!.id}`,
 			taskId: task!.id,
 			agentId: "claude-code:wt-1",
+			intent: "Measure and reduce the daily spend baseline.",
 			expiresAt: new Date(Date.now() + 3_600_000),
 		})
 		.returning();

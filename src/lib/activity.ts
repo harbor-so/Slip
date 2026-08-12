@@ -92,7 +92,7 @@ export async function recordActivity(
 	const lastByAgent = new Map<string, NormalizedActivity>();
 	for (const { row, agentId } of withAgent) lastByAgent.set(agentId, row);
 	for (const [agentId, row] of lastByAgent) {
-		await touchPresence(orgId, agentId, actionLabel(row), taskByAgent.get(agentId));
+		await touchPresence(orgId, agentId, actionLabel(row), taskByAgent.get(agentId) ?? undefined);
 	}
 	await notifyChange(orgId, "activity");
 

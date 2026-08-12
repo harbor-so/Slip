@@ -66,7 +66,10 @@ describe("the registry is complete", () => {
 describe("the registry entries are wired to the real functions", () => {
 	it("the claims loop releases a genuinely expired claim", async () => {
 		const created = await createTask(orgId, { title: "Expire me" });
-		await claim(orgId, created.id, "dead-agent", 1);
+		await claim(orgId, created.id, "dead-agent", {
+			leaseMinutes: 1,
+			intent: "Short-lived claim that will be swept once it lapses.",
+		});
 		await db
 			.update(claims)
 			.set({ expiresAt: new Date(Date.now() - 60_000) })

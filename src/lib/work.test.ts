@@ -19,8 +19,10 @@ import {
 	presentAgents,
 	release,
 	renewClaim,
+	revokeLease,
 	sweepExpiredClaims,
 	touchPresence,
+	type ClaimOptions,
 } from "./work.js";
 
 let orgId: string;
@@ -45,11 +47,30 @@ afterAll(async () => {
 	await sql.end();
 });
 
+// Intent is required at mint now, so these behavioural tests would all fail the
+// precondition if they kept calling claim() bare. `claimT` supplies a valid
+// default intent (and still accepts a bare lease-minutes number for the tests
+// that only care about lease length), so each test states only what it is about.
+// Intent enforcement itself is tested directly against claim(), below.
+const TEST_INTENT = "Test coordination path end to end.";
+function claimT(
+	org: string,
+	ref: string,
+	agentId: string,
+	opts?: number | ClaimOptions,
+): ReturnType<typeof claim> {
+	if (opts === undefined) return claim(org, ref, agentId, { intent: TEST_INTENT });
+	if (typeof opts === "number") {
+		return claim(org, ref, agentId, { leaseMinutes: opts, intent: TEST_INTENT });
+	}
+	return claim(org, ref, agentId, { intent: TEST_INTENT, ...opts });
+}
+
 describe("claim", () => {
 	it("gives exactly one winner when two agents race for the same task", async () => {
 		const [first, second] = await Promise.all([
-			claim(orgId, taskId, "claude-code:wt-1"),
-			claim(orgId, taskId, "codex:wt-2"),
+			claimT(orgId, taskId, "claude-code:wt-1"),
+			claimT(orgId, taskId, "codex:wt-2"),
 		]);
 
 		const winners = [first, second].filter((r) => r.ok);
@@ -61,13 +82,13 @@ describe("claim", () => {
 		// do something else instead of retrying blindly.
 		const loser = losers[0]!;
 		if (loser.ok) throw new Error("unreachable");
-		expect(loser.heldBy).toBe(winners[0]!.ok ? "claude-code:wt-1" : "codex:wt-2");
-		expect(loser.expiresAt.getTime()).toBeGreaterThan(Date.now());
+		expect(loser.conflict.agentId).toBe(winners[0]!.ok ? "claude-code:wt-1" : "codex:wt-2");
+		expect(loser.conflict.expiresAt.getTime()).toBeGreaterThan(Date.now());
 	});
 
 	it("writes a claim_conflict event, which is the product's core metric", async () => {
-		await claim(orgId, taskId, "agent-a");
-		await claim(orgId, taskId, "agent-b");
+		await claimT(orgId, taskId, "agent-a");
+		await claimT(orgId, taskId, "agent-b");
 
 		const conflicts = await db.query.events.findMany({
 			where: and(eq(events.orgId, orgId), eq(events.type, "claim_conflict")),
@@ -79,7 +100,7 @@ describe("claim", () => {
 
 	it("survives ten agents racing at once with exactly one winner", async () => {
 		const results = await Promise.all(
-			Array.from({ length: 10 }, (_, i) => claim(orgId, taskId, `agent-${i}`)),
+			Array.from({ length: 10 }, (_, i) => claimT(orgId, taskId, `agent-${i}`)),
 		);
 		expect(results.filter((r) => r.ok)).toHaveLength(1);
 
@@ -90,14 +111,14 @@ describe("claim", () => {
 	});
 
 	it("lets a new agent take over a task whose lease already lapsed", async () => {
-		await claim(orgId, taskId, "dead-agent", 1);
+		await claimT(orgId, taskId, "dead-agent", 1);
 		await db
 			.update(claims)
 			.set({ expiresAt: new Date(Date.now() - 60_000) })
 			.where(eq(claims.taskId, taskId));
 
 		// Correctness must not depend on the sweeper having run.
-		const result = await claim(orgId, taskId, "fresh-agent");
+		const result = await claimT(orgId, taskId, "fresh-agent");
 		expect(result.ok).toBe(true);
 
 		const expiredEvents = await db.query.events.findMany({
@@ -108,19 +129,19 @@ describe("claim", () => {
 
 	it("accepts the short id an agent was shown", async () => {
 		const short = taskId.replace(/-/g, "").slice(0, 4);
-		expect((await claim(orgId, short, "agent-a")).ok).toBe(true);
+		expect((await claimT(orgId, short, "agent-a")).ok).toBe(true);
 	});
 });
 
 describe("release", () => {
 	it("marks a task completed when given a summary, open when not", async () => {
-		await claim(orgId, taskId, "agent-a");
+		await claimT(orgId, taskId, "agent-a");
 		await release(orgId, taskId, "agent-a", "Serialised refresh behind a mutex.");
 		expect((await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))!.status).toBe(
 			"completed",
 		);
 
-		await claim(orgId, taskId, "agent-b");
+		await claimT(orgId, taskId, "agent-b");
 		await release(orgId, taskId, "agent-b");
 		expect((await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))!.status).toBe(
 			"open",
@@ -128,7 +149,7 @@ describe("release", () => {
 	});
 
 	it("refuses to release a claim held by someone else", async () => {
-		await claim(orgId, taskId, "agent-a");
+		await claimT(orgId, taskId, "agent-a");
 		await expect(release(orgId, taskId, "agent-b")).rejects.toThrow(/held by agent-a/);
 	});
 });
@@ -153,7 +174,7 @@ describe("lease duration settings", () => {
 	it("HARBOR_LEASE_MINUTES sets the default lease", async () => {
 		await withEnv({ HARBOR_LEASE_MINUTES: "5" }, async () => {
 			const before = Date.now();
-			const result = await claim(orgId, taskId, "agent-a");
+			const result = await claimT(orgId, taskId, "agent-a");
 			if (!result.ok) throw new Error("expected claim");
 			const minutes = (result.expiresAt.getTime() - before) / 60_000;
 			expect(minutes).toBeGreaterThan(4.9);
@@ -164,7 +185,7 @@ describe("lease duration settings", () => {
 	it("a requested lease is clamped to HARBOR_MAX_LEASE_MINUTES, not refused", async () => {
 		await withEnv({ HARBOR_MAX_LEASE_MINUTES: "60" }, async () => {
 			const before = Date.now();
-			const result = await claim(orgId, taskId, "agent-a", 480);
+			const result = await claimT(orgId, taskId, "agent-a", 480);
 			if (!result.ok) throw new Error("expected claim");
 			const minutes = (result.expiresAt.getTime() - before) / 60_000;
 			expect(minutes).toBeGreaterThan(59.9);
@@ -173,7 +194,7 @@ describe("lease duration settings", () => {
 	});
 
 	it("renewClaim honours the configured default", async () => {
-		const first = await claim(orgId, taskId, "agent-a", 5);
+		const first = await claimT(orgId, taskId, "agent-a", 5);
 		if (!first.ok) throw new Error("expected claim");
 		await withEnv({ HARBOR_LEASE_MINUTES: "90" }, async () => {
 			const before = Date.now();
@@ -187,7 +208,7 @@ describe("lease duration settings", () => {
 
 describe("renewClaim", () => {
 	it("extends the lease for the holder and refuses everyone else", async () => {
-		const first = await claim(orgId, taskId, "agent-a", 5);
+		const first = await claimT(orgId, taskId, "agent-a", 5);
 		if (!first.ok) throw new Error("expected claim");
 
 		const renewed = await renewClaim(orgId, taskId, "agent-a", 60);
@@ -198,7 +219,7 @@ describe("renewClaim", () => {
 
 describe("sweepExpiredClaims", () => {
 	it("returns a lapsed task to open and logs it", async () => {
-		await claim(orgId, taskId, "dead-agent", 1);
+		await claimT(orgId, taskId, "dead-agent", 1);
 		await db
 			.update(claims)
 			.set({ expiresAt: new Date(Date.now() - 60_000) })
@@ -215,7 +236,7 @@ describe("sweepExpiredClaims", () => {
 	});
 
 	it("leaves a live claim alone", async () => {
-		await claim(orgId, taskId, "agent-a", 30);
+		await claimT(orgId, taskId, "agent-a", 30);
 		expect(await sweepExpiredClaims()).toBe(0);
 	});
 });
@@ -232,7 +253,7 @@ describe("listWork and createTask", () => {
 	});
 
 	it("reports the live claim alongside each task", async () => {
-		await claim(orgId, taskId, "claude-code:wt-2", 22);
+		await claimT(orgId, taskId, "claude-code:wt-2", 22);
 		const [row] = await listWork(orgId);
 		expect(row!.claim?.agentId).toBe("claude-code:wt-2");
 	});
@@ -259,7 +280,7 @@ describe("listWork and createTask", () => {
  */
 describe("lost updates against a concurrent claim", () => {
 	async function lapsedClaimHeldBy(agentId: string) {
-		await claim(orgId, taskId, agentId, 1);
+		await claimT(orgId, taskId, agentId, 1);
 		await db
 			.update(claims)
 			.set({ expiresAt: new Date(Date.now() - 60_000) })
@@ -270,7 +291,7 @@ describe("lost updates against a concurrent claim", () => {
 		await lapsedClaimHeldBy("agent-a");
 
 		const [, releaseOutcome] = await Promise.allSettled([
-			claim(orgId, taskId, "agent-b"),
+			claimT(orgId, taskId, "agent-b"),
 			release(orgId, taskId, "agent-a", "I finished it, honest."),
 		]);
 
@@ -298,7 +319,7 @@ describe("lost updates against a concurrent claim", () => {
 		await lapsedClaimHeldBy("agent-a");
 
 		const [, renewOutcome] = await Promise.allSettled([
-			claim(orgId, taskId, "agent-b"),
+			claimT(orgId, taskId, "agent-b"),
 			renewClaim(orgId, taskId, "agent-a", 480),
 		]);
 
@@ -326,7 +347,7 @@ describe("lost updates against a concurrent claim", () => {
 			await lapsedClaimHeldBy("agent-a");
 
 			await Promise.allSettled([
-				claim(orgId, taskId, "agent-b"),
+				claimT(orgId, taskId, "agent-b"),
 				release(orgId, taskId, "agent-a", "done"),
 				renewClaim(orgId, taskId, "agent-a", 60),
 			]);
@@ -346,43 +367,52 @@ describe("lost updates against a concurrent claim", () => {
 describe("resolveTaskId hardening", () => {
 	it("refuses LIKE wildcards and the empty string instead of matching everything", async () => {
 		for (const bad of ["", "%", "_", "____", "%%", "zzzz!"]) {
-			await expect(claim(orgId, bad, "agent-a"), `input ${JSON.stringify(bad)}`).rejects.toThrow(
+			await expect(claimT(orgId, bad, "agent-a"), `input ${JSON.stringify(bad)}`).rejects.toThrow(
 				/not a task id|No task matching/,
 			);
 		}
 	});
 
 	it("still accepts a real short id and a full uuid", async () => {
-		expect((await claim(orgId, taskId.replace(/-/g, "").slice(0, 4), "agent-a")).ok).toBe(true);
+		expect((await claimT(orgId, taskId.replace(/-/g, "").slice(0, 4), "agent-a")).ok).toBe(true);
 		await release(orgId, taskId, "agent-a");
-		expect((await claim(orgId, taskId, "agent-b")).ok).toBe(true);
+		expect((await claimT(orgId, taskId, "agent-b")).ok).toBe(true);
 	});
 });
 
 describe("cross-tenant writes", () => {
-	it("refuses to renew another org's claim even with its exact task uuid", async () => {
+	it("refuses to renew, release, or read another org's claim by its exact task uuid", async () => {
 		const [other] = await db.insert(orgs).values({ name: "Victim Org" }).returning();
 		const [victimTask] = await db
 			.insert(tasks)
 			.values({ orgId: other!.id, title: "Rotate production keys", status: "open" })
 			.returning();
-		await claim(other!.id, victimTask!.id, "victim-agent", 5);
+		await claimT(other!.id, victimTask!.id, "victim-agent", 5);
 
 		// The attacker holds a valid key for their own org and the victim's task id.
+		// renew simplified: no task pre-load, the org-scoped lock is the whole check,
+		// so a cross-org uuid simply matches no active claim in the attacker's org.
 		await expect(renewClaim(orgId, victimTask!.id, "victim-agent", 480)).rejects.toThrow(
-			/No task matching/,
+			/no active claim/i,
 		);
+		// release from the wrong org must also refuse rather than free the victim's lease.
+		await expect(release(orgId, victimTask!.id, "victim-agent", "done")).rejects.toThrow();
+		// and the victim's task never appears in the attacker's listing.
+		expect((await listWork(orgId)).some((t) => t.id === victimTask!.id)).toBe(false);
 
 		const held = await db.query.claims.findFirst({
 			where: and(eq(claims.taskId, victimTask!.id), isNull(claims.releasedAt)),
 		});
+		// The victim's lease is untouched — still held, still ~5 minutes out.
+		expect(held).toBeDefined();
+		expect(held!.agentId).toBe("victim-agent");
 		expect(held!.expiresAt.getTime()).toBeLessThan(Date.now() + 30 * 60_000);
 	});
 });
 
 describe("intent", () => {
 	it("records why the work is happening and shows it to the next agent", async () => {
-		await claim(orgId, taskId, "agent-a", {
+		await claimT(orgId, taskId, "agent-a", {
 			intent: "Blocking three support tickets; fix before Friday.",
 			intentRef: "https://linear.app/acme/issue/ACM-482",
 		});
@@ -398,10 +428,132 @@ describe("intent", () => {
 		expect(stored!.intentRef).toContain("linear.app");
 	});
 
-	it("keeps the numeric lease argument working for existing callers", async () => {
-		const result = await claim(orgId, taskId, "agent-a", 5);
+	it("honours an explicit lease length", async () => {
+		const result = await claimT(orgId, taskId, "agent-a", 5);
 		if (!result.ok) throw new Error("expected claim");
 		expect(result.expiresAt.getTime()).toBeLessThan(Date.now() + 6 * 60_000);
+	});
+
+	it("refuses a claim with no intent, or one under the minimum length", async () => {
+		// Enforced in the kernel, not just the MCP schema — it must be impossible to
+		// hold a lease without a reason no matter which caller reaches claim().
+		await expect(claim(orgId, taskId, "agent-a")).rejects.toThrow(/intent/i);
+		await expect(claim(orgId, taskId, "agent-a", { intent: "too short" })).rejects.toThrow(
+			/at least/i,
+		);
+		// And a real one is accepted.
+		expect((await claim(orgId, taskId, "agent-a", { intent: TEST_INTENT })).ok).toBe(true);
+	});
+});
+
+describe("scope", () => {
+	it("leases a Linear task by its external identity and a native task by its id", async () => {
+		const [linearTask] = await db
+			.insert(tasks)
+			.values({
+				orgId,
+				title: "Ship the billing fix",
+				source: "linear",
+				sourceRef: "ENG-4471",
+				status: "open",
+			})
+			.returning();
+		await claimT(orgId, linearTask!.id, "agent-a");
+		await claimT(orgId, taskId, "agent-b");
+
+		const linearClaim = await db.query.claims.findFirst({
+			where: eq(claims.taskId, linearTask!.id),
+		});
+		const nativeClaim = await db.query.claims.findFirst({ where: eq(claims.taskId, taskId) });
+		expect(linearClaim!.scope).toBe("linear:ENG-4471");
+		expect(nativeClaim!.scope).toBe(`harbor:${taskId}`);
+		// Every lease is minted read+write for now.
+		expect(nativeClaim!.rights.sort()).toEqual(["read", "write"]);
+	});
+});
+
+describe("lease delegation", () => {
+	it("revoking a parent cascades to its children, and stays within the org", async () => {
+		// Delegation has no minting path yet, so the tree is built directly: a parent
+		// lease and two children pointing at it, one of them with a grandchild.
+		const now = new Date();
+		const [parent] = await db
+			.insert(claims)
+			.values({
+				orgId,
+				scope: "github:acme/api#src/**",
+				agentId: "lead",
+				rights: ["read", "write"],
+				intent: "Own the billing refactor and delegate slices of it.",
+				expiresAt: new Date(now.getTime() + 3_600_000),
+			})
+			.returning();
+		const [childA] = await db
+			.insert(claims)
+			.values({
+				orgId,
+				scope: "github:acme/api#src/billing/**",
+				agentId: "worker-a",
+				parentLeaseId: parent!.id,
+				rights: ["read", "write"],
+				intent: "Handle the billing subtree under the lead's lease.",
+				expiresAt: new Date(now.getTime() + 3_600_000),
+			})
+			.returning();
+		const [grandchild] = await db
+			.insert(claims)
+			.values({
+				orgId,
+				scope: "github:acme/api#src/billing/invoice.ts",
+				agentId: "worker-a2",
+				parentLeaseId: childA!.id,
+				rights: ["read"],
+				intent: "Just the invoice file, narrowed from the billing lease.",
+				expiresAt: new Date(now.getTime() + 3_600_000),
+			})
+			.returning();
+
+		// A lease in another org that must be untouched by this revocation.
+		const [other] = await db.insert(orgs).values({ name: "Other Co" }).returning();
+		const [foreign] = await db
+			.insert(claims)
+			.values({
+				orgId: other!.id,
+				scope: "github:acme/api#src/**",
+				agentId: "outsider",
+				intent: "A same-scope lease in a different tenant.",
+				expiresAt: new Date(now.getTime() + 3_600_000),
+			})
+			.returning();
+
+		const { revoked } = await revokeLease(orgId, parent!.id);
+		expect(revoked).toBe(3);
+
+		const stillActive = async (id: string) =>
+			(await db.query.claims.findFirst({ where: eq(claims.id, id) }))!.releasedAt === null;
+		expect(await stillActive(parent!.id)).toBe(false);
+		expect(await stillActive(childA!.id)).toBe(false);
+		expect(await stillActive(grandchild!.id)).toBe(false);
+		// The other tenant's lease with the same scope is untouched.
+		expect(await stillActive(foreign!.id)).toBe(true);
+	});
+
+	it("refuses to revoke a lease in another org", async () => {
+		const [other] = await db.insert(orgs).values({ name: "Victim" }).returning();
+		const [foreign] = await db
+			.insert(claims)
+			.values({
+				orgId: other!.id,
+				scope: "harbor:xyz",
+				agentId: "victim",
+				intent: "A lease that belongs to someone else.",
+				expiresAt: new Date(Date.now() + 3_600_000),
+			})
+			.returning();
+		const { revoked } = await revokeLease(orgId, foreign!.id);
+		expect(revoked).toBe(0);
+		const row = await db.query.claims.findFirst({ where: eq(claims.id, foreign!.id) });
+		expect(row!.releasedAt).toBeNull();
 	});
 });
 

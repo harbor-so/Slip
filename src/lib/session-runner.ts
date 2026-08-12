@@ -770,8 +770,8 @@ async function driveOneTurn(
 				kind: "refused",
 				reason: "lease_not_held",
 				message:
-					`This task is held by ${claimed.heldBy} until `
-					+ `${claimed.expiresAt.toISOString()}. Nothing was booted.`,
+					`This task is held by ${claimed.conflict.agentId} until `
+					+ `${claimed.conflict.expiresAt.toISOString()}. Nothing was booted.`,
 			};
 		}
 		// The id of the claim THIS call inserted, straight from the insert. The old
