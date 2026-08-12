@@ -13,7 +13,11 @@ import { describe, expect, it } from "vitest";
 // `node scripts/lint-config.mjs` in CI without a TypeScript toolchain in front
 // of it. The shape is asserted here rather than declared in a .d.ts, so a change
 // to the rule's return type fails this file rather than a declaration nobody reads.
-import { findViolations as rawFind, lintTree as rawLint } from "./lint-config.mjs";
+import {
+	findSyncHandoffViolations as rawHandoff,
+	findViolations as rawFind,
+	lintTree as rawLint,
+} from "./lint-config.mjs";
 
 interface Violation {
 	file: string;
@@ -24,6 +28,7 @@ interface Violation {
 }
 
 const findViolations = rawFind as (source: string, file: string) => Violation[];
+const findSyncHandoffViolations = rawHandoff as (source: string, file: string) => Violation[];
 const lintTree = rawLint as (root: string) => Violation[];
 
 describe("finding hardcoded tunables", () => {
@@ -166,5 +171,111 @@ describe("the escape hatch", () => {
 		const found = findViolations(source, "src/a.ts");
 		expect(found).toHaveLength(1);
 		expect(found[0]!.name).toBe("POLL_INTERVAL_MS");
+	});
+});
+
+describe("arithmetic expressions and the widened name set", () => {
+	/**
+	 * The regression this closes shipped: three real tunables — the Slack replay
+	 * window, the maximum claim lease, the dashboard cookie lifetime — sat
+	 * hardcoded while the lint reported a clean tree, because the value pattern
+	 * matched only a bare literal and the name pattern lacked _MINUTES. A lint
+	 * rule that does not fire is worse than none, because it is believed.
+	 */
+	it("fires on arithmetic over literals — the careful author's spelling", () => {
+		expect(findViolations("const REPLAY_WINDOW_SECONDS = 60 * 5;\n", "src/a.ts")).toHaveLength(1);
+		expect(findViolations("const MAX_LEASE_MINUTES = 8 * 60;\n", "src/a.ts")).toHaveLength(1);
+		expect(findViolations("const MAX_AGE_SECONDS = 30 * 86_400;\n", "src/a.ts")).toHaveLength(1);
+	});
+
+	it("fires on whitespace variants and a trailing comment", () => {
+		expect(findViolations("const MAX_LEASE_MINUTES = 8*60;\n", "src/a.ts")).toHaveLength(1);
+		expect(
+			findViolations("const MAX_LEASE_MINUTES = 8 * 60; // a working day\n", "src/a.ts"),
+		).toHaveLength(1);
+	});
+
+	it("fires on _MINUTES and MIN_ names", () => {
+		expect(findViolations("const DEFAULT_LEASE_MINUTES = 30;\n", "src/a.ts")).toHaveLength(1);
+		expect(findViolations("const MIN_SECRET_LENGTH = 32;\n", "src/a.ts")).toHaveLength(1);
+	});
+
+	it("does not fire on identifier operands — a computation is not a configuration", () => {
+		expect(findViolations("const TOTAL_MS = a * b;\n", "src/a.ts")).toHaveLength(0);
+		expect(findViolations("const WINDOW_MS = base * factor;\n", "src/a.ts")).toHaveLength(0);
+	});
+});
+
+describe("the sync-handoff rule", () => {
+	const region = (body: string) =>
+		[
+			"async function start() {",
+			"\t// harbor-sync-handoff-begin: baseline before gate",
+			body,
+			"\t// harbor-sync-handoff-end",
+			"}",
+			"",
+		].join("\n");
+
+	it("fires on an await inserted into the critical block", () => {
+		const found = findSyncHandoffViolations(
+			region("\tsend(1);\n\tconst x = await db.select();\n\tsessionId = s;"),
+			"src/app/api/sessions/[key]/stream/route.ts",
+		);
+		expect(found).toHaveLength(1);
+		expect(found[0]!.line).toBe(4);
+	});
+
+	it("fires on .then( and for await, the awaits wearing disguises", () => {
+		expect(
+			findSyncHandoffViolations(region("\tdb.select().then(() => {});"), "src/a.ts"),
+		).toHaveLength(1);
+		expect(
+			findSyncHandoffViolations(region("\tfor await (const x of xs) {}"), "src/a.ts"),
+		).toHaveLength(1);
+	});
+
+	it("lets a comment discuss await without firing", () => {
+		expect(
+			findSyncHandoffViolations(region("\t// an await here would lose events\n\tsend(1);"), "src/a.ts"),
+		).toHaveLength(0);
+	});
+
+	it("passes the clean synchronous block", () => {
+		expect(
+			findSyncHandoffViolations(
+				region("\tsend(\"snapshot\", snapshot);\n\tcontiguousThrough = n;\n\tsessionId = s;"),
+				"src/a.ts",
+			),
+		).toHaveLength(0);
+	});
+
+	it("treats an unterminated begin marker as a violation itself", () => {
+		const found = findSyncHandoffViolations(
+			"// harbor-sync-handoff-begin\nsend(1);\n",
+			"src/a.ts",
+		);
+		expect(found).toHaveLength(1);
+		expect(found[0]!.message).toContain("unterminated");
+	});
+
+	it("says what breaks and what to do about it", () => {
+		const [violation] = findSyncHandoffViolations(
+			region("\tawait metrics.record();"),
+			"src/a.ts",
+		);
+		expect(violation!.message).toContain("snapshot");
+		expect(violation!.message).toContain("one missing event");
+		expect(violation!.message).toContain("Move the async work");
+	});
+
+	it("the stream route actually carries the markers — removing them fails here", () => {
+		// The rule only protects marked regions, so the markers themselves are
+		// load-bearing. This is the assertion that stops a refactor from deleting
+		// the comment and, with it, the entire protection.
+		const { readFileSync } = require("node:fs") as typeof import("node:fs");
+		const source = readFileSync("src/app/api/sessions/[key]/stream/route.ts", "utf8");
+		expect(source).toContain("harbor-sync-handoff-begin");
+		expect(source).toContain("harbor-sync-handoff-end");
 	});
 });

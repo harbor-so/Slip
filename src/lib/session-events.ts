@@ -633,11 +633,17 @@ export async function snapshotSession(
 				.limit(cap);
 			tail.reverse();
 
+			// Capped like every other list in the snapshot. This was the ONE query
+			// here without a limit — the note below about a second uncapped list
+			// defeating the event budget described participants exactly. Earliest
+			// joiners kept: the creator and the room's regulars, which is who a
+			// client rendering "who is here" actually shows.
 			const participants = await tx
 				.select()
 				.from(sessionParticipants)
 				.where(eq(sessionParticipants.sessionId, session.id))
-				.orderBy(asc(sessionParticipants.joinedAt));
+				.orderBy(asc(sessionParticipants.joinedAt))
+				.limit(cap);
 
 			// Prompts and artifacts share the snapshot's event budget rather than
 			// having caps of their own. The cap exists because of total payload size
@@ -735,13 +741,20 @@ export interface EventPage {
 }
 
 /**
- * Walk backwards through retained history, for a client that got `truncated: true`.
+ * Walk through retained history: backwards from `before`, or forwards from
+ * `after`, for a client that got `truncated: true` or is filling a reconnect gap.
  *
- * `before` is exclusive and is a seq rather than an offset or a timestamp. An
+ * Both cursors are exclusive and are seqs rather than offsets or timestamps. An
  * offset shifts under compaction — pages overlap or skip while the client is
  * paging — and two events can share a timestamp to the millisecond, which makes a
  * timestamp cursor either lossy or duplicating depending on which comparison you
  * pick. A seq is unique per session and stable for the life of the row.
+ *
+ * `before` and `after` together are refused: a range query answers a question
+ * neither pager asks, and accepting both silently would leave the caller
+ * guessing which one `has_more` refers to. `has_more` always points away from
+ * the cursor — more history below the page for `before`, more above it for
+ * `after`.
  *
  * The compacted summaries are returned like any other event, because they are
  * real rows and they are how a client learns what happened in the range it can no
@@ -751,8 +764,11 @@ export interface EventPage {
 export async function eventPage(
 	orgId: string,
 	sessionId: string,
-	options: { before?: number; limit?: number } = {},
+	options: { before?: number; after?: number; limit?: number } = {},
 ): Promise<EventPage> {
+	if (options.before !== undefined && options.after !== undefined) {
+		throw new HarborError("Pass either `before` or `after`, not both.");
+	}
 	const cap = setting("maxSnapshotEvents");
 	const limit = Math.max(1, Math.min(options.limit ?? cap, cap));
 
@@ -767,8 +783,10 @@ export async function eventPage(
 		.limit(1);
 	if (!session) throw new HarborError("No such session.");
 
+	const forward = options.after !== undefined;
 	const conditions = [eq(sessionEvents.sessionId, sessionId)];
 	if (options.before !== undefined) conditions.push(lt(sessionEvents.seq, options.before));
+	if (options.after !== undefined) conditions.push(gt(sessionEvents.seq, options.after));
 
 	// One extra row rather than a second count query: it answers "is there more"
 	// exactly, including the case where the remaining history is precisely one
@@ -777,11 +795,11 @@ export async function eventPage(
 		.select()
 		.from(sessionEvents)
 		.where(and(...conditions))
-		.orderBy(desc(sessionEvents.seq))
+		.orderBy(forward ? asc(sessionEvents.seq) : desc(sessionEvents.seq))
 		.limit(limit + 1);
 
 	const hasMore = rows.length > limit;
-	const page = rows.slice(0, limit).reverse();
+	const page = forward ? rows.slice(0, limit) : rows.slice(0, limit).reverse();
 
 	return {
 		events: page.map(toWireEvent),

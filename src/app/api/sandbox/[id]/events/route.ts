@@ -276,6 +276,29 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 			continue;
 		}
 
+		// The bridge's buffer-overflow gap marker rides on `log`, and it is the
+		// one log that is RECORD rather than log: the bridge dropped events during
+		// a partition and built a visible marker saying so. `timelineTypeFor` is a
+		// type-only function and correctly maps `log` to null, so the marker is
+		// picked out here by its code, before that mapping discards it. This route
+		// used to drop it with the rest of the logs — the visible-gap design was
+		// built, tested, sent, and thrown away at the receiving end, so the
+		// transcript showed an unbroken timeline across a window where events
+		// were destroyed.
+		if (event.type === "log") {
+			const code = (event.payload as { code?: unknown } | undefined)?.code;
+			if (code === "bridge.buffer_overflow") {
+				appendable.push({
+					type: "transcript_gap",
+					actor: "harbor",
+					payload: gapPayloadFrom(event, auth.sandbox.id, fence.token),
+				});
+				continue;
+			}
+			ignored += 1;
+			continue;
+		}
+
 		const timelineType = timelineTypeFor(event.type);
 		if (timelineType === null) {
 			ignored += 1;
@@ -402,6 +425,32 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		ignored,
 		through_seq: appended.length > 0 ? appended[appended.length - 1]!.seq : null,
 	});
+}
+
+/**
+ * The gap marker's timeline payload: the KNOWN fields copied one by one, never
+ * the whole payload spread. The sandbox wrote this object, and spreading it
+ * verbatim would let a compromised bridge plant arbitrary keys on a
+ * harbor-actored event — the one actor a reader trusts.
+ */
+function gapPayloadFrom(
+	event: SandboxEvent,
+	sandboxId: string,
+	fencingToken: number,
+): Record<string, unknown> {
+	const payload = (event.payload ?? {}) as Record<string, unknown>;
+	const copy = (value: unknown) =>
+		typeof value === "number" || typeof value === "string" ? value : null;
+	return {
+		dropped_events: copy(payload.dropped_events),
+		first_dropped_at: copy(payload.first_dropped_at),
+		last_dropped_at: copy(payload.last_dropped_at),
+		message: copy(payload.message),
+		sandbox_event: event.type,
+		sandbox_id: sandboxId,
+		fencing_token: fencingToken,
+		...(event.at ? { sandbox_at: event.at } : {}),
+	};
 }
 
 /**

@@ -3,11 +3,12 @@ import { NextResponse } from "next/server";
 import postgres from "postgres";
 import { setting } from "../../../../../config.js";
 import type { SessionEvent, SessionEventType } from "../../../../../contracts/index.js";
-import { db } from "../../../../../db/index.js";
+import { databaseUrl, db } from "../../../../../db/index.js";
 import { sessionEvents } from "../../../../../db/schema.js";
 import { orgIdForKey } from "../../../../../lib/auth.js";
 import { currentSession } from "../../../../../lib/session.js";
-import { snapshotSession } from "../../../../../lib/session-events.js";
+import { retainedFromSeq, snapshotSession } from "../../../../../lib/session-events.js";
+import { sessionByKey } from "../../../../../lib/sessions.js";
 
 /**
  * A session's live timeline: one snapshot, then every event after it.
@@ -41,19 +42,27 @@ import { snapshotSession } from "../../../../../lib/session-events.js";
  *
  * There is no gap between those two cases: "committed before the snapshot read"
  * and "committed after the snapshot read" partition every event that will ever
- * exist. Nothing depends on how long step 2 takes, on how many `await`s are in it,
- * or on whether a future refactor adds one.
+ * exist. Nothing about EVENT COVERAGE depends on how long step 2 takes or on how
+ * many `await`s are in it.
  *
- * **That last sentence is the whole reason this ordering was chosen over the
- * obvious alternative.** The natural design — read the snapshot, then register the
+ * **That sentence is the whole reason this ordering was chosen over the obvious
+ * alternative.** The natural design — read the snapshot, then register the
  * socket with an in-process broadcaster — is correct only while the rule "no await
  * between the snapshot read and the registration" holds. That rule is invisible in
  * the code, cannot be expressed to the type system, and is silently broken by the
  * first person who adds a permission check, a metric, or a log line between the two
  * statements. What follows is not a crash: it is one missing event, in one session,
- * for one client, under load. Here the equivalent mistake is impossible because
- * there is nothing to get wrong — the subscription is already live before the read
- * begins, and the correctness does not rest on what happens between them.
+ * for one client, under load. Subscribing first removes almost all of that
+ * fragility — but not all of it, and the residue must be named rather than
+ * pretended away: there is still exactly one load-bearing synchronous block, the
+ * handoff between sending the baseline (snapshot or resume frame) and publishing
+ * `sessionId`, which is the drain gate. An await inside THAT block lets a
+ * NOTIFY-driven drain emit events past the cursors before the baseline is on the
+ * wire, and a snapshot that then replaces client state discards them. The block
+ * is ordered so a mistake degrades to a duplicate rather than a loss, wrapped in
+ * `harbor-sync-handoff` markers, and `scripts/lint-config.mjs` fails the build on
+ * an await between them — because a rule that lives only in a comment is a rule
+ * the next refactor deletes.
  *
  * The notify payload deliberately carries no event data — only an org id and a
  * verb, as `notifyChange` documents — so this stream is woken and then *reads*.
@@ -74,6 +83,27 @@ function toWireEvent(row: typeof sessionEvents.$inferSelect): SessionEvent {
 	};
 }
 
+/**
+ * The resume cursor a reconnecting client presented, or null for a fresh start.
+ *
+ * `?after=` wins over `Last-Event-ID` — explicit beats ambient, and a client
+ * that constructs a URL is stating intent while the header is whatever the
+ * browser's `EventSource` remembered. Anything malformed is NULL, never a 400:
+ * the header is set automatically on reconnect, and a 400 there breaks the
+ * client's own retry loop at the exact moment it is trying to recover. A
+ * garbled cursor costs one full snapshot, which is the safe direction.
+ */
+function resumeCursorFrom(request: Request): number | null {
+	const url = new URL(request.url);
+	const candidates = [url.searchParams.get("after"), request.headers.get("last-event-id")];
+	for (const candidate of candidates) {
+		if (candidate === null || candidate === "") continue;
+		if (!/^\d{1,15}$/.test(candidate)) return null;
+		return Number(candidate);
+	}
+	return null;
+}
+
 export async function GET(request: Request, { params }: { params: Promise<{ key: string }> }) {
 	const { key } = await params;
 
@@ -88,19 +118,27 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 		: ((await currentSession())?.orgId ?? null);
 	if (!orgId) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
-	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
-	const listener = postgres(url, { max: 1 });
+	const listener = postgres(databaseUrl(), { max: 1 });
 	const encoder = new TextEncoder();
 	const pageSize = setting("maxSnapshotEvents");
+	const resumeCursor = resumeCursorFrom(request);
 
 	const stream = new ReadableStream({
 		async start(controller) {
 			let closed = false;
-			const send = (event: string, data: unknown) => {
+			// The `id:` line is what makes reconnection cheap: EventSource stores the
+			// last id it saw and presents it as `Last-Event-ID` on reconnect, so a
+			// dropped connection resumes from a cursor instead of re-downloading the
+			// whole snapshot. Events carry their seq; the snapshot carries its own
+			// cursor, so a client that got the snapshot and nothing else still
+			// resumes rather than paying for the snapshot twice.
+			const send = (event: string, data: unknown, id?: number) => {
 				if (closed) return;
 				try {
 					controller.enqueue(
-						encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+						encoder.encode(
+							`${id !== undefined ? `id: ${id}\n` : ""}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+						),
 					);
 				} catch {
 					// The client went away between the notify and the write.
@@ -195,7 +233,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 						if (rows.length > 0) {
 							for (const row of rows) {
 								if (row.seq > emittedThrough || pendingGaps.has(row.seq)) {
-									send("event", toWireEvent(row));
+									send("event", toWireEvent(row), row.seq);
 									if (row.seq > emittedThrough) emittedThrough = row.seq;
 								}
 							}
@@ -241,28 +279,89 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 				}
 			});
 
-			// ---- STEP 2: the snapshot. -------------------------------------------
-			const snapshot = await snapshotSession(orgId, key);
-			if (!snapshot) {
-				// Scoped by org, so a key belonging to another tenant is indistinguishable
-				// from one that was never minted — a distinct "wrong org" answer would
-				// turn the key space into an oracle anyone could probe.
-				send("error", { error: "No such session." });
+			const cleanupAndFinish = () => {
 				void subscription.unlisten().catch(() => {});
 				void listener.end({ timeout: 1 }).catch(() => {});
 				finish();
-				return;
-			}
-			sessionId = snapshot.session.id;
+			};
 
-			contiguousThrough = snapshot.snapshot_through_seq;
-			// Deliberately the same number, not the highest seq in `snapshot.events`.
-			// The snapshot's tail can reach above its own cursor when there is a hole
-			// below, and those events are re-sent live. A duplicate is defined by the
-			// contract to be a no-op on the client; a skipped event is not defined at
-			// all, so the cheap mistake is the one to make.
-			emittedThrough = snapshot.snapshot_through_seq;
-			send("snapshot", snapshot);
+			// ---- STEP 2: the baseline — a resume when the cursor allows, else the
+			// full snapshot. -----------------------------------------------------
+			//
+			// A resume is only honoured when every event above the cursor is still
+			// individually retained. Compaction folds old runs into summaries and
+			// deletes the originals, so a cursor below the retention boundary points
+			// into a range that can never be replayed event-by-event — the honest
+			// answer there is the snapshot, whose summaries carry the same content.
+			let resumed = false;
+			if (resumeCursor !== null) {
+				const session = await sessionByKey(orgId, key);
+				if (!session) {
+					// Same oracle argument as the snapshot path below.
+					send("error", { error: "No such session." });
+					cleanupAndFinish();
+					return;
+				}
+				const retainedFrom = await retainedFromSeq(session.id);
+				if (resumeCursor >= retainedFrom - 1) {
+					// The `resume` frame is the client's contract signal: no snapshot is
+					// coming, keep current state, apply events idempotently.
+					//
+					// harbor-sync-handoff-begin: the baseline frame must be on the wire
+					// before `sessionId` — the drain gate — is published. An await inside
+					// this block lets a NOTIFY-driven drain emit events and advance the
+					// cursors BEFORE the baseline is sent; the client then applies the
+					// baseline over them and those events are gone for this connection.
+					// The lint rule in scripts/lint-config.mjs fails the build on an
+					// await between these markers.
+					send("resume", { from_seq: resumeCursor, retained_from_seq: retainedFrom }, resumeCursor);
+					contiguousThrough = resumeCursor;
+					emittedThrough = resumeCursor;
+					sessionId = session.id;
+					// harbor-sync-handoff-end
+					resumed = true;
+				}
+				// A cursor below the boundary falls through to the snapshot: the
+				// fallback is silent and complete rather than an error the client's
+				// auto-reconnect cannot act on.
+			}
+
+			if (!resumed) {
+				const snapshot = await snapshotSession(orgId, key);
+				if (!snapshot) {
+					// Scoped by org, so a key belonging to another tenant is indistinguishable
+					// from one that was never minted — a distinct "wrong org" answer would
+					// turn the key space into an oracle anyone could probe.
+					send("error", { error: "No such session." });
+					cleanupAndFinish();
+					return;
+				}
+
+				// The ordering inside this block is load-bearing, and it is the one
+				// place the file's own proof does not cover. The proof shows no EVENT
+				// can be missed; it says nothing about the window between publishing
+				// the drain gate and sending the baseline. The old order set the
+				// cursors and `sessionId` first and sent the snapshot last — so an
+				// await slipped in between (a permission check, a metric) would let a
+				// concurrent NOTIFY drain events onto the wire and past the cursors
+				// BEFORE the snapshot, and the snapshot-replaces-state contract then
+				// discards them on the client forever. Baseline first, cursors next,
+				// gate LAST: now an await anywhere in between degrades to a duplicate
+				// emission, which the contract defines as a no-op.
+				//
+				// harbor-sync-handoff-begin: no await between the baseline send and the
+				// gate publication. The lint rule fails the build on one.
+				send("snapshot", snapshot, snapshot.snapshot_through_seq);
+				contiguousThrough = snapshot.snapshot_through_seq;
+				// Deliberately the same number, not the highest seq in `snapshot.events`.
+				// The snapshot's tail can reach above its own cursor when there is a hole
+				// below, and those events are re-sent live. A duplicate is defined by the
+				// contract to be a no-op on the client; a skipped event is not defined at
+				// all, so the cheap mistake is the one to make.
+				emittedThrough = snapshot.snapshot_through_seq;
+				sessionId = snapshot.session.id;
+				// harbor-sync-handoff-end
+			}
 
 			// ---- STEP 3: everything above the cursor, then live. -------------------
 			await drain();
