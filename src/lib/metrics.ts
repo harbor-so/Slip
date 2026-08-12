@@ -12,7 +12,7 @@
  * So this file does no new measurement. It reads what is already there and
  * renders it in a format a scrape can consume.
  *
- * ## Why these six
+ * ## Why these
  *
  * They are the six that tell you *which layer is broken* when somebody says
  * "Harbor is slow today", and between them they cover every external dependency:
@@ -42,6 +42,7 @@
  */
 
 import { sql as raw } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 
 interface Metric {
@@ -84,7 +85,7 @@ function escapeLabel(value: string): string {
  * broken demo org is a number that means nothing.
  */
 export async function collectMetrics(): Promise<string> {
-	const [spawns, latency, providerErrors, breakers, conflicts, expiries, spend, live] =
+	const [spawns, latency, providerErrors, breakers, trips, orphans, conflicts, expiries, spend, live, orgs] =
 		await Promise.all([
 			db.execute(raw`
 				select org_id::text as org, provider, status, count(*)::int as n
@@ -122,6 +123,18 @@ export async function collectMetrics(): Promise<string> {
 				from circuit_breakers
 			`),
 			db.execute(raw`
+				select org_id::text as org, payload->>'provider' as provider, count(*)::int as n
+				from events
+				where type = 'circuit_opened' and created_at > now() - interval '24 hours'
+				group by 1, 2
+			`),
+			db.execute(raw`
+				select org_id::text as org, payload->>'outcome' as outcome, count(*)::int as n
+				from events
+				where type = 'orphan_reconciled' and created_at > now() - interval '24 hours'
+				group by 1, 2
+			`),
+			db.execute(raw`
 				select org_id::text as org, type, count(*)::int as n
 				from events
 				where type in ('claim_conflict', 'claimed', 'completed')
@@ -146,6 +159,7 @@ export async function collectMetrics(): Promise<string> {
 				where status in ('spawning', 'ready', 'busy', 'idle')
 				group by 1
 			`),
+			db.execute(raw`select id::text as org from orgs`),
 		]);
 
 	const rows = <T,>(result: unknown): T[] => result as T[];
@@ -205,6 +219,24 @@ export async function collectMetrics(): Promise<string> {
 			),
 		},
 		{
+			name: "harbor_circuit_breaker_trips_total",
+			help: "Breaker OPENINGS in the last 24h — the edge, not the state. A gauge misses a trip that opens and closes between scrapes; this is what rate() alerts on.",
+			type: "counter",
+			samples: rows<{ org: string; provider: string | null; n: number }>(trips).map((row) => ({
+				labels: { org: row.org, provider: row.provider ?? "unknown" },
+				value: row.n,
+			})),
+		},
+		{
+			name: "harbor_orphans_reconciled_total",
+			help: "Orphaned containers adopted or stopped in the last 24h. Every one is an ambiguous failure that actually happened; a rising rate is a provider getting worse, visible before the bill.",
+			type: "counter",
+			samples: rows<{ org: string; outcome: string | null; n: number }>(orphans).map((row) => ({
+				labels: { org: row.org, outcome: row.outcome ?? "unknown" },
+				value: row.n,
+			})),
+		},
+		{
 			name: "harbor_claim_events_total",
 			help: "Claims, completions and conflicts in the last 24h. Conflicts are duplicated work that did not happen.",
 			type: "counter",
@@ -229,6 +261,17 @@ export async function collectMetrics(): Promise<string> {
 			samples: rows<{ org: string; micro: string }>(spend).map((row) => ({
 				labels: { org: row.org },
 				value: Number(row.micro),
+			})),
+		},
+		{
+			name: "harbor_spend_cap_micro_usd",
+			help: "The configured daily cap, per org, so spend/cap alerts divide two exported numbers instead of hardcoding the cap into the alert rule.",
+			type: "gauge",
+			samples: rows<{ org: string }>(orgs).map((row) => ({
+				labels: { org: row.org },
+				// The cap is deployment-global today; labelled per org so the shape
+				// matches harbor_spend_today_micro_usd and survives a per-org cap later.
+				value: setting("maxSpendPerDayMicroUsd"),
 			})),
 		},
 		{

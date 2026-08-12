@@ -38,7 +38,7 @@
 import { and, eq, sql as raw } from "drizzle-orm";
 import { type RepoOverrides, setting } from "../config.js";
 import { db } from "../db/index.js";
-import { circuitBreakers } from "../db/schema.js";
+import { circuitBreakers, events } from "../db/schema.js";
 import {
 	type CircuitBreakerState,
 	type CircuitDecision,
@@ -245,6 +245,27 @@ export async function recordProviderFailure(
 			: openedAt.getTime() === now.getTime()
 				? "opened"
 				: "still_open";
+
+	// The trip becomes a durable event, recorded HERE rather than at any caller,
+	// because this is the one place that knows the transition fired and a caller
+	// can forget. A gauge sampled at scrape time misses a breaker that opens and
+	// closes between scrapes entirely — the metrics doc claimed "breaker trips"
+	// while emitting only current state, so a short outage overnight left no
+	// trace anywhere an alert could see. `transition === "opened"` fires exactly
+	// once per streak, which is exactly the edge a counter wants. Best-effort:
+	// telemetry must never turn a recorded failure into a thrown one.
+	if (transition === "opened") {
+		try {
+			await db.insert(events).values({
+				orgId,
+				type: "circuit_opened",
+				payload: { provider, error_type: errorType, consecutive_failures: consecutiveFailures },
+			});
+		} catch (error) {
+			console.error("[circuit] trip event failed:", (error as Error).message);
+		}
+	}
+
 	return { contribution: "counted", consecutiveFailures, openedAt, transition };
 }
 

@@ -828,6 +828,7 @@ async function driveOneTurn(
 			sessionId,
 			claimId,
 			actor: taken.author,
+			traceId,
 			repoOverrides: input.repoOverrides,
 			now,
 		});

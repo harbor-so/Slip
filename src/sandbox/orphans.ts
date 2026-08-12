@@ -41,7 +41,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { sandboxes, sessions } from "../db/schema.js";
 import { evaluateDestruction, isDeadSandboxStatus } from "./decisions.js";
-import { type SweepOptions, readDestructionAuthority } from "./manager.js";
+import { type SweepOptions, readDestructionAuthority, recordOrphanReconciled } from "./manager.js";
 import type { SandboxInspection } from "./provider.js";
 import { defaultProvider } from "./registry.js";
 
@@ -90,6 +90,16 @@ export async function sweepProviderOrphans(
 				try {
 					await provider.stop(inspection.externalId);
 					report.stopped.push(inspection.externalId);
+					// The metric event, when there is an org to hang it on. A rowless
+					// orphan has none; its stop is still in the report.
+					if (disposition.orgId !== null) {
+						await recordOrphanReconciled(
+							disposition.orgId,
+							inspection.attemptId ?? "unknown",
+							inspection.externalId,
+							"stopped",
+						);
+					}
 				} catch (error) {
 					// The container survives to the next pass; a throw here must not
 					// abandon the rest of this one.
@@ -109,7 +119,8 @@ export async function sweepProviderOrphans(
 type Disposition =
 	| { action: "keep"; log?: string }
 	| { action: "defer" }
-	| { action: "stop" };
+	/** `orgId` null when the row was absent: there is no org to attribute to. */
+	| { action: "stop"; orgId: string | null };
 
 async function dispositionFor(
 	inspection: SandboxInspection,
@@ -153,7 +164,7 @@ async function dispositionFor(
 		// container — that is the definition of the orphan this sweep exists for.
 		// Under an org scope it is kept instead: an unattributable container
 		// cannot be proven to belong to the org being swept.
-		return options.orgId === undefined ? { action: "stop" } : { action: "keep" };
+		return options.orgId === undefined ? { action: "stop", orgId: null } : { action: "keep" };
 	}
 
 	if (options.orgId !== undefined && row.orgId !== options.orgId) {
@@ -171,5 +182,7 @@ async function dispositionFor(
 	// new attempt while this container is still flushing.
 	const authority = await readDestructionAuthority(row.taskId, now, options.readLease);
 	const decision = evaluateDestruction(authority);
-	return decision.verdict === "destroy" ? { action: "stop" } : { action: "defer" };
+	return decision.verdict === "destroy"
+		? { action: "stop", orgId: row.orgId }
+		: { action: "defer" };
 }

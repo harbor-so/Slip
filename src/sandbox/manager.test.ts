@@ -445,6 +445,47 @@ describe("enrolment — the step without which nothing works", () => {
 	});
 
 	/**
+	 * The correlation contract's missing hop. docs/sandbox-runtime.md always
+	 * listed HARBOR_TRACE_ID in the environment and the supervisor always read
+	 * it — but nothing ever set it, so the "single greppable token" the
+	 * contracts file promises for a Slack→session→sandbox→PR chain was lost at
+	 * exactly the container boundary.
+	 */
+	it("exports the turn's trace id into the box, and omits the key when there is none", async () => {
+		process.env.HARBOR_PUBLIC_URL = "http://host.docker.internal:3000";
+		const fake = fakeProvider();
+		let seen: Record<string, string> = {};
+		const capturing = {
+			...fake.provider,
+			async create(config: CreateSandboxConfig) {
+				seen = config.env;
+				return fake.provider.create(config);
+			},
+		} as unknown as SandboxProvider;
+
+		const outcome = await ensureSandbox({
+			orgId,
+			sessionId,
+			provider: capturing,
+			traceId: "trace-e2e-1",
+		});
+		if (outcome.kind !== "created") throw new Error("expected a created sandbox");
+		expect(seen.HARBOR_TRACE_ID).toBe("trace-e2e-1");
+
+		// And a repo secret cannot shadow it: the Harbor-controlled spread wins.
+		await stopSandbox(outcome.sandbox_id, "stopped_by_operator", { provider: capturing });
+		const second = await ensureSandbox({
+			orgId,
+			sessionId,
+			provider: capturing,
+			traceId: "trace-e2e-2",
+			env: { HARBOR_TRACE_ID: "attacker-supplied" },
+		});
+		if (second.kind !== "created") throw new Error("expected a created sandbox");
+		expect(seen.HARBOR_TRACE_ID).toBe("trace-e2e-2");
+	});
+
+	/**
 	 * A repository secret named HARBOR_CONTROL_URL would otherwise point a sandbox
 	 * at an attacker's control plane, which it would then hand its token to.
 	 */

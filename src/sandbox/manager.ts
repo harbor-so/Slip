@@ -83,7 +83,7 @@ import {
 	type SpawnRefusal,
 } from "../contracts/index.js";
 import { db } from "../db/index.js";
-import { claims, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
+import { claims, events, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
 import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
 import { HarborError, notifyChange } from "../lib/work.js";
@@ -172,6 +172,14 @@ export interface EnsureSandboxInput {
 	claimId?: string | null;
 	/** Who asked. Lands on the timeline events and on the cost rows. */
 	actor?: string | null;
+	/**
+	 * The turn's correlation id, exported into the box as HARBOR_TRACE_ID. The
+	 * environment contract in docs/sandbox-runtime.md always listed it and the
+	 * supervisor always read it — but nothing ever set it, so the one greppable
+	 * token the contracts file promises for a Slack→session→sandbox→PR chain
+	 * was lost at exactly the container boundary.
+	 */
+	traceId?: string | null;
 	/** Defaults to `defaultProvider()`. Injected by tests and by per-session routing. */
 	provider?: SandboxProvider;
 	image?: string;
@@ -400,6 +408,7 @@ interface SpawnContext {
 	sessionId: string;
 	claimId: string | null;
 	actor: string | null;
+	traceId: string | null;
 	provider: SandboxProvider;
 	overrides: RepoOverrides;
 	repoId: string | null;
@@ -663,6 +672,7 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 		sessionId: input.sessionId,
 		claimId: input.claimId ?? null,
 		actor,
+		traceId: input.traceId ?? null,
 		provider,
 		overrides,
 		repoId: session.repoId,
@@ -844,6 +854,10 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
 				};
 			}
 			await notifyChange(ctx.orgId, "session_event");
+			// The org-ledger counterpart, for the orphan-rate metric: adoption is
+			// reconciliation SUCCEEDING, and a rate nobody can read is a rate that
+			// silently climbs. Best-effort — telemetry never fails an adoption.
+			await recordOrphanReconciled(ctx.orgId, row.id, decision.externalId, "adopted");
 			return {
 				kind: "resolved",
 				outcome: {
@@ -948,6 +962,9 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 				HARBOR_SANDBOX_TOKEN: sandboxToken,
 				HARBOR_FENCING_TOKEN: String(await currentFencingToken(ctx.sessionId)),
 				HARBOR_BOOT_MODE: boot.mode,
+				// Inside the Harbor-controlled spread, so a repo secret named
+				// HARBOR_TRACE_ID cannot shadow the correlation chain.
+				...(ctx.traceId ? { HARBOR_TRACE_ID: ctx.traceId } : {}),
 			},
 			timeoutMs: setting("sandboxBootTimeoutMs", ctx.overrides),
 			features: ctx.features ?? {},
@@ -1985,6 +2002,7 @@ export async function onConnectingTimeout(
 			// sweep can still find by its attempt label.
 			try {
 				await provider.stop(orphan);
+				await recordOrphanReconciled(row.orgId, row.id, orphan, "stopped");
 			} catch (error) {
 				console.error(`[sandbox] orphan stop failed for ${orphan}:`, (error as Error).message);
 			}
@@ -2084,5 +2102,31 @@ async function bestEffortStop(provider: SandboxProvider, row: SandboxRow): Promi
 		await provider.stop(row.externalId);
 	} catch (error) {
 		console.error(`[sandbox] stop failed for ${row.id}:`, (error as Error).message);
+	}
+}
+
+/**
+ * The org-ledger record behind `harbor_orphans_reconciled_total`.
+ *
+ * An orphan handled — adopted back onto its attempt, or stopped by a reaper —
+ * used to exist only as a field inside a session event's payload, which no
+ * metric can aggregate. The rate matters because every reconciled orphan is an
+ * ambiguous failure that actually happened: a rising rate is a provider or a
+ * network getting worse, visible before the bill is. Best-effort by contract.
+ */
+export async function recordOrphanReconciled(
+	orgId: string,
+	sandboxId: string,
+	externalId: string,
+	outcome: "adopted" | "stopped",
+): Promise<void> {
+	try {
+		await db.insert(events).values({
+			orgId,
+			type: "orphan_reconciled",
+			payload: { sandbox_id: sandboxId, external_id: externalId, outcome },
+		});
+	} catch (error) {
+		console.error("[sandbox] orphan event failed:", (error as Error).message);
 	}
 }
