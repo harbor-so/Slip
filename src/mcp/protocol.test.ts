@@ -172,23 +172,34 @@ describe("tools/call", () => {
 		const claimed = textOf(
 			await client.callTool({
 				name: "claim",
-				arguments: { task_id: id, agent_id: "claude-code:wt-1" },
+				arguments: {
+					task_id: id,
+					agent_id: "claude-code:wt-1",
+					intent: "Fixing the token refresh race before it pages anyone.",
+				},
 			}),
 		);
 		expect(claimed).toMatch(/^ok claimed/);
 
 		const conflict = await client.callTool({
 			name: "claim",
-			arguments: { task_id: id, agent_id: "codex:wt-2" },
+			arguments: {
+				task_id: id,
+				agent_id: "codex:wt-2",
+				intent: "Wanted to take the same task, will pivot if it is held.",
+			},
 		});
 		const conflictText = textOf(conflict);
 		expect(conflictText).toMatch(/^no /);
 		expect(conflictText).toContain("claude-code:wt-1");
+		// The holder's intent is echoed verbatim so the loser can judge whether to wait.
+		expect(conflictText).toContain("token refresh race");
 		// A refusal is a normal result, not a protocol error: the model has to read
 		// it and choose different work, which it cannot do with an exception.
 		expect(conflict.isError).toBeFalsy();
-		// And it must be actionable, not merely negative.
-		expect(conflictText).toMatch(/list_work|retry/);
+		// And it must be actionable, not merely negative: either a concrete
+		// alternative to open, or the fallback pointer to list_work.
+		expect(conflictText).toMatch(/open instead|list_work|retry/);
 
 		const released = textOf(
 			await client.callTool({

@@ -119,7 +119,7 @@ async function idleTaskSession(fake: ReturnType<typeof fakeProvider>) {
 		createdBy: "rin",
 		taskId: created.id,
 	});
-	const claimed = await claim(orgId, created.id, "runner:gate");
+	const claimed = await claim(orgId, created.id, "runner:gate", { intent: "Hold this task for the sandbox test." });
 	if (!claimed.ok) throw new Error("expected claim");
 
 	const outcome = await ensureSandbox({
@@ -179,10 +179,10 @@ describe("readLeaseState distinguishes leaseless-by-design from lease-lost", () 
 		// "the active claim for this task" would happily present B's claim as its
 		// own authority. Presenting A's actual claim id answers not_held.
 		const created = await createTask(orgId, { title: "Decoy" });
-		const first = await claim(orgId, created.id, "agent-a");
+		const first = await claim(orgId, created.id, "agent-a", { intent: "Hold this task for the sandbox test." });
 		if (!first.ok) throw new Error("expected claim");
 		await release(orgId, created.id, "agent-a", "done");
-		const second = await claim(orgId, created.id, "agent-b");
+		const second = await claim(orgId, created.id, "agent-b", { intent: "Hold this task for the sandbox test." });
 		if (!second.ok) throw new Error("expected claim");
 
 		expect(await readLeaseState(first.claimId, created.id, new Date())).toBe("not_held");
@@ -220,7 +220,7 @@ describe("ensureSandbox refuses a task-backed session with no claim", () => {
 			createdBy: "rin",
 			taskId: created.id,
 		});
-		const claimed = await claim(orgId, created.id, "agent-a");
+		const claimed = await claim(orgId, created.id, "agent-a", { intent: "Hold this task for the sandbox test." });
 		if (!claimed.ok) throw new Error("expected claim");
 		await release(orgId, created.id, "agent-a", "gave up");
 

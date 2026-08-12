@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { db, sql } from "../src/db/index.js";
 import { apiKeys, claims, events, orgs, projects, tasks } from "../src/db/schema.js";
 import { hashApiKey, mintApiKey } from "../src/lib/keys.js";
+import { scopeForTask } from "../src/lib/work.js";
 
 const now = new Date();
 
@@ -83,8 +84,11 @@ const seeded = await db
 
 // One task actively claimed, so the dashboard has something in flight.
 await db.insert(claims).values({
+	orgId,
+	scope: scopeForTask(seeded[1]!),
 	taskId: seeded[1]!.id,
 	agentId: "claude-code:wt-2",
+	intent: "Refactor the retry path so a failed webhook does not double-charge.",
 	expiresAt: new Date(now.getTime() + 22 * 60_000),
 });
 await db.update(tasks).set({ status: "claimed" }).where(eq(tasks.id, seeded[1]!.id));
@@ -92,8 +96,11 @@ await db.update(tasks).set({ status: "claimed" }).where(eq(tasks.id, seeded[1]!.
 // One task whose lease lapsed 10 minutes ago — the sweeper's first job, and the
 // fixture the definition-of-done checks.
 await db.insert(claims).values({
+	orgId,
+	scope: scopeForTask(seeded[2]!),
 	taskId: seeded[2]!.id,
 	agentId: "codex:worktree-a",
+	intent: "Investigate the intermittent 500s on the deploy webhook.",
 	claimedAt: new Date(now.getTime() - 45 * 60_000),
 	expiresAt: new Date(now.getTime() - 10 * 60_000),
 });

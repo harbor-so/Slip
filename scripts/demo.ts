@@ -14,6 +14,7 @@ import { eq } from "drizzle-orm";
 import { db, sql } from "../src/db/index.js";
 import { apiKeys, claims, connectors, digests, events, orgs, projects, tasks } from "../src/db/schema.js";
 import { hashApiKey, mintApiKey } from "../src/lib/keys.js";
+import { scopeForTask } from "../src/lib/work.js";
 
 const now = Date.now();
 const ago = (ms: number) => new Date(now - ms);
@@ -81,8 +82,11 @@ const live: Array<[number, string, number]> = [
 ];
 for (const [index, agentId, remaining] of live) {
 	await db.insert(claims).values({
+		orgId,
+		scope: scopeForTask(seeded[index]!),
 		taskId: seeded[index]!.id,
 		agentId,
+		intent: `Working ${seeded[index]!.title.toLowerCase()} for this demo fleet.`,
 		claimedAt: ago(30 * MIN - remaining),
 		expiresAt: ahead(remaining),
 	});
@@ -92,8 +96,11 @@ for (const [index, agentId, remaining] of live) {
 // One agent died holding a lease. The sweeper picks this up within a minute of
 // the server starting, which is the behaviour worth watching in a demo.
 await db.insert(claims).values({
+	orgId,
+	scope: scopeForTask(seeded[8]!),
 	taskId: seeded[8]!.id,
 	agentId: "codex:worktree-c",
+	intent: "Take the flaky integration test green before the release cut.",
 	claimedAt: ago(52 * MIN),
 	expiresAt: ago(7 * MIN),
 });

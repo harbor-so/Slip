@@ -191,7 +191,7 @@ describe("sweepProviderOrphans", () => {
 	it("defers a dead-row container while its task's lease is HELD, then stops after release", async () => {
 		const task = await createTask(orgId, { title: "Held lease" });
 		const dead = await rowInStatus("failed", { taskId: task.id });
-		const claimed = await claim(orgId, task.id, "agent-a");
+		const claimed = await claim(orgId, task.id, "agent-a", { intent: "Hold this task for the sandbox test." });
 		if (!claimed.ok) throw new Error("expected claim");
 		const fleet = fakeFleet([{ externalId: "ext-held", attemptId: dead.row.id }]);
 
