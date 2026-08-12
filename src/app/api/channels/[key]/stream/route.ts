@@ -1,0 +1,103 @@
+import { channelByKey, mayRead } from "../../../../../lib/chat.js";
+import { resolveConn } from "../../../../../lib/conn.js";
+import postgres from "postgres";
+import { databaseUrl } from "../../../../../db/index.js";
+
+/**
+ * A live feed for one channel, over Server-Sent Events.
+ *
+ * The same shape as the dashboard's /api/stream — SSE over Postgres LISTEN/NOTIFY,
+ * no new infrastructure — but on the `harbor_chat` channel and filtered to a
+ * single room.
+ *
+ * The access check happens BEFORE the LISTEN, and that ordering is the point. buzz
+ * flags "check access before subscription registration — no race window for
+ * private channel leaks" as the exact bug that leaks private rooms; a stream that
+ * subscribes first and filters later has already accepted the connection to the
+ * fan-out before deciding whether the caller was allowed. Here a non-member of a
+ * direct channel is refused with a 403 and never reaches the LISTEN at all.
+ *
+ * Durable events are announced by `{seq}` only; the client fetches the body from
+ * the events endpoint. Ephemeral events (typing/presence) carry their small actor
+ * inline, because there is no row to fetch.
+ */
+export const dynamic = "force-dynamic";
+
+export async function GET(request: Request, { params }: { params: Promise<{ key: string }> }) {
+	const conn = await resolveConn(request);
+	if (!conn) return new Response("Not authenticated.", { status: 401 });
+
+	const { key } = await params;
+	const channel = await channelByKey(conn.orgId, key);
+	if (!channel) return new Response("No such channel.", { status: 404 });
+
+	const as = new URL(request.url).searchParams.get("as") ?? undefined;
+	if (!(await mayRead(channel, as))) return new Response("Not a member.", { status: 403 });
+
+	// The one resolution of DATABASE_URL, shared with every other SSE route.
+	// This line previously carried its own fallback naming a DIFFERENT database
+	// (harbor_raleigh) than the rest of the product — exactly the drift the
+	// shared resolver and its test exist to prevent.
+	const listener = postgres(databaseUrl(), { max: 1 });
+	const encoder = new TextEncoder();
+
+	const stream = new ReadableStream({
+		async start(controller) {
+			const send = (event: string, data: unknown) => {
+				try {
+					controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+				} catch {
+					// Client went away between the notify and the write.
+				}
+			};
+
+			send("ready", { channelId: channel.id });
+
+			const subscription = await listener.listen("harbor_chat", (payload) => {
+				try {
+					const change = JSON.parse(payload) as {
+						orgId?: string;
+						channelId?: string;
+						kind?: string;
+						seq?: number;
+						actor?: { pubkey: string; displayName: string };
+					};
+					// One shared NOTIFY channel for all chat, so the room filter is here.
+					if (change.orgId === conn.orgId && change.channelId === channel.id) {
+						send("event", { kind: change.kind, seq: change.seq, actor: change.actor });
+					}
+				} catch {
+					// A malformed payload is not worth killing the stream over.
+				}
+			});
+
+			const keepAlive = setInterval(() => {
+				try {
+					controller.enqueue(encoder.encode(": keep-alive\n\n"));
+				} catch {
+					/* closed */
+				}
+			}, 25_000);
+
+			request.signal.addEventListener("abort", () => {
+				clearInterval(keepAlive);
+				void subscription.unlisten().catch(() => {});
+				void listener.end({ timeout: 1 }).catch(() => {});
+				try {
+					controller.close();
+				} catch {
+					/* already closed */
+				}
+			});
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			"content-type": "text/event-stream",
+			"cache-control": "no-cache, no-transform",
+			connection: "keep-alive",
+			"x-accel-buffering": "no",
+		},
+	});
+}

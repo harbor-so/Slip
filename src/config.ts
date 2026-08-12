@@ -249,6 +249,19 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	// -- Chat ----------------------------------------------------------------
+
+	chatMaxContentChars: {
+		env: "HARBOR_CHAT_MAX_CONTENT_CHARS",
+		fallback: 8_000,
+		derivation:
+			"The longest a single chat message body may be before ingest refuses it. "
+			+ "Long enough for a pasted stack trace or a diff hunk, short enough that one "
+			+ "signed message cannot push megabytes through the event log or overrun a "
+			+ "NOTIFY. A self-hoster who wants terser or roomier rooms changes it here.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Bridge --------------------------------------------------------------
 
 	bridgeBufferLimit: {

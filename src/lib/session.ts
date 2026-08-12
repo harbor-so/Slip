@@ -29,6 +29,9 @@ const COOKIE = "harbor_session";
 export interface Session {
 	orgId: string;
 	orgName: string;
+	/** The signed-in user's id, or null under the dev bypass. Lets a human's chat
+	 * principal (a keypair) be tied back to who registered it. */
+	userId: string | null;
 	userName: string | null;
 	/**
 	 * The viewer's email from their GitHub sign-in, when the profile exposes
@@ -130,6 +133,7 @@ export async function currentSession(): Promise<Session | null> {
 				return {
 					orgId: org.id,
 					orgName: org.name,
+					userId: user.id,
 					userName: user.name,
 					userEmail: user.email,
 					unauthenticated: false,
@@ -142,5 +146,12 @@ export async function currentSession(): Promise<Session | null> {
 
 	const [org] = await db.select().from(orgs).orderBy(asc(orgs.createdAt)).limit(1);
 	if (!org) return null;
-	return { orgId: org.id, orgName: org.name, userName: null, userEmail: null, unauthenticated: true };
+	return {
+		orgId: org.id,
+		orgName: org.name,
+		userId: null,
+		userName: null,
+		userEmail: null,
+		unauthenticated: true,
+	};
 }

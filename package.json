@@ -20,6 +20,7 @@
     "test": "vitest run",
     "demo": "tsx --env-file-if-exists=.env scripts/demo.ts",
     "demo:agents": "tsx --env-file-if-exists=.env scripts/agents.ts",
+    "demo:chat": "tsx --env-file-if-exists=.env scripts/chat-demo.ts",
     "lint:config": "node scripts/lint-config.mjs",
     "sandbox:build": "docker build -f sandbox/Dockerfile -t ${HARBOR_SANDBOX_IMAGE:-harbor-sandbox:latest} .",
     "check": "npm run lint:config && npm run typecheck && npm run test",
