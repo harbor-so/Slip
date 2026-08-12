@@ -1047,3 +1047,178 @@ export const ACTIVITY_RUNTIMES = [
 	"conductor",
 ] as const;
 export type ActivityRuntime = (typeof ACTIVITY_RUNTIMES)[number];
+
+// ---------------------------------------------------------------------------
+// Chat: signed events, and the rooms they flow through
+// ---------------------------------------------------------------------------
+
+/**
+ * An identity, which is a public key.
+ *
+ * This is the idea the chat model turns on: a human and an agent are the same
+ * kind of thing — a keypair — so a channel never has to distinguish them, and
+ * agent↔agent, agent↔human and human↔human are one primitive rather than three.
+ * `pubkey` is the Ed25519 public key in hex and is the identity used in every
+ * signed event; `kind` is display sugar, not a permission.
+ *
+ * The private half is never here. Humans hold theirs in the browser, agents in
+ * their own process; the server only ever learns the public key, so this table
+ * can leak in full and forge nothing. `userId` links a human principal back to
+ * its dashboard login as provenance; an agent's principal has no user.
+ */
+export const principals = pgTable(
+	"principals",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** Ed25519 public key, hex. The identity itself. */
+		pubkey: text("pubkey").notNull(),
+		kind: text("kind").notNull().default("human"),
+		displayName: text("display_name").notNull(),
+		userId: uuid("user_id").references(() => users.id),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// Scoped to the org: a pubkey is only ever resolved together with the org the
+		// connection already proved, so two orgs holding the same key is not a
+		// collision to prevent.
+		uniqueIndex("principals_org_pubkey_idx").on(table.orgId, table.pubkey),
+		index("principals_org_idx").on(table.orgId),
+	],
+);
+
+/**
+ * A channel: a room with no owner.
+ *
+ * The ownerless decision is carried over from sessions and for the same reason —
+ * the moment a room belongs to one identity, "hand it to a colleague" stops being
+ * retrofittable. `createdBy` is the creator's pubkey as provenance and confers
+ * nothing. `kind` shapes how access is granted, never who may be in the room:
+ * `group` is key-joinable, `direct` is a fixed roster, `task` is bound to a task.
+ * `nextSeq` is the same row-locked counter sessions uses, so two concurrent posts
+ * cannot collide on a sequence number.
+ */
+export const channels = pgTable(
+	"channels",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** Short, URL-safe, unguessable. Appears in /c/<key>. */
+		key: text("key").notNull(),
+		kind: text("kind").notNull().default("group"),
+		title: text("title").notNull(),
+		taskId: uuid("task_id").references(() => tasks.id),
+		/** Creator's pubkey. Provenance only, deliberately NOT ownership. */
+		createdBy: text("created_by").notNull(),
+		nextSeq: integer("next_seq").notNull().default(1),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("channels_key_idx").on(table.key),
+		index("channels_org_activity_idx").on(table.orgId, table.lastActivityAt),
+	],
+);
+
+/**
+ * Membership is the access gate.
+ *
+ * A subscription and a read both check for a row here before anything is
+ * returned, so a private channel cannot leak to a non-member. `lastSeenSeq` is a
+ * per-member read cursor — it lets an agent pull everything said since it last
+ * looked in one batch, and doubles as the unread count for humans.
+ */
+export const channelMembers = pgTable(
+	"channel_members",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		channelId: uuid("channel_id")
+			.notNull()
+			.references(() => channels.id),
+		/** The member's pubkey. */
+		pubkey: text("pubkey").notNull(),
+		kind: text("kind").notNull().default("human"),
+		displayName: text("display_name").notNull(),
+		/** Highest durable seq this member has read. Advances on read. */
+		lastSeenSeq: integer("last_seen_seq").notNull().default(0),
+		joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+		lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("members_channel_pubkey_idx").on(table.channelId, table.pubkey),
+		index("members_channel_idx").on(table.channelId),
+	],
+);
+
+/**
+ * The signed event log — the substrate everything else reads.
+ *
+ * The primary key is the event id (a hash of the body), which makes redelivery
+ * idempotent for free: the same signed event sent twice is one row, and an
+ * `ON CONFLICT DO NOTHING` absorbs the duplicate.
+ *
+ * `sig` is nullable, and the split is deliberate. Content events (`message`,
+ * `reaction`) are end-to-end signed by their author and carry a `sig`. Membership
+ * and system events (`join`, `leave`, `system`, `channel_create`) are authored by
+ * the server in response to an already-authenticated action and have none.
+ * Ephemeral kinds (`typing`, `presence`) are never written here at all.
+ *
+ * `authoredAt` is the author's own clock; `ingestedAt` is when the server accepted
+ * it. Ordering never uses either — it uses `seq`, which the server assigns.
+ */
+export const chatEvents = pgTable(
+	"chat_events",
+	{
+		/** SHA-256 hex of the canonical serialization. The event's identity. */
+		id: text("id").primaryKey(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		channelId: uuid("channel_id")
+			.notNull()
+			.references(() => channels.id),
+		/** Author's pubkey. */
+		pubkey: text("pubkey").notNull(),
+		authorKind: text("author_kind").notNull().default("human"),
+		kind: text("kind").notNull(),
+		/** Monotonic within a channel. The only thing ordering depends on. */
+		seq: integer("seq").notNull(),
+		content: text("content").notNull(),
+		tags: jsonb("tags").notNull().default([]),
+		/** Ed25519 signature, hex. Null for server-authored system/membership events. */
+		sig: text("sig"),
+		authoredAt: timestamp("authored_at", { withTimezone: true }).notNull(),
+		ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// The ordered read path, and the backstop against a seq being reused.
+		uniqueIndex("chat_events_channel_seq_idx").on(table.channelId, table.seq),
+		index("chat_events_org_ingested_idx").on(table.orgId, table.ingestedAt),
+	],
+);
+
+export const channelsRelations = relations(channels, ({ one, many }) => ({
+	org: one(orgs, { fields: [channels.orgId], references: [orgs.id] }),
+	members: many(channelMembers),
+	events: many(chatEvents),
+}));
+
+export const channelMembersRelations = relations(channelMembers, ({ one }) => ({
+	channel: one(channels, { fields: [channelMembers.channelId], references: [channels.id] }),
+}));
+
+export const chatEventsRelations = relations(chatEvents, ({ one }) => ({
+	channel: one(channels, { fields: [chatEvents.channelId], references: [channels.id] }),
+}));
+
+export type Principal = typeof principals.$inferSelect;
+export type Channel = typeof channels.$inferSelect;
+export type ChannelMember = typeof channelMembers.$inferSelect;
+export type ChatEvent = typeof chatEvents.$inferSelect;

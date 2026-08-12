@@ -29,6 +29,9 @@ const MAX_AGE_SECONDS = 30 * 86_400;
 export interface Session {
 	orgId: string;
 	orgName: string;
+	/** The signed-in user's id, or null under the dev bypass. Lets a human's chat
+	 * principal (a keypair) be tied back to who registered it. */
+	userId: string | null;
 	userName: string | null;
 	/** True when this session came from the dev bypass rather than a real login. */
 	unauthenticated: boolean;
@@ -119,6 +122,7 @@ export async function currentSession(): Promise<Session | null> {
 				return {
 					orgId: org.id,
 					orgName: org.name,
+					userId: user.id,
 					userName: user.name,
 					unauthenticated: false,
 				};
@@ -130,5 +134,5 @@ export async function currentSession(): Promise<Session | null> {
 
 	const [org] = await db.select().from(orgs).orderBy(asc(orgs.createdAt)).limit(1);
 	if (!org) return null;
-	return { orgId: org.id, orgName: org.name, userName: null, unauthenticated: true };
+	return { orgId: org.id, orgName: org.name, userId: null, userName: null, unauthenticated: true };
 }

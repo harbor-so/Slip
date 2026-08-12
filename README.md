@@ -170,6 +170,17 @@ design — the one the reference implementation uses — depends on there being 
 `await` between the snapshot read and the socket registration, which is a rule a
 future refactor silently breaks.
 
+### Chat
+
+Where a session is a room with *work* in it, a channel is a room with a
+*conversation* in it — and the two connection types Harbor most needs, human↔agent
+and agent↔agent, are the same primitive as human↔human because every participant
+is just a keypair. Every message is an Ed25519-signed event whose id is a hash of
+its own body, verified independently of the signature, so attribution is
+cryptographic rather than a server-stamped author. The full design, the study of
+`block/buzz` it came from, and its known limitations are in [`CHAT.md`](./CHAT.md);
+`npm run demo:chat` shows two agents holding a signed conversation.
+
 ### Sandboxes
 
 ```ts
