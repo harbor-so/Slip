@@ -22,7 +22,8 @@
     "demo:agents": "tsx --env-file-if-exists=.env scripts/agents.ts",
     "lint:config": "node scripts/lint-config.mjs",
     "sandbox:build": "docker build -f sandbox/Dockerfile -t ${HARBOR_SANDBOX_IMAGE:-harbor-sandbox:latest} .",
-    "check": "npm run lint:config && npm run typecheck && npm run test"
+    "check": "npm run lint:config && npm run typecheck && npm run test",
+    "docs:connectors": "tsx --env-file-if-exists=.env scripts/gen-connectors-doc.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
