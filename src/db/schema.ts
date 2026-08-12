@@ -365,6 +365,54 @@ export const events = pgTable(
 	],
 );
 
+/**
+ * The passive counterpart to `events`. Append-only, high volume.
+ *
+ * `events` records the eight coordination facts an agent asserts by calling an
+ * MCP tool — a closed, low-volume set the weekly digest reads whole. Activity is
+ * a different animal: every `Bash`, `Edit`, `Read` and shell call an agent's
+ * *host* makes, delivered by that host's hooks rather than by the agent choosing
+ * to report. Folding it into `events` would drown the coordination log and blow
+ * the digest's cost model, so it lives here instead, joined to the same
+ * `orgId`/`agentId`/`taskId` so a tool call still lines up with the claim it
+ * happened under.
+ *
+ * `runtime` is the host that emitted it (`claude-code`, `codex`, …) and
+ * `runtimeSessionId` is that host's own session id — the thread of tool calls an
+ * agent made in one sitting. `payload` is a bounded digest, not a log line: the
+ * ingest path caps command and output strings so this table never becomes a log
+ * pipeline the schema did not sign up to be.
+ */
+export const activity = pgTable(
+	"activity",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		agentId: text("agent_id").notNull(),
+		/** The claim this tool call happened under, when the agent holds one. */
+		taskId: uuid("task_id").references(() => tasks.id),
+		/** Which host emitted it: claude-code | codex | opencode | cursor | conductor. */
+		runtime: text("runtime").notNull(),
+		/** The host's own session id — one agent's thread of tool calls. */
+		runtimeSessionId: text("runtime_session_id"),
+		/** One of ACTIVITY_KINDS. */
+		kind: text("kind").notNull(),
+		/** Tool name for a tool_call: Bash, Edit, shell, mcp__server__tool, … */
+		tool: text("tool"),
+		/** `pre` or `post` for a tool_call; null otherwise. */
+		phase: text("phase"),
+		payload: jsonb("payload"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		index("activity_org_created_idx").on(table.orgId, table.createdAt),
+		index("activity_org_agent_idx").on(table.orgId, table.agentId, table.createdAt),
+		index("activity_org_runtime_idx").on(table.orgId, table.runtime, table.createdAt),
+	],
+);
+
 export const connectors = pgTable(
 	"connectors",
 	{
@@ -431,6 +479,7 @@ export type Task = typeof tasks.$inferSelect;
 export type Claim = typeof claims.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type HarborEvent = typeof events.$inferSelect;
+export type Activity = typeof activity.$inferSelect;
 
 /** Closed set. Every consumer switches on these, so they must not drift. */
 export const EVENT_TYPES = [
@@ -444,3 +493,29 @@ export const EVENT_TYPES = [
 	"connector_synced",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * Closed set, same discipline as EVENT_TYPES: every consumer switches on these,
+ * so a new kind is a deliberate schema change, not a string a normalizer invents.
+ * Deliberately coarse — the host's fine-grained event name lives in `tool`/`phase`
+ * and `payload`, not in a kind explosion.
+ */
+export const ACTIVITY_KINDS = [
+	"tool_call",
+	"session_start",
+	"session_end",
+	"prompt",
+	"stop",
+	"subagent",
+] as const;
+export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
+
+/** The hosts Harbor can ingest activity from. Matches the `[runtime]` route segment. */
+export const ACTIVITY_RUNTIMES = [
+	"claude-code",
+	"codex",
+	"opencode",
+	"cursor",
+	"conductor",
+] as const;
+export type ActivityRuntime = (typeof ACTIVITY_RUNTIMES)[number];

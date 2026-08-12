@@ -1,0 +1,91 @@
+{
+  "//": "Harbor activity tracking for Claude Code (and Conductor, which inherits this file). Merge the `hooks` block into ~/.claude/settings.json (all projects) or a project's .claude/settings.json (commit it, and every Conductor workspace inherits it). Replace http://localhost:3000 with your Harbor URL. The bearer token is read from the HARBOR_API_KEY environment variable via allowedEnvVars, so the key never enters version control.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:3000/api/hooks/claude-code",
+            "headers": { "Authorization": "Bearer $HARBOR_API_KEY" },
+            "allowedEnvVars": ["HARBOR_API_KEY"],
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

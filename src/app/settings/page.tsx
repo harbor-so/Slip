@@ -20,6 +20,7 @@ export default async function SettingsPage() {
 
 	const keys = await listApiKeys(session.orgId);
 	const mcpUrl = process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp";
+	const appUrl = process.env.HARBOR_URL ?? "http://localhost:3000";
 
 	return (
 		<div className="space-y-8">
@@ -103,6 +104,42 @@ bearer_token_env_var = "HARBOR_API_KEY"`}
 						all parallel worktrees see Harbor.
 					</p>
 				</Card>
+			</section>
+
+			<section>
+				<SectionLabel>Activity tracking — record every tool call</SectionLabel>
+				<Card>
+					<p className="text-xs text-muted-foreground">
+						The five MCP tools capture what an agent <em>claims</em>. Activity tracking captures
+						what it actually <em>does</em> — every <code>Bash</code>, <code>Edit</code>,{" "}
+						<code>Read</code> and shell call — by tapping each tool&rsquo;s hooks. Every host posts
+						to one endpoint, authenticated by the same key above:
+					</p>
+					<pre className="mt-3 overflow-x-auto text-xs leading-relaxed text-muted-foreground">
+{`POST ${appUrl}/api/hooks/<runtime>
+Authorization: Bearer \${HARBOR_API_KEY}
+# <runtime> = claude-code | codex | cursor | opencode | conductor`}
+					</pre>
+				</Card>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>Claude Code:</strong> merge{" "}
+					<code>integrations/claude-code/settings.hooks.json</code> into{" "}
+					<code>.claude/settings.json</code>. It POSTs over a native HTTP hook — no script needed.
+				</p>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>Codex &amp; Cursor:</strong> their hooks run local commands only, so point{" "}
+					<code>.codex/hooks.json</code> / <code>.cursor/hooks.json</code> at the shared{" "}
+					<code>integrations/harbor-forward.sh</code>, which curls the payload here.
+				</p>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>opencode:</strong> drop <code>integrations/opencode/harbor-activity.ts</code> in
+					your plugin directory; it <code>fetch()</code>es directly.
+				</p>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>Conductor:</strong> it has no hook format of its own — it runs Claude Code or
+					Codex under the hood. Commit that tool&rsquo;s config above and every Conductor workspace
+					inherits it; the <code>conductor</code> runtime endpoint parses either dialect.
+				</p>
 			</section>
 
 		</div>

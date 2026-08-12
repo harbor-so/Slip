@@ -1,0 +1,49 @@
+{
+  "//": "Harbor activity tracking for Codex CLI. Save as ~/.codex/hooks.json (all projects) or <repo>/.codex/hooks.json. Codex hooks run local commands only, so each event calls the shared forwarder, which curls the payload to Harbor. Replace /ABSOLUTE/PATH/TO with where you put harbor-forward.sh, and export HARBOR_URL + HARBOR_API_KEY (and optionally HARBOR_AGENT_ID) in the environment Codex runs in.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex PreToolUse", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex PostToolUse", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex SessionStart", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex SessionEnd", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex UserPromptSubmit", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh codex Stop", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
