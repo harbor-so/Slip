@@ -359,7 +359,7 @@ docker compose up -d
 DATABASE_URL=postgres://harbor:harbor@localhost:5433/harbor npx vitest run
 ```
 
-**445 tests against real Postgres, not mocks**, because the guarantees are
+**579 tests against real Postgres, not mocks**, because the guarantees are
 database indexes and how code reacts to them — a mock happily passes a
 read-then-write check that races.
 
