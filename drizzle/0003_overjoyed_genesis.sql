@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "next_seq" integer DEFAULT 1 NOT NULL;

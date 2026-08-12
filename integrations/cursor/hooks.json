@@ -1,0 +1,39 @@
+{
+  "//": "Harbor activity tracking for Cursor (>=1.7). Save as <repo>/.cursor/hooks.json (project) or ~/.cursor/hooks.json (all workspaces). Cursor hooks run local commands only, so each event calls the shared forwarder with its event name, which curls the payload to Harbor. Replace /ABSOLUTE/PATH/TO with where you put harbor-forward.sh, and export HARBOR_URL + HARBOR_API_KEY (and optionally HARBOR_AGENT_ID).",
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor beforeSubmitPrompt", "timeout": 10 }
+    ],
+    "preToolUse": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor preToolUse", "timeout": 10 }
+    ],
+    "postToolUse": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor postToolUse", "timeout": 10 }
+    ],
+    "beforeShellExecution": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor beforeShellExecution", "timeout": 10 }
+    ],
+    "afterShellExecution": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor afterShellExecution", "timeout": 10 }
+    ],
+    "afterFileEdit": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor afterFileEdit", "timeout": 10 }
+    ],
+    "beforeMCPExecution": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor beforeMCPExecution", "timeout": 10 }
+    ],
+    "afterMCPExecution": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor afterMCPExecution", "timeout": 10 }
+    ],
+    "sessionStart": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor sessionStart", "timeout": 10 }
+    ],
+    "sessionEnd": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor sessionEnd", "timeout": 10 }
+    ],
+    "stop": [
+      { "command": "/ABSOLUTE/PATH/TO/harbor-forward.sh cursor stop", "timeout": 10 }
+    ]
+  }
+}
