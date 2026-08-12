@@ -50,6 +50,13 @@
       "when": 1786502312971,
       "tag": "0006_tiny_tana_nile",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786533110674,
+      "tag": "0007_romantic_cyclops",
+      "breakpoints": true
     }
   ]
 }

@@ -232,24 +232,27 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 						for (const prompt of delivered) {
 							if (sent.has(prompt.id)) continue;
 							sent.add(prompt.id);
+							// The identity mode is DECIDED HERE, explicitly, because only the
+							// control plane can make the statement. A human author with an
+							// email on file is `attributed-user` — the bridge sets `git config
+							// user.*` and the commit is authored by the person who asked. A
+							// human with no email, or an agent author, is `agent-only`: the
+							// turn runs with bot-attributed commits, honestly labelled. Before
+							// this field went down, every prompt carried a null email and no
+							// mode, and `identityForPrompt` refused every attributed turn in
+							// the product — the sandbox correctly declined to guess.
+							const attributed = prompt.authorKind === "human" && prompt.authorEmail !== null;
 							const command: BridgeCommand = {
 								type: "prompt",
 								session_id: sessionId,
+								...(prompt.traceId ? { trace_id: prompt.traceId } : {}),
 								prompt: {
 									id: prompt.id,
 									seq: prompt.seq,
 									body: prompt.body,
-									// Carried all the way down so the bridge can set `git config
-									// user.*` before the turn and the commit is authored by the
-									// person who asked, not by a bot. A multiplayer session
-									// otherwise produces a wall of identical bot commits and the
-									// history stops answering "who wanted this".
 									author: prompt.author,
-									// There is no `author_email` column on `session_prompts`, so
-									// this is honestly null rather than guessed. See the report:
-									// adding it is the one-column change that makes attribution
-									// complete.
-									author_email: null,
+									author_email: attributed ? prompt.authorEmail : null,
+									mode: attributed ? "attributed-user" : "agent-only",
 								},
 							};
 							send("command", command);

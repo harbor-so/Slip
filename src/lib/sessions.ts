@@ -136,6 +136,13 @@ export async function queuePrompt(input: {
 	sessionId: string;
 	author: string;
 	authorKind?: "human" | "agent";
+	/**
+	 * The author's git identity, when the caller has one on file. Stored so the
+	 * commands route can send the prompt down as `attributed-user`; absent, the
+	 * prompt runs `agent-only` with bot-attributed commits rather than being
+	 * refused by the sandbox's identity check.
+	 */
+	authorEmail?: string | null;
 	body: string;
 }) {
 	const body = input.body.trim();
@@ -160,6 +167,7 @@ export async function queuePrompt(input: {
 				sessionId: input.sessionId,
 				author: input.author,
 				authorKind: input.authorKind ?? "human",
+				authorEmail: input.authorEmail ?? null,
 				body,
 				seq,
 			})

@@ -30,6 +30,14 @@ export interface Session {
 	orgId: string;
 	orgName: string;
 	userName: string | null;
+	/**
+	 * The viewer's email from their GitHub sign-in, when the profile exposes
+	 * one. This is what makes an `attributed-user` prompt possible: the commands
+	 * route can only claim a commit's authorship when there is an identity to
+	 * claim it FOR. Null degrades the viewer's prompts to `agent-only` — bot
+	 * commits, honestly labelled — never to a refusal.
+	 */
+	userEmail: string | null;
 	/** True when this session came from the dev bypass rather than a real login. */
 	unauthenticated: boolean;
 }
@@ -123,6 +131,7 @@ export async function currentSession(): Promise<Session | null> {
 					orgId: org.id,
 					orgName: org.name,
 					userName: user.name,
+					userEmail: user.email,
 					unauthenticated: false,
 				};
 			}
@@ -133,5 +142,5 @@ export async function currentSession(): Promise<Session | null> {
 
 	const [org] = await db.select().from(orgs).orderBy(asc(orgs.createdAt)).limit(1);
 	if (!org) return null;
-	return { orgId: org.id, orgName: org.name, userName: null, unauthenticated: true };
+	return { orgId: org.id, orgName: org.name, userName: null, userEmail: null, unauthenticated: true };
 }

@@ -297,6 +297,8 @@ export async function enqueueSessionPrompt(input: {
 	sessionId: string;
 	author: string;
 	authorKind?: PromptAuthorKind;
+	/** Forwarded to the stored prompt; see `queuePrompt`. */
+	authorEmail?: string | null;
 	body: string;
 	repoOverrides?: RepoOverrides;
 }): Promise<EnqueueOutcome> {
@@ -351,6 +353,7 @@ export async function enqueueSessionPrompt(input: {
 			sessionId: input.sessionId,
 			author: input.author,
 			authorKind: input.authorKind ?? "human",
+			authorEmail: input.authorEmail ?? null,
 			body: input.body,
 		});
 		return {
@@ -433,6 +436,15 @@ export async function takeNextPrompt(
 	orgId: string,
 	sessionId: string,
 	now = new Date(),
+	options: {
+		/**
+		 * The turn's correlation id, persisted on the delivered prompt so the
+		 * commands route — which sends prompts from persisted state, with no
+		 * runner in its call stack — can carry it into the sandbox. Cleared on
+		 * requeue: a retried delivery is a new turn with a new trace.
+		 */
+		traceId?: string;
+	} = {},
 ): Promise<QueuedPrompt | null> {
 	return db.transaction(async (tx) => {
 		const [next] = await tx
@@ -453,7 +465,7 @@ export async function takeNextPrompt(
 
 		await tx
 			.update(sessionPrompts)
-			.set({ status: "delivered", deliveredAt: now })
+			.set({ status: "delivered", deliveredAt: now, traceId: options.traceId ?? null })
 			// The status predicate is repeated even though the row is locked. If this
 			// is ever refactored into a read outside the transaction, the zero-row
 			// result turns a double delivery into a visible no-op instead of a second
@@ -486,7 +498,9 @@ export async function takeNextPrompt(
 export async function requeuePrompt(orgId: string, promptId: string): Promise<void> {
 	await db
 		.update(sessionPrompts)
-		.set({ status: "queued", deliveredAt: null })
+		// The trace is cleared with the delivery: a retried delivery is a new
+		// turn, and a stale trace id would stitch two attempts into one story.
+		.set({ status: "queued", deliveredAt: null, traceId: null })
 		.where(
 			and(
 				eq(sessionPrompts.id, promptId),
@@ -797,7 +811,7 @@ async function driveOneTurn(
 		}
 	}
 
-	const taken = await takeNextPrompt(orgId, sessionId, now);
+	const taken = await takeNextPrompt(orgId, sessionId, now, { traceId });
 	if (!taken) {
 		// The peek saw a prompt and the take did not. Under the advisory lock this
 		// is nearly impossible — it needs somebody calling the queue functions

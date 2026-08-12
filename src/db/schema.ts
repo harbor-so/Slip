@@ -294,10 +294,26 @@ export const sessionPrompts = pgTable(
 		/** Never nullable. Unattributed input is the thing this table exists to prevent. */
 		author: text("author").notNull(),
 		authorKind: text("author_kind").notNull().default("human"),
+		/**
+		 * The author's git identity, when one is on file. Nullable, and null means
+		 * something specific: the commands route sends the prompt down as
+		 * `agent-only`, so the turn runs with bot-attributed commits instead of
+		 * being refused. Before this column existed every prompt went down with a
+		 * null email and NO mode, and the bridge's identity check refused every
+		 * attributed turn in the product.
+		 */
+		authorEmail: text("author_email"),
 		body: text("body").notNull(),
 		status: text("status").notNull().default("queued"),
 		/** Monotonic within a session, so ordering never depends on timestamps. */
 		seq: integer("seq").notNull(),
+		/**
+		 * The turn's correlation id, written when the runner delivers the prompt
+		 * and cleared on requeue. This is how the trace survives the hop from the
+		 * runner (which mints it) to the commands route (which sends the prompt
+		 * from persisted state and has no runner in the call stack).
+		 */
+		traceId: text("trace_id"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		deliveredAt: timestamp("delivered_at", { withTimezone: true }),
 	},

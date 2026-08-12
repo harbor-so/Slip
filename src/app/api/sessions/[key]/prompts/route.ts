@@ -38,6 +38,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ key
 		sessionId: session.id,
 		author,
 		authorKind: "human",
+		// The viewer's git identity, when their sign-in exposes one. This is the
+		// difference between a commit authored by the person who asked and a
+		// bot-attributed one; it comes from the session cookie, never the body.
+		authorEmail: viewer.userEmail,
 		body: body.body ?? "",
 	});
 

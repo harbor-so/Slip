@@ -363,6 +363,17 @@ export interface BridgeCommand {
 		 */
 		author: string;
 		author_email: string | null;
+		/**
+		 * The control plane's explicit statement about authorship, and the field
+		 * that lets a turn run at all when no email is on file. `agent-only` is a
+		 * STATEMENT — "nobody claims authorship of these commits" — not a guess
+		 * the sandbox makes; `identityForPrompt` in the bridge refuses a prompt
+		 * with neither a complete identity nor this mode, precisely so the
+		 * control plane cannot half-attribute by accident. Before this field was
+		 * sent, every attributed prompt was refused end to end, because
+		 * `author_email` was always null and no mode said that was deliberate.
+		 */
+		mode?: "agent-only" | "attributed-user";
 	};
 }
 
