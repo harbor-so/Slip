@@ -28,7 +28,8 @@ import { and, eq, isNull, lte, or, sql as raw } from "drizzle-orm";
 import { db, sql } from "../db/index.js";
 import { automationRuns, automations, sessions } from "../db/schema.js";
 import { setting } from "../config.js";
-import { createSession, queuePrompt } from "../lib/sessions.js";
+import { createSession } from "../lib/sessions.js";
+import { enqueueSessionPrompt } from "../lib/session-runner.js";
 import { environmentRepoIds } from "../lib/secrets.js";
 import { budgetStatusSafe } from "./budget-bridge.js";
 import { nextRun } from "./cron.js";
@@ -224,7 +225,13 @@ export async function runAutomation(
 			})
 			.where(eq(sessions.id, session.id));
 
-		await queuePrompt({
+		// The capped front door. An automation is THE amplification path the
+		// queue-depth cap's own doc comment names — a retrying hourly job enqueues
+		// without bound — and a refusal here must THROW so it lands in the catch
+		// below, increments consecutiveFailures, and eventually pauses the
+		// automation itself. Swallowing the refusal would keep the schedule firing
+		// into a full queue forever, which is the loop the cap exists to break.
+		const queued = await enqueueSessionPrompt({
 			orgId: automation.orgId,
 			sessionId: session.id,
 			author: `automation:${automation.name}`,
@@ -233,6 +240,7 @@ export async function runAutomation(
 			authorKind: "agent",
 			body: automation.prompt,
 		});
+		if (!queued.ok) throw new Error(queued.message);
 
 		await db
 			.update(automationRuns)
