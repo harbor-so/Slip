@@ -117,10 +117,12 @@ lock rather than being a designated singleton, and the session runner takes one
 per session, so replicas cooperate without electing a leader.
 
 **Sandboxes on Kubernetes.** Do not mount the node's Docker socket into the Harbor
-pod. Use `HARBOR_SANDBOX_PROVIDER=fly`, or run the Harbor deployment on a
-dedicated node pool with the `docker` provider and accept that the pod is
-effectively node-root there. A first-class Kubernetes Job provider is the obvious
-contribution and the provider contract test suite is what proves one correct.
+pod. Run the Harbor deployment on a dedicated node pool with the `docker` provider
+and accept that the pod is effectively node-root there. A first-class Kubernetes
+Job provider — or any VM-isolated remote provider — is the obvious contribution,
+and the provider contract test suite is what proves one correct. (The shipped
+providers are `docker` and `local`; nothing else exists yet, whatever older docs
+implied.)
 
 ---
 
@@ -187,7 +189,8 @@ The four alerts worth having on day one:
 |---|---|---|
 | Provider down | `harbor_circuit_breaker_open > 0` | the sandbox provider is failing; sessions are being refused |
 | Boots degrading | `harbor_sandbox_time_to_ready_seconds{quantile="0.99"} > 300` | one user in a hundred is waiting five minutes, which is enough for them to stop using it |
-| Approaching the cap | `harbor_spend_today_micro_usd / on(org) harbor_spend_cap > 0.8` | new claims will start being refused today |
+| Approaching the cap | `harbor_spend_today_micro_usd / on(org) harbor_spend_cap_micro_usd > 0.8` | new claims will start being refused today |
+| Provider flapping | `increase(harbor_circuit_breaker_trips_total[1h]) > 2` | the breaker keeps opening; a gauge alone misses trips that close between scrapes |
 | Agents dying | `rate(harbor_claim_expiries_total[1h]) > 0` | leases lapsing means agents are crashing mid-task, or the lease default is too short for the work |
 
 ---

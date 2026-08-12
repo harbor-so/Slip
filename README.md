@@ -185,7 +185,6 @@ lowest-common-denominator interface loses the best property of each.
 | Provider | Isolation | Needs |
 |---|---|---|
 | `docker` **(default)** | container | nothing |
-| `fly` | hardware-virtualised VM | a Fly account |
 | `local` | **none** — see below | opt-in flags |
 
 `local` runs the agent as the server user with no isolation. It is off unless
@@ -356,11 +355,19 @@ value.
 
 ```bash
 docker compose up -d
+npm run check   # config lint + typecheck + the full suite
+```
+
+`npm run check` is the gate a contribution must pass — it runs the config
+lint (no hardcoded tunables, no await in a sync-handoff region), `tsc`, and
+the whole test suite. To run the tests alone:
+
+```bash
 DATABASE_URL=postgres://harbor:harbor@localhost:5433/harbor npx vitest run
 ```
 
-**579 tests against real Postgres, not mocks**, because the guarantees are
-database indexes and how code reacts to them — a mock happily passes a
+**Hundreds of tests against real Postgres, not mocks**, because the guarantees
+are database indexes and how code reacts to them — a mock happily passes a
 read-then-write check that races.
 
 Pure modules get zero-mock suites at exact boundary values: 93 tests on sandbox

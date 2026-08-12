@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import postgres from "postgres";
 import { setting } from "../../../../../config.js";
 import type { BridgeCommand } from "../../../../../contracts/index.js";
-import { db } from "../../../../../db/index.js";
+import { databaseUrl, db } from "../../../../../db/index.js";
 import { sandboxes, sessionPrompts, sessions } from "../../../../../db/schema.js";
 import { isReconnectBlockedStatus } from "../../../../../sandbox/decisions.js";
 import { validateFence } from "../../../../../sandbox/manager.js";
@@ -62,7 +62,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 	const { orgId, sessionId } = auth.sandbox;
 	const sandboxId = auth.sandbox.id;
 
-	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
+	const url = databaseUrl();
 	// A dedicated connection, because LISTEN occupies one for as long as it is
 	// listening; taking one from the request pool would starve it one sandbox at a
 	// time until the whole control plane stopped answering.

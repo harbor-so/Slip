@@ -195,7 +195,12 @@ wide enough that it must be stated rather than implied.
 |---|---|---|
 | `local` | **None.** The agent runs as the server user, on the server's filesystem and network. | Your own laptop, your own repo. Nothing else. |
 | `docker` | Container. Kernel shared with the host. | A single-tenant deployment on a dedicated host. |
-| `fly` | Hardware-virtualised machine. | Untrusted-ish code with a real boundary. |
+
+These two are the ONLY shipped providers. No current option gives a hardware
+virtualisation boundary; a deployment that needs one must contribute a
+VM-isolated provider (the contract test suite in
+`src/sandbox/providers/provider-contract.test.ts` is what proves one correct)
+rather than choose an option that does not exist.
 
 `local` is off unless `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are
 both set, the runtime must be one of a known set of binaries, and the prompt is
