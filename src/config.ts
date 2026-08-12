@@ -363,6 +363,46 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	// -- Triggers (inbound event automations) --------------------------------
+
+	triggerMaxBodyBytes: {
+		env: "HARBOR_TRIGGER_MAX_BODY_BYTES",
+		fallback: 1_000_000,
+		derivation:
+			"The largest inbound trigger payload accepted before a 413. Matches the "
+			+ "connector webhook cap, and for the same reason: the HMAC signature is "
+			+ "computed over the whole body, so an unbounded body is an unauthenticated "
+			+ "way to make the server hash megabytes before it can reject the request.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	triggerReplayWindowSeconds: {
+		env: "HARBOR_TRIGGER_REPLAY_WINDOW_SECONDS",
+		fallback: 60 * 5,
+		derivation:
+			"How far a signed delivery timestamp (Sentry's `sentry-hook-timestamp`) may "
+			+ "deviate from now, in either direction, before it is treated as a replay. "
+			+ "Mirrors the Slack connector's five-minute window: generous enough for clock "
+			+ "skew between the sender and this deployment, tight enough that a captured "
+			+ "delivery is not a sandbox-spawning primitive forever. `Math.abs`, so a "
+			+ "future-stamped delivery is rejected too — a one-sided check is forgeable by "
+			+ "whoever controls the timestamp being signed over.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	triggerMaxRunsPerMinutePerAutomation: {
+		env: "HARBOR_TRIGGER_MAX_RUNS_PER_MINUTE_PER_AUTOMATION",
+		fallback: 10,
+		derivation:
+			"The most sessions one event automation may start per minute. Cron is "
+			+ "naturally bounded to once a minute; an inbound webhook or a chatty Sentry "
+			+ "project is not, so a retry storm is a genuine amplification path with no "
+			+ "human in it. Above this, deliveries are shed — recorded, not fired — the "
+			+ "same class of protection maxQueueDepth gives the enqueue path, and a "
+			+ "cheaper stop than waiting for the daily spend cap to catch a runaway.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Coordination --------------------------------------------------------
 
 	presenceWindowMs: {
