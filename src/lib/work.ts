@@ -288,7 +288,21 @@ export async function listWork(
 }
 
 export type ClaimResult =
-	| { ok: true; taskId: string; title: string; expiresAt: Date }
+	| {
+			ok: true;
+			taskId: string;
+			title: string;
+			expiresAt: Date;
+			/**
+			 * The claim row this call inserted. Callers that go on to spawn MUST pass
+			 * this to `ensureSandbox` rather than re-reading the active claim: a
+			 * re-read races the release/expiry of the very row it is looking for, and
+			 * a null from that race used to collapse into "no lease asserted" — which
+			 * `readLeaseState` treats as authorised. The id from the insert cannot be
+			 * anybody else's claim.
+			 */
+			claimId: string;
+	  }
 	| { ok: false; taskId: string; title: string; heldBy: string; expiresAt: Date };
 
 /**
@@ -391,7 +405,7 @@ export async function claim(
 					intentRef: opts.intentRef ?? null,
 				},
 			});
-			return { ok: true, taskId, title: task.title, expiresAt };
+			return { ok: true, taskId, title: task.title, expiresAt, claimId: inserted[0]!.id };
 		}
 
 		const holder = await tx.query.claims.findFirst({

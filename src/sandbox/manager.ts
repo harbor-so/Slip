@@ -72,7 +72,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, isNotNull, notInArray, sql as raw } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, notInArray, sql as raw } from "drizzle-orm";
 import { type RepoOverrides, setting } from "../config.js";
 import {
 	DEAD_SANDBOX_STATUSES,
@@ -89,16 +89,19 @@ import { type Executor, appendEvent } from "../lib/session-events.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
 import {
+	type DestructionAuthority,
 	type LeaseState,
 	type SandboxFailure,
 	assertNever,
 	classifyProviderError,
 	evaluateConnectingTimeout,
+	evaluateDestruction,
 	evaluateExecutionTimeout,
 	evaluateHeartbeatHealth,
 	evaluateInactivityTimeout,
 	evaluateSpawnDecision,
 	isDeadSandboxStatus,
+	isOpenAttemptStatus,
 	isReconnectBlockedStatus,
 	resolveBootMode,
 } from "./decisions.js";
@@ -159,10 +162,12 @@ export interface EnsureSandboxInput {
 	/**
 	 * The lease that authorises this spawn, when there is one.
 	 *
-	 * `null` is legal and means "no lease-scoped authority was asserted" — a human
-	 * opening a scratch session from the dashboard. It is NOT the same as a lease
-	 * that could not be read: see `readLeaseState` for why one is `held` and the
-	 * other is `unknown`, and why they must never be collapsed.
+	 * `null` is legal ONLY for a session with no task — a human opening a scratch
+	 * room from the dashboard, where there is no lease to hold. For a session
+	 * backed by a task, `null` means the claim was lost or never threaded and the
+	 * spawn is REFUSED (`readLeaseState` answers `not_held`). And neither case is
+	 * the same as a lease that could not be read, which is `unknown`; see
+	 * `readLeaseState` for why the three must never be collapsed.
 	 */
 	claimId?: string | null;
 	/** Who asked. Lands on the timeline events and on the cost rows. */
@@ -208,16 +213,25 @@ export interface EnsureSandboxInput {
  * sites: being wrong about liveness wastes a probe, being wrong about authority is
  * unrecoverable.
  *
- * A missing `claimId` is `held` rather than `unknown` because it is not a failed
- * read — nothing was asked. Mutual exclusion for that case comes from the
- * session-scoped advisory lock in `openAttempt`, which is what actually stops two
- * concurrent callers from both spawning.
+ * A missing `claimId` splits on whether the session has a task, and the split is
+ * the fix for a real degradation. When `sessionTaskId` is null the session is
+ * leaseless BY DESIGN — a human's scratch room from the dashboard — and there is
+ * no lease to read, so `held` is honest: mutual exclusion for that case comes
+ * from the session-scoped advisory lock in `openAttempt`. But a session WITH a
+ * task and no presented claim means the claim was lost — released, expired, or
+ * never threaded through — and the old behaviour of answering `held` for that
+ * case collapsed "authority was lost" into "authority was never needed". The
+ * lost lease is `not_held`: an agent whose claim lapsed must be refused, not
+ * waved through because nobody handed the checker anything to check.
  */
 export async function readLeaseState(
 	claimId: string | null | undefined,
+	sessionTaskId: string | null,
 	now: Date,
 ): Promise<LeaseState> {
-	if (claimId === null || claimId === undefined) return "held";
+	if (claimId === null || claimId === undefined) {
+		return sessionTaskId === null ? "held" : "not_held";
+	}
 	try {
 		const [row] = await db
 			.select({ releasedAt: claims.releasedAt, expiresAt: claims.expiresAt })
@@ -365,7 +379,9 @@ function classifyPendingAttempt(
 	now: Date,
 	overrides?: RepoOverrides,
 ): PendingAttempt {
-	const row = rows.find((candidate) => candidate.status === "requested" && candidate.externalId === null);
+	const row = rows.find(
+		(candidate) => isOpenAttemptStatus(candidate.status) && candidate.externalId === null,
+	);
 	if (!row) return { state: "none" };
 	// A recorded failure is proof the attempt concluded, so it is reconcilable
 	// immediately rather than after the boot timeout. That is what makes the
@@ -636,7 +652,7 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 	// insert; none of them can go stale in a way that duplicates a box, which is the
 	// only thing the lock is protecting.
 	const [lease, circuit, budget, queueDepth] = await Promise.all([
-		readLeaseState(input.claimId ?? null, now),
+		readLeaseState(input.claimId ?? null, session.taskId, now),
 		readCircuit(input.orgId, provider.name, now, overrides).then((reading) => reading.decision),
 		budgetStatus(input.orgId, { repoOverrides: overrides }),
 		countQueuedPrompts(input.sessionId),
@@ -1375,6 +1391,12 @@ export type StopSandboxResult =
  * to protect the *spawn* path; a wave of failing stops during a provider incident
  * would open it for every session in the org at the moment they are all trying to
  * clean up, which is the opposite of helpful.
+ *
+ * Deliberately NOT behind the destruction lease gate the reapers use. This is an
+ * explicit command with a named actor and a typed reason — an operator pressing
+ * stop, a session being completed — not an *inference* of abandonment, and
+ * refusing the operator because a claim row was slow to read would make the
+ * emergency path depend on the database being healthy.
  */
 export async function stopSandbox(
 	sandboxId: string,
@@ -1597,6 +1619,46 @@ export interface SweepOptions {
 	orgId?: string;
 	provider?: SandboxProvider;
 	repoOverrides?: RepoOverrides;
+	/**
+	 * How a reaper learns the lease state behind a task. A seam for tests — the
+	 * fail-closed cases below need a claims table that cannot be read, which is
+	 * not something a test can arrange against a healthy Postgres. Defaults to
+	 * reading the `claims` table.
+	 */
+	readLease?: (taskId: string, now: Date) => Promise<LeaseState>;
+}
+
+/**
+ * The authority behind a session, for a destruction decision.
+ *
+ * A read failure returns `unknown`, never a guess — `evaluateDestruction`
+ * defers on `unknown`, which is the fail-closed direction for destruction. See
+ * the long comment on `evaluateDestruction` for why this deliberately differs
+ * from both the liveness rule and the spawn rule.
+ */
+async function readDestructionAuthority(
+	taskId: string | null,
+	now: Date,
+	readLease?: SweepOptions["readLease"],
+): Promise<DestructionAuthority> {
+	if (taskId === null) return "no_task";
+	const read =
+		readLease
+		?? (async (id: string, at: Date): Promise<LeaseState> => {
+			const [row] = await db
+				.select({ expiresAt: claims.expiresAt })
+				.from(claims)
+				.where(and(eq(claims.taskId, id), isNull(claims.releasedAt)))
+				.limit(1);
+			if (!row) return "not_held";
+			if (row.expiresAt.getTime() <= at.getTime()) return "not_held";
+			return "held";
+		});
+	try {
+		return await read(taskId, now);
+	} catch {
+		return "unknown";
+	}
 }
 
 /**
@@ -1666,7 +1728,11 @@ async function liveCandidates(options: SweepOptions) {
 	const conditions = [notInArray(sandboxes.status, [...DEAD_SANDBOX_STATUSES])];
 	if (options.orgId !== undefined) conditions.push(eq(sandboxes.orgId, options.orgId));
 	return db
-		.select({ sandbox: sandboxes, lastActivityAt: sessions.lastActivityAt })
+		.select({
+			sandbox: sandboxes,
+			lastActivityAt: sessions.lastActivityAt,
+			taskId: sessions.taskId,
+		})
 		.from(sandboxes)
 		.innerJoin(sessions, eq(sandboxes.sessionId, sessions.id))
 		.where(and(...conditions))
@@ -1697,6 +1763,19 @@ export async function onInactivity(now: Date, options: SweepOptions = {}): Promi
 			options.repoOverrides,
 		);
 		if (verdict.verdict !== "expired") continue;
+
+		// THE LEASE GATE, before the CAS — deferring after persisting a dead
+		// status would park the box behind a status no sweep revisits. An idle
+		// clock says nobody is *using* the box; the lease says whether anybody is
+		// *authorised* to be mid-flight on its task, and destruction defers to
+		// authority it cannot read. Leaseless dashboard sessions are `no_task`
+		// and reap exactly as before.
+		const authority = await readDestructionAuthority(candidate.taskId, now, options.readLease);
+		const decision = evaluateDestruction(authority);
+		if (decision.verdict === "defer") {
+			report.deferred.push(row.id);
+			continue;
+		}
 
 		// Status and event commit together; the provider stop follows the commit,
 		// preserving the persist-before-close rule from the file header.
@@ -1755,6 +1834,16 @@ export async function onStaleHeartbeat(
 		);
 		if (verdict.verdict !== "stale") continue;
 
+		// The lease gate, same as `onInactivity`: a vanished heartbeat plus an
+		// unreadable lease is two unknowns, and destruction waits one sweep
+		// rather than compounding them.
+		const authority = await readDestructionAuthority(candidate.taskId, now, options.readLease);
+		const decision = evaluateDestruction(authority);
+		if (decision.verdict === "defer") {
+			report.deferred.push(row.id);
+			continue;
+		}
+
 		const claimed = await transitionWithEvent(
 			row,
 			{ status: "stale", failureReason: "heartbeat_lost", stoppedAt: now },
@@ -1809,6 +1898,16 @@ export async function onConnectingTimeout(
 			options.repoOverrides,
 		);
 		if (verdict.verdict !== "timed_out") continue;
+
+		// The lease gate first — it is a local read, cheaper than the provider
+		// round trip below, and a deferred row must not be reconciled either: the
+		// lease holder's own retry path owns reconciliation while the lease lives.
+		const authority = await readDestructionAuthority(candidate.taskId, now, options.readLease);
+		const decision = evaluateDestruction(authority);
+		if (decision.verdict === "defer") {
+			report.deferred.push(row.id);
+			continue;
+		}
 
 		// RECONCILE BEFORE CONCLUDING, and the order is load-bearing. `failed` is
 		// on the dead deny-list: once a row is written there, no sweep ever looks
@@ -1885,6 +1984,9 @@ export async function onConnectingTimeout(
  * `agentTurnTimeoutMs` is validated at startup against the lease duration, so a turn
  * cannot legitimately outlive the lease that authorises it. When one does anyway,
  * the fence is what stops it writing; this only stops it waiting.
+ *
+ * Not behind the destruction lease gate, because it destroys nothing: it closes a
+ * prompt, and the timeout it enforces is itself derived from the lease.
  */
 export async function onExecutionTimeout(
 	now: Date,

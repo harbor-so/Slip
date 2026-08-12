@@ -760,7 +760,14 @@ async function driveOneTurn(
 					+ `${claimed.expiresAt.toISOString()}. Nothing was booted.`,
 			};
 		}
-		claimId = await activeClaimId(session.taskId);
+		// The id of the claim THIS call inserted, straight from the insert. The old
+		// shape re-read `activeClaimId(session.taskId)` here, and the re-read races
+		// everything: the claim released or expired between the insert and the read
+		// came back as null, which `readLeaseState` used to treat as "no lease
+		// asserted" — authorised — so a runner whose lease had just lapsed spawned
+		// with no lease at all. The value from the insert cannot lie about whose
+		// claim it is, and `readLeaseState` re-verifies the row is still live.
+		claimId = claimed.claimId;
 
 		// The handoff, recorded. See the file header for why the session is reused
 		// rather than superseded by a child: the transcript is in Postgres, so there
@@ -912,16 +919,6 @@ async function driveOneTurn(
 		}
 	}
 	return assertNever(outcome, "ensureSandbox outcome");
-}
-
-/** The active claim's id for a task, or null if nothing holds it. */
-async function activeClaimId(taskId: string): Promise<string | null> {
-	const [row] = await db
-		.select({ id: claims.id })
-		.from(claims)
-		.where(and(eq(claims.taskId, taskId), isNull(claims.releasedAt)))
-		.limit(1);
-	return row?.id ?? null;
 }
 
 /**
