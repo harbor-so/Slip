@@ -9,16 +9,28 @@
  */
 
 import { describe, expect, it } from "vitest";
-// @ts-expect-error — plain ESM JavaScript with no type declarations, deliberately:
-// the lint rule must be runnable as a bare `node scripts/lint-config.mjs` in CI
-// without a TypeScript toolchain in front of it.
-import { findViolations, lintTree } from "./lint-config.mjs";
+// Plain ESM JavaScript, deliberately: the lint rule must be runnable as a bare
+// `node scripts/lint-config.mjs` in CI without a TypeScript toolchain in front
+// of it. The shape is asserted here rather than declared in a .d.ts, so a change
+// to the rule's return type fails this file rather than a declaration nobody reads.
+import { findViolations as rawFind, lintTree as rawLint } from "./lint-config.mjs";
+
+interface Violation {
+	file: string;
+	line: number;
+	name: string;
+	value: string;
+	message: string;
+}
+
+const findViolations = rawFind as (source: string, file: string) => Violation[];
+const lintTree = rawLint as (root: string) => Violation[];
 
 describe("finding hardcoded tunables", () => {
 	it("fires on a module-level timeout constant", () => {
 		const found = findViolations("const BOOT_TIMEOUT_MS = 90_000;\n", "src/example.ts");
 		expect(found).toHaveLength(1);
-		expect(found[0].name).toBe("BOOT_TIMEOUT_MS");
+		expect(found[0]!.name).toBe("BOOT_TIMEOUT_MS");
 	});
 
 	it("fires on camelCase and on an exported constant", () => {
@@ -67,7 +79,7 @@ describe("finding hardcoded tunables", () => {
 });
 
 describe("the error message", () => {
-	const [violation] = findViolations("const SPAWN_TIMEOUT_MS = 90_000;\n", "src/sandbox/x.ts");
+	const violation = findViolations("const SPAWN_TIMEOUT_MS = 90_000;\n", "src/sandbox/x.ts")[0]!;
 
 	it("names the file and line", () => {
 		expect(violation.message).toContain("src/sandbox/x.ts:1");
@@ -101,7 +113,7 @@ describe("the tree as it actually stands", () => {
 		if (violations.length > 0) {
 			throw new Error(
 				`${violations.length} hardcoded tunable(s):\n\n`
-					+ violations.map((v: { message: string }) => v.message).join("\n\n"),
+					+ violations.map((v) => v.message).join("\n\n"),
 			);
 		}
 		expect(violations).toHaveLength(0);
