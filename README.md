@@ -39,7 +39,7 @@ Harbor is the version any company can adopt.
 |---|---|---|
 | Runs on | Cloudflare + Modal + Vercel + Terraform | Node + Postgres |
 | Evaluate it | four vendor accounts | `docker compose up` |
-| Sandbox | Modal (and four other paid providers) | **Docker by default**, Fly and Modal optional |
+| Sandbox | Modal (and four other paid providers) | **Docker by default**, Fly optional |
 | Coding agent | OpenCode only | Claude Code, Codex, OpenCode, Cursor, or your own |
 | Tenancy | single-tenant, one shared App install, no per-user repo check | org-scoped schema, per-user repo access check, tenant resolved from verified webhook payload |
 | Adding a connector | write and deploy another Worker | one file, one registry line |

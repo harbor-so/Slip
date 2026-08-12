@@ -14,11 +14,12 @@
  */
 
 import { githubConnector } from "./github.js";
+import { gitlabConnector } from "./gitlab.js";
 import { linearConnector } from "./linear.js";
 import { slackConnector } from "./slack.js";
 import type { Connector } from "./types.js";
 
-const CONNECTORS: Connector[] = [githubConnector, linearConnector, slackConnector];
+const CONNECTORS: Connector[] = [githubConnector, gitlabConnector, linearConnector, slackConnector];
 
 export function connectorFor(type: string): Connector | null {
 	return CONNECTORS.find((connector) => connector.type === type) ?? null;
