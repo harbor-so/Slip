@@ -5,13 +5,23 @@ import "../styles/globals.css";
 
 export const metadata: Metadata = {
 	title: "Harbor",
-	description: "Coordination for teams running fleets of coding agents.",
+	description: "Background coding agents your company can actually deploy.",
 };
 
+/**
+ * Ordered by how often somebody actually opens it, not by hierarchy.
+ *
+ * A dashboard for a system that runs while you are not watching is opened to
+ * answer "what happened" far more often than to configure anything, so the
+ * read-only surfaces come first and everything you set up once is behind
+ * Settings. Usage sits in the top row rather than under Settings because an
+ * unexpected bill is the failure mode people most want early warning of.
+ */
 const NAV = [
 	{ href: "/", label: "Activity" },
 	{ href: "/sessions", label: "Sessions" },
-	{ href: "/runs", label: "Runs" },
+	{ href: "/automations", label: "Automations" },
+	{ href: "/usage", label: "Usage" },
 	{ href: "/digest", label: "Digest" },
 	{ href: "/connectors", label: "Connectors" },
 	{ href: "/settings", label: "Settings" },
