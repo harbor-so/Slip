@@ -88,6 +88,7 @@ import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "..
 import { type Executor, appendEvent } from "../lib/session-events.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
+import { buildSandboxEnv } from "./env.js";
 import {
 	type DestructionAuthority,
 	type LeaseState,
@@ -656,6 +657,14 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 
 	const overrides = await overridesFor(session.repoId, input.repoOverrides);
 
+	// The execution glue: the repositories to clone, the agent runtime, and the
+	// session's secrets, built from its snapshot and injected into whichever
+	// provider boots the box. `input.env` wins on conflict so a test or a per-session
+	// override can still set a variable explicitly; the four control-plane variables
+	// injected at `create` win over both, so nothing here can redirect the box.
+	const sessionEnv = await buildSandboxEnv(session);
+	const mergedEnv = { ...sessionEnv, ...(input.env ?? {}) };
+
 	// The reads that do not need the lock happen before it, so the critical section
 	// is three statements long. Each of these can go stale between here and the
 	// insert; none of them can go stale in a way that duplicates a box, which is the
@@ -688,7 +697,7 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 		estimateMicroUsd: input.estimateMicroUsd ?? setting("sandboxSpawnEstimateMicroUsd", overrides),
 		image: input.image,
 		workspace: input.workspace,
-		env: input.env,
+		env: mergedEnv,
 		features: input.features,
 		command: input.command,
 	};

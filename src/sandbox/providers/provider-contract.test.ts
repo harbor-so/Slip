@@ -41,6 +41,7 @@ import type {
 	SandboxProvider,
 } from "../provider.js";
 import { classifyDockerFailure, dockerProvider, volumeName } from "./docker.js";
+import { flyProvider } from "./fly.js";
 import { localProvider } from "./local.js";
 import { providerFor } from "../registry.js";
 
@@ -737,6 +738,57 @@ if ("reason" in localFixture) {
 		cleanup: async (config) => {
 			const found = await provider.findByAttemptId(config.attemptId).catch(() => null);
 			if (found) await provider.stop(found.externalId, { graceMs: 1_000 }).catch(() => {});
+		},
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Fly — runs against real Fly when credentials are present, skips loud otherwise.
+// The unit-level behaviour (state mapping, fail-closed reconciliation, status
+// classification) is covered against an injected fetch in `fly.test.ts`; this
+// block is the live-infra half, and it costs a Fly account plus a pushed image,
+// so it is opt-in behind three variables rather than run by default.
+// ---------------------------------------------------------------------------
+
+const flyReady =
+	Boolean(process.env.FLY_API_TOKEN) &&
+	Boolean(process.env.FLY_APP_NAME) &&
+	Boolean(process.env.FLY_TEST_IMAGE);
+
+if (!flyReady) {
+	console.warn(
+		"[provider-contract] SKIPPING the fly provider suite: set FLY_API_TOKEN, FLY_APP_NAME "
+			+ "and FLY_TEST_IMAGE (a pushed image that idles) to exercise it against real Fly. "
+			+ "Its logic is still covered by fly.test.ts against an injected fetch.",
+	);
+	describe.skip("fly provider contract (skipped)", () => {
+		test.skip("fly credentials were not provided", () => {});
+	});
+} else {
+	const provider = flyProvider();
+
+	function flyConfig(overrides: Partial<CreateSandboxConfig> = {}): CreateSandboxConfig {
+		return {
+			sessionId: randomUUID(),
+			sandboxId: randomUUID(),
+			attemptId: randomUUID(),
+			image: process.env.FLY_TEST_IMAGE!,
+			workspace: "/workspace",
+			env: {},
+			timeoutMs: 120_000,
+			features: {},
+			...overrides,
+		};
+	}
+
+	describeProviderContract({
+		label: "fly",
+		provider,
+		config: () => flyConfig(),
+		brokenImageConfig: () => flyConfig({ image: "registry.fly.io/does-not-exist:nope" }),
+		cleanup: async (config) => {
+			const found = await provider.findByAttemptId(config.attemptId).catch(() => null);
+			if (found) await provider.stop(found.externalId).catch(() => {});
 		},
 	});
 }

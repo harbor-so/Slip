@@ -14,6 +14,11 @@ import {
 	verifyGitHubWebhook,
 } from "./github.js";
 import {
+	handleGitLabWebhook,
+	resolveGitLabAccount,
+	verifyGitLabWebhook,
+} from "./gitlab.js";
+import {
 	handleLinearWebhook,
 	verifyLinearWebhook,
 } from "./linear.js";
@@ -68,6 +73,14 @@ describe("webhook signatures", () => {
 		expect(verifyLinearWebhook(body, {}, secret)).toBe(false);
 		expect(verifyLinearWebhook(body, { "linear-signature": "not-hex" }, secret)).toBe(false);
 	});
+
+	it("verifies GitLab tokens constant-time and rejects a wrong or missing one", () => {
+		// GitLab sends the literal token, not an HMAC — the body is irrelevant.
+		expect(verifyGitLabWebhook(body, { "x-gitlab-token": secret }, secret)).toBe(true);
+		expect(verifyGitLabWebhook(body, { "x-gitlab-token": "wrong" }, secret)).toBe(false);
+		expect(verifyGitLabWebhook(body, {}, secret)).toBe(false);
+		expect(verifyGitLabWebhook(body, { "x-gitlab-token": "" }, secret)).toBe(false);
+	});
 });
 
 describe("GitHub webhooks", () => {
@@ -98,6 +111,44 @@ describe("GitHub webhooks", () => {
 	it("marks a closed issue completed", async () => {
 		await handleGitHubWebhook(opened, ctx());
 		await handleGitHubWebhook({ ...opened, action: "closed" }, ctx());
+		const [task] = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
+		expect(task?.status).toBe("completed");
+	});
+});
+
+describe("GitLab webhooks", () => {
+	const opened = {
+		object_kind: "issue",
+		project: { id: 7, namespace: "acme", path_with_namespace: "acme/web" },
+		object_attributes: { id: 900, iid: 42, title: "Fix retry storm", description: "Bound it.", action: "open", state: "opened" },
+	};
+
+	it("resolves the group namespace as the tenant, from the payload", () => {
+		expect(resolveGitLabAccount(opened)).toBe("acme");
+	});
+
+	it("creates one task keyed on the global id (so two projects' #42 do not collide)", async () => {
+		const result = await handleGitLabWebhook(opened, ctx());
+		expect(result.action).toBe("created");
+		const rows = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ title: "Fix retry storm", source: "gitlab", sourceRef: "900" });
+	});
+
+	it("updates rather than duplicates a redelivered issue", async () => {
+		await handleGitLabWebhook(opened, ctx());
+		const second = await handleGitLabWebhook(opened, ctx());
+		expect(second.action).toBe("updated");
+		expect(await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) })).toHaveLength(1);
+	});
+
+	it("marks a merged merge request completed", async () => {
+		const mr = {
+			object_kind: "merge_request",
+			project: { id: 7, namespace: "acme" },
+			object_attributes: { id: 901, iid: 5, title: "Ship it", action: "merge", state: "merged" },
+		};
+		await handleGitLabWebhook(mr, ctx());
 		const [task] = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
 		expect(task?.status).toBe("completed");
 	});

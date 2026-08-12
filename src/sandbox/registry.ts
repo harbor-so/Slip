@@ -23,14 +23,18 @@ import { setting } from "../config.js";
 import { SandboxProviderError, assertNever } from "./provider.js";
 import type { SandboxProvider } from "./provider.js";
 import { dockerProvider } from "./providers/docker.js";
+import { flyProvider } from "./providers/fly.js";
 import { localProvider } from "./providers/local.js";
 
 /**
  * The backends that exist. The order is the order they are offered to an operator
  * choosing one, so `docker` is first: it is the default, it needs no account, and
- * it is the only one of the two with an isolation boundary.
+ * it is an isolation boundary. `fly` is the remote option — a hardware VM in
+ * someone else's datacentre for a deployment that has outgrown one host — and it
+ * costs a Fly account. `local` is last and is not a sandbox at all; it runs the
+ * agent as the server user and exists only for the single-operator case.
  */
-export const SANDBOX_PROVIDER_NAMES = ["docker", "local"] as const;
+export const SANDBOX_PROVIDER_NAMES = ["docker", "fly", "local"] as const;
 export type SandboxProviderName = (typeof SANDBOX_PROVIDER_NAMES)[number];
 
 export function isSandboxProviderName(name: string): name is SandboxProviderName {
@@ -70,6 +74,8 @@ function construct(name: SandboxProviderName): SandboxProvider {
 	switch (name) {
 		case "docker":
 			return dockerProvider();
+		case "fly":
+			return flyProvider();
 		case "local":
 			return localProvider();
 	}

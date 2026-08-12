@@ -126,6 +126,10 @@ reviewer reads.
 
 **Harbor writes nothing to this service through the connector.** Inbound sync only.
 
+### gitlab
+
+**Harbor writes nothing to this service through the connector.** Inbound sync only.
+
 ### linear
 
 | Call | Scope needed | What it does | When |
