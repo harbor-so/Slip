@@ -20,6 +20,7 @@
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type Request, type Response } from "express";
+import { setting } from "../config.js";
 import { orgIdForKey } from "../lib/auth.js";
 import { sweepExpiredClaims } from "../lib/work.js";
 import { buildServer } from "./build.js";
@@ -37,7 +38,7 @@ export { buildServer };
  */
 export const DEFAULT_MCP_PORT = 8788;
 const PORT = Number(process.env.PORT ?? DEFAULT_MCP_PORT);
-const SWEEP_INTERVAL_MS = 60_000;
+
 
 
 const app = express();
@@ -103,7 +104,7 @@ if (process.env.NODE_ENV !== "test") {
 				if (n > 0) console.log(`[sweep] released ${n} expired claim(s)`);
 			})
 			.catch((error) => console.error("[sweep] failed:", error));
-	}, SWEEP_INTERVAL_MS).unref();
+	}, setting("claimSweepIntervalMs")).unref();
 }
 
 export { app };

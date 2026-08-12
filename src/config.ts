@@ -211,6 +211,17 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	maxActivityPayloadChars: {
+		env: "HARBOR_MAX_ACTIVITY_PAYLOAD_CHARS",
+		fallback: 16_000,
+		derivation:
+			"The backstop on one activity row's payload. Normalizers already clip "
+			+ "individual strings; this catches a payload that is wide rather than deep — "
+			+ "many small fields — which no per-field cap sees. Higher than the timeline's "
+			+ "cap because activity carries structured tool arguments rather than prose.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Bridge --------------------------------------------------------------
 
 	bridgeBufferLimit: {
@@ -282,6 +293,51 @@ export const SETTINGS = {
 			+ "unlimited, because every amplification path in this system is a loop with "
 			+ "no human in it. On breach Harbor stops admitting new claims and does not "
 			+ "kill running work — killing mid-turn wastes everything already spent.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	// -- Coordination --------------------------------------------------------
+
+	presenceWindowMs: {
+		env: "HARBOR_PRESENCE_WINDOW_MS",
+		fallback: 90_000,
+		derivation:
+			"How long after its last call an agent still counts as present. Presence is "
+			+ "a byproduct of the five coordination calls rather than a heartbeat, so the "
+			+ "window has to be longer than the gap between an agent's calls — a minute "
+			+ "and a half tolerates an agent that is thinking rather than calling.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	claimSweepIntervalMs: {
+		env: "HARBOR_CLAIM_SWEEP_INTERVAL_MS",
+		fallback: 60_000,
+		derivation:
+			"How often lapsed leases are swept back to open. A backstop, not the "
+			+ "mechanism — claim() already expires a stale holder before it inserts, so "
+			+ "correctness never depends on this running. What it buys is timeliness: a "
+			+ "task whose agent died reads as open in the dashboard within a minute.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	// -- Runs ----------------------------------------------------------------
+
+	runOutputFlushMs: {
+		env: "HARBOR_RUN_OUTPUT_FLUSH_MS",
+		fallback: 1_000,
+		derivation:
+			"Output is buffered and flushed on a timer rather than written per chunk. A "
+			+ "build log arrives in hundreds of small writes and one UPDATE each would "
+			+ "swamp the database and the notify channel with nothing new to say.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	maxRunOutputChars: {
+		env: "HARBOR_MAX_RUN_OUTPUT_CHARS",
+		fallback: 200_000,
+		derivation:
+			"Bounded so a chatty agent cannot fill the database with one row. Past this "
+			+ "the output is truncated with a visible marker rather than silently dropped.",
 		parse: asInt,
 	} satisfies Setting<number>,
 

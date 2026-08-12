@@ -21,6 +21,7 @@
 
 import { spawn } from "node:child_process";
 import { eq, sql as raw } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { runs } from "../db/schema.js";
 import { notifyChange, touchPresence } from "./work.js";
@@ -40,9 +41,7 @@ const RUNTIMES = {
 export type Runtime = keyof typeof RUNTIMES;
 export const RUNTIME_IDS = Object.keys(RUNTIMES) as Runtime[];
 
-/** Bounded so a chatty agent cannot fill the database with one row. */
-const MAX_OUTPUT_CHARS = 200_000;
-const FLUSH_INTERVAL_MS = 1_000;
+
 
 export class RunnerDisabledError extends Error {
 	constructor(message: string) {
@@ -160,8 +159,8 @@ export async function launchRun(input: LaunchInput): Promise<{ runId: string }> 
 		if (truncated) return;
 		const text = chunk.toString();
 		total += text.length;
-		if (total > MAX_OUTPUT_CHARS) {
-			buffer += "\n… output truncated at 200k characters …";
+		if (total > setting("maxRunOutputChars")) {
+			buffer += `\n… output truncated at ${setting("maxRunOutputChars")} characters …`;
 			truncated = true;
 			return;
 		}
@@ -184,7 +183,7 @@ export async function launchRun(input: LaunchInput): Promise<{ runId: string }> 
 		await notifyChange(input.orgId, "run_output");
 	};
 
-	const timer = setInterval(() => void flush(), FLUSH_INTERVAL_MS);
+	const timer = setInterval(() => void flush(), setting("runOutputFlushMs"));
 
 	child.on("close", async (code) => {
 		clearInterval(timer);
