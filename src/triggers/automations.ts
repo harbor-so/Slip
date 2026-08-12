@@ -103,6 +103,14 @@ async function runDueAutomations(now: Date): Promise<{
 		.from(automations)
 		.where(
 			and(
+				// Only cron automations are due on a clock. Event-driven automations
+				// (`webhook`, `sentry`) fire from `POST /api/triggers/...` when a delivery
+				// arrives and carry no `nextRunAt`, so without this filter they match
+				// `isNull(nextRunAt)` on every tick — the tick would then stamp
+				// `lastRunAt = now` and write an UPDATE for each of them once a minute
+				// forever, showing a "last run" that advances although the automation
+				// never ran. Restricting the clock to `cron` is the whole fix.
+				eq(automations.source, "cron"),
 				eq(automations.enabled, true),
 				isNull(automations.pausedReason),
 				or(isNull(automations.nextRunAt), lte(automations.nextRunAt, now)),
@@ -161,29 +169,32 @@ function advanceSchedule(
 }
 
 /**
- * Run one automation, whether from the scheduler or from the manual button.
+ * Turn one already-created `automation_runs` row into a session and a queued
+ * prompt, and do the success/failure bookkeeping that drives auto-pause.
  *
- * Exported because "run it now" is the first thing anybody does after creating
- * an automation, and making them wait an hour to find out whether it works is a
- * good way to have them never create a second one.
+ * Extracted from `runAutomation` so the cron path, the manual "Run now" button
+ * and an inbound event all share one fire path — the place where a bug would
+ * otherwise be fixed in one caller and left in the others. Everything specific to
+ * *how the run was admitted* (enabled/paused checks, delivery idempotency) lives
+ * in the caller; this function assumes the run row already exists and is the
+ * authority for spending it.
+ *
+ * `extraContext` is the normalised event that triggered an inbound run — the
+ * Sentry stack frame, the webhook body — appended to the automation's own prompt
+ * so the agent sees what fired it. Cron and manual runs pass nothing and behave
+ * exactly as before.
  */
-export async function runAutomation(
-	automationId: string,
+async function executeRun(
+	automation: typeof automations.$inferSelect,
+	runId: string,
+	extraContext?: string,
 ): Promise<"ran" | "skipped" | "paused"> {
-	const automation = await db.query.automations.findFirst({
-		where: eq(automations.id, automationId),
-	});
-	if (!automation) return "skipped";
-
-	const [run] = await db
-		.insert(automationRuns)
-		.values({ orgId: automation.orgId, automationId: automation.id, status: "running" })
-		.returning();
-
 	try {
 		// Budget is checked before anything is created, not after. An automation
 		// firing into an exhausted budget should cost one database read, not a
-		// session row and a sandbox that is refused a moment later.
+		// session row and a sandbox that is refused a moment later. Event deliveries
+		// are pre-checked in `deliverEvent` before a run row is even inserted, so for
+		// them this is a transactional backstop against a race rather than the gate.
 		const budget = await budgetStatusSafe(automation.orgId);
 		if (budget.exhausted) {
 			throw new Error(
@@ -231,13 +242,13 @@ export async function runAutomation(
 			// `agent`, so the session runner's priority ordering puts a human's
 			// one-word correction ahead of a scheduled forty-minute job.
 			authorKind: "agent",
-			body: automation.prompt,
+			body: withContext(automation.prompt, extraContext),
 		});
 
 		await db
 			.update(automationRuns)
 			.set({ status: "succeeded", sessionId: session.id, endedAt: new Date() })
-			.where(eq(automationRuns.id, run!.id));
+			.where(eq(automationRuns.id, runId));
 
 		// Success resets the counter. Without this a flaky automation that fails
 		// twice a week eventually accumulates three failures across three months and
@@ -254,7 +265,7 @@ export async function runAutomation(
 		await db
 			.update(automationRuns)
 			.set({ status: "failed", error: message, endedAt: new Date() })
-			.where(eq(automationRuns.id, run!.id));
+			.where(eq(automationRuns.id, runId));
 
 		const failures = automation.consecutiveFailures + 1;
 		const limit = failureLimit();
@@ -272,6 +283,94 @@ export async function runAutomation(
 
 		return shouldPause ? "paused" : "skipped";
 	}
+}
+
+/**
+ * Append the event that triggered a run to the automation's own prompt.
+ *
+ * Bounded to `queuePrompt`'s 8000-character limit here rather than letting the
+ * queue reject the whole run: an oversized Sentry stack trace must not turn a
+ * legitimate alert into a failed run that counts toward auto-pause. The
+ * automation's instructions come first and are never truncated — the event is
+ * context, not the task — and a clipped event is marked so the agent knows it is
+ * reading a fragment.
+ */
+function withContext(prompt: string, extraContext?: string): string {
+	if (!extraContext) return prompt;
+	const MAX = 8000;
+	const joined = `${prompt}\n\n---\n${extraContext}`;
+	if (joined.length <= MAX) return joined;
+	const room = MAX - prompt.length - "\n\n---\n\n…(truncated)".length;
+	if (room <= 0) return prompt.slice(0, MAX);
+	return `${prompt}\n\n---\n${extraContext.slice(0, room)}\n…(truncated)`;
+}
+
+/**
+ * Run one automation from the scheduler or the manual "Run now" button.
+ *
+ * Exported because "run it now" is the first thing anybody does after creating
+ * an automation, and making them wait an hour to find out whether it works is a
+ * good way to have them never create a second one. Deliberately does NOT check
+ * `enabled`/`pausedReason`: Run-now on a paused automation is a legitimate "is it
+ * fixed yet" test, and the cron tick's own query already excludes those rows.
+ */
+export async function runAutomation(
+	automationId: string,
+): Promise<"ran" | "skipped" | "paused"> {
+	const automation = await db.query.automations.findFirst({
+		where: eq(automations.id, automationId),
+	});
+	if (!automation) return "skipped";
+
+	const [run] = await db
+		.insert(automationRuns)
+		.values({ orgId: automation.orgId, automationId: automation.id, status: "running" })
+		.returning();
+
+	return executeRun(automation, run!.id);
+}
+
+/**
+ * Run one automation from an inbound event delivery, exactly once per delivery.
+ *
+ * The `dedupeKey` — a Sentry event id, a sender's delivery header, or a hash of
+ * the raw body — is written onto the run row under the partial unique index on
+ * `(automation_id, dedupe_key)`. A retried delivery (every one of Slack, Sentry
+ * and generic webhook senders retries a non-2xx) inserts the same key, conflicts,
+ * returns no row, and this function reports `"duplicate"` without spending a
+ * sandbox or a token. That is the whole idempotency guarantee, and it lives in
+ * the index rather than in a read-then-write check that would race under exactly
+ * the concurrent-retry conditions it exists to defend against.
+ *
+ * enabled/paused/budget/conditions are the caller's job (`deliverEvent`), checked
+ * before we get here so a filtered or over-budget delivery never creates a run
+ * row and never counts toward auto-pause — an event source can be hit hundreds of
+ * times a day and must not switch itself off over a transient cap.
+ */
+export async function runAutomationForEvent(
+	automation: typeof automations.$inferSelect,
+	options: { dedupeKey: string; extraContext?: string },
+): Promise<"ran" | "skipped" | "paused" | "duplicate"> {
+	const [run] = await db
+		.insert(automationRuns)
+		.values({
+			orgId: automation.orgId,
+			automationId: automation.id,
+			status: "running",
+			dedupeKey: options.dedupeKey,
+		})
+		.onConflictDoNothing({
+			target: [automationRuns.automationId, automationRuns.dedupeKey],
+			// The index is partial, so the arbiter must carry the same predicate —
+			// Postgres will not match a bare `(automation_id, dedupe_key)` conflict
+			// target against a `WHERE dedupe_key is not null` index without it.
+			where: raw`${automationRuns.dedupeKey} is not null`,
+		})
+		.returning();
+
+	if (!run) return "duplicate";
+
+	return executeRun(automation, run.id, options.extraContext);
 }
 
 /** Clear the pause and the counter. The only way back from auto-pause, on purpose. */

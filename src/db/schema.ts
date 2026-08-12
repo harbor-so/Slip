@@ -896,10 +896,31 @@ export const automationRuns = pgTable(
 		sessionId: uuid("session_id").references(() => sessions.id),
 		status: text("status").notNull().default("running"),
 		error: text("error"),
+		/**
+		 * The delivery identity for an event-triggered run — a Sentry event id, a
+		 * sender's `X-Harbor-Delivery-Id`, or a hash of the raw body. Null for cron
+		 * and manual "Run now" runs, which have no external delivery to deduplicate.
+		 *
+		 * This is the whole idempotency guarantee. Slack, Sentry and webhook senders
+		 * all retry a delivery that did not get a 2xx, and a retry re-runs the whole
+		 * pipeline — so without a durable "have I already acted on this exact
+		 * delivery" the same alert spawns a second sandbox and a second PR every time
+		 * the network has a bad second. The partial unique index below makes the
+		 * second insert conflict rather than duplicate, and the reasoning is the same
+		 * one the connector `tasks (org, source, source_ref)` index relies on.
+		 */
+		dedupeKey: text("dedupe_key"),
 		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
 		endedAt: timestamp("ended_at", { withTimezone: true }),
 	},
-	(table) => [index("automation_runs_idx").on(table.automationId, table.startedAt)],
+	(table) => [
+		index("automation_runs_idx").on(table.automationId, table.startedAt),
+		// One run per (automation, delivery). Partial, because cron and manual runs
+		// carry no delivery id and must not collapse into a single row.
+		uniqueIndex("automation_runs_dedupe_idx")
+			.on(table.automationId, table.dedupeKey)
+			.where(sql`${table.dedupeKey} is not null`),
+	],
 );
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1040,7 @@ export const EVENT_TYPES = [
 	"claim_expired",
 	"claim_renewed",
 	"connector_synced",
+	"automation_delivery",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
