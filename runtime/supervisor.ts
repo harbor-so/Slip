@@ -56,6 +56,17 @@ import {
 } from "./boot-decisions.js";
 import { Bridge, defaultBridgeDeps, type BridgeHandlers, type TurnInvocation } from "./bridge.js";
 
+/**
+ * The one capability boot code actually has on the bridge: emitting events.
+ *
+ * Everything below `main` only ever calls `bridge.emit`; `start`, `stop` and the
+ * command loop belong to `main` alone. Narrowing the parameter type to say so
+ * keeps a future `runHook` from quietly growing a `bridge.stop()` call — and it
+ * is what lets a test hand these functions a plain recording object instead of
+ * constructing a real Bridge with a control-plane URL that does not exist.
+ */
+export type BridgeSink = Pick<Bridge, "emit">;
+
 /** Where boot warnings are written so a human on the box can find them. */
 export const BOOT_WARNINGS_PATH = "/workspace/.harbor/boot-warnings.json";
 
@@ -258,7 +269,7 @@ export type BootOutcome =
  */
 export async function boot(
 	config: SupervisorConfig,
-	bridge: Bridge,
+	bridge: BridgeSink,
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<BootOutcome> {
 	const warnings: BootWarning[] = [];
@@ -380,7 +391,7 @@ function writeWarningsFile(warnings: BootWarning[], config: SupervisorConfig): v
  * blast radius: it authorises exactly one SCM host over HTTPS and declines
  * everything else, so a global helper is not a global credential.
  */
-async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): Promise<void> {
+export async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): Promise<void> {
 	const set = (key: string, value: string): Promise<void> =>
 		new Promise((resolve) => {
 			execFile("git", ["config", "--global", key, value], { env }, () => resolve());
@@ -438,7 +449,7 @@ async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): P
  */
 async function cloneRepos(
 	config: SupervisorConfig,
-	bridge: Bridge,
+	bridge: BridgeSink,
 	env: NodeJS.ProcessEnv,
 ): Promise<string | null> {
 	await mkdir(config.workspaceRoot, { recursive: true });
@@ -466,7 +477,7 @@ async function cloneRepos(
 	return null;
 }
 
-type HookResult =
+export type HookResult =
 	| { kind: "ok" }
 	| { kind: "skipped" }
 	| { kind: "degraded"; warning: BootWarning }
@@ -481,11 +492,11 @@ type HookResult =
  * reported-but-tolerated failure look identical to the box and completely
  * different to the person whose dependencies did not install.
  */
-async function runHook(
+export async function runHook(
 	hook: HookName,
 	config: SupervisorConfig,
 	mode: BootMode,
-	bridge: Bridge,
+	bridge: BridgeSink,
 	env: NodeJS.ProcessEnv,
 	workspace: string,
 ): Promise<HookResult> {
@@ -545,20 +556,23 @@ async function runHook(
  * about *when* to give up — and the `>=` that makes a zero wait mean zero — is in
  * `tunnelWaitVerdict`; this loop only polls.
  */
-async function waitForTunnels(
+export async function waitForTunnels(
 	config: SupervisorConfig,
-	bridge: Bridge,
+	bridge: BridgeSink,
 	env: NodeJS.ProcessEnv,
+	// Injectable so a test can point this at a temp file. Production always uses
+	// the shared constant, which is also what the control plane writes to.
+	tunnelEnvPath: string = TUNNEL_ENV_PATH,
 ): Promise<BootWarning | null> {
 	const waitMs = setting("tunnelWaitMs");
 	const started = Date.now();
 
-	const initial = tunnelFileDecision({ contents: readIfExists(TUNNEL_ENV_PATH), sandboxId: config.sandboxId });
+	const initial = tunnelFileDecision({ contents: readIfExists(tunnelEnvPath), sandboxId: config.sandboxId });
 	if (initial.action === "clear_and_wait") {
 		// Delete before anything can read it. An inherited file points at another
 		// box's port forward, and a service bound to a hostname that resolves
 		// somewhere else is far harder to diagnose than one with no hostname at all.
-		await rm(TUNNEL_ENV_PATH, { force: true });
+		await rm(tunnelEnvPath, { force: true });
 		bridge.emit({
 			type: "log",
 			payload: { level: "info", code: "tunnel.env_file_cleared", reason: initial.reason },
@@ -567,7 +581,7 @@ async function waitForTunnels(
 
 	for (;;) {
 		const verdict = tunnelWaitVerdict({
-			contents: readIfExists(TUNNEL_ENV_PATH),
+			contents: readIfExists(tunnelEnvPath),
 			sandboxId: config.sandboxId,
 			elapsedMs: Date.now() - started,
 			waitMs,
@@ -613,6 +627,52 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Track the resume token across a turn's stdout without holding the whole turn.
+ *
+ * The naive version — accumulate every line for up to thirty minutes and hand
+ * the lot to `adapter.resumeTokenFrom` at the end — is unbounded: a chatty agent
+ * streaming build output grows the supervisor's heap with the turn, in the same
+ * process whose OOM kill takes the agent's work with it. `runCommand` already
+ * caps its output with a `maxRunOutputChars` tail-slice for exactly this reason,
+ * so this does the same. But a tail-slice alone loses the token for an adapter
+ * that announces its session id **only at the start** of the turn — Codex's
+ * `session_configured` / `thread.started` is the first line out — and a long
+ * turn would evict it, silently downgrading every next turn to a fresh thread.
+ *
+ * Hence two mechanisms, both cheap, covering each other's blind spot:
+ *
+ *  - **Incremental capture**: each line is offered to `resumeTokenFrom` as it
+ *    arrives, and the latest hit is kept. This is what survives the eviction of
+ *    an early announcement. Every adapter parses line-wise, so a single line is
+ *    a valid input.
+ *  - **Final tail scan**: the bounded tail is scanned once at turn end, and its
+ *    answer wins when present. This preserves last-id-wins for adapters that
+ *    re-announce the id per line (Claude Code stamps `session_id` on every
+ *    event), and it covers the `custom` adapter, whose operator-supplied
+ *    `resumePattern` may legitimately match across line boundaries.
+ *
+ * Resolution order: tail scan, then incremental capture, then whatever the
+ * previous turn established — a turn that names no id must not forget the thread.
+ */
+export function createResumeTokenAccumulator(
+	adapter: Pick<AgentAdapter, "resumeTokenFrom">,
+	workspace: string,
+): { absorb: (line: string) => void; finish: (previous: string | null) => string | null } {
+	const cap = setting("maxRunOutputChars");
+	let tail = "";
+	let captured: string | null = null;
+	return {
+		absorb(line: string): void {
+			tail = (tail + `${line}\n`).slice(-cap);
+			captured = adapter.resumeTokenFrom(`${line}\n`, workspace) ?? captured;
+		},
+		finish(previous: string | null): string | null {
+			return adapter.resumeTokenFrom(tail, workspace) ?? captured ?? previous;
+		},
+	};
+}
+
+/**
  * Drive one turn through the adapter, translating its stdout into session events.
  *
  * The adapter owns the argv, the parsing and the interrupt signal; this owns the
@@ -624,7 +684,7 @@ function sleep(ms: number): Promise<void> {
 export function createTurnRunner(
 	adapter: AgentAdapter,
 	config: SupervisorConfig,
-	bridge: Bridge,
+	bridge: BridgeSink,
 	env: NodeJS.ProcessEnv,
 ): { run: (invocation: TurnInvocation) => Promise<void>; interrupt: (kind: AgentInterrupt) => void } {
 	let active: ReturnType<typeof spawn> | null = null;
@@ -662,8 +722,8 @@ export function createTurnRunner(
 			active = child;
 
 			const accumulation = usageAccumulationFor(adapter.runtime);
+			const resumeTokens = createResumeTokenAccumulator(adapter, workspace);
 			let usage: AgentUsage | null = null;
-			let stdout = "";
 			let timedOut = false;
 
 			const timer = setTimeout(() => {
@@ -710,7 +770,7 @@ export function createTurnRunner(
 
 			const lines = createInterface({ input: child.stdout! });
 			lines.on("line", (raw) => {
-				stdout += `${raw}\n`;
+				resumeTokens.absorb(raw);
 				for (const event of adapter.parseLine(raw)) forward(event);
 			});
 			child.stderr?.on("data", (chunk: Buffer) => {
@@ -725,7 +785,7 @@ export function createTurnRunner(
 			lines.close();
 			active = null;
 
-			resumeToken = adapter.resumeTokenFrom(stdout, workspace) ?? resumeToken;
+			resumeToken = resumeTokens.finish(resumeToken);
 			bridge.emit({
 				type: timedOut || code !== 0 ? "agent_failed" : "agent_finished",
 				payload: {

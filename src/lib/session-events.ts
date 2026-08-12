@@ -34,7 +34,7 @@
  *     underneath what the agent said a second ago.
  */
 
-import { and, asc, desc, eq, inArray, lt, sql as raw } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
 import {
 	ARTIFACT_KINDS,
@@ -65,8 +65,11 @@ import { HarborError, notifyChange } from "./work.js";
  * Derived from `db.transaction`'s own callback for the same reason `work.ts`
  * does it: casting a transaction to `typeof db` compiles only because the cast
  * silences a real difference — a transaction has no `$client`.
+ *
+ * Exported because it is the type of `AppendOptions.executor`, which is how a
+ * state change and its ledger event share one transaction.
  */
-type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Compile-time exhaustiveness, with a runtime story that is not a crash.
@@ -251,6 +254,31 @@ export interface AppendEventsInput {
 	}>;
 }
 
+/**
+ * How an append participates in a caller's transaction.
+ *
+ * The rule this option exists to enforce: **a state change and the ledger event
+ * that records it commit together or not at all.** Before it existed, every
+ * sandbox transition committed first and appended its event in a second
+ * transaction — a crash between the two produced a sandbox that stopped with no
+ * record of why, which is precisely the kind of rare lost fact that is never
+ * reproduced at a desk.
+ *
+ * When `executor` is a caller's transaction, two things change:
+ *
+ *  - the seq allocation and insert run on that transaction, so they commit and
+ *    roll back with the caller's state change;
+ *  - **no NOTIFY is sent.** The notify-after-commit invariant (see the comment
+ *    at the bottom of `appendEvents`) cannot be honoured from inside somebody
+ *    else's transaction, because only the caller knows when it commits. The
+ *    caller MUST call `notifyChange(orgId, "session_event")` after its
+ *    transaction returns, or every dashboard misses the event until the next
+ *    unrelated wakeup.
+ */
+export interface AppendOptions {
+	executor?: Executor;
+}
+
 function toWireEvent(row: typeof sessionEvents.$inferSelect): SessionEvent {
 	return {
 		id: row.id,
@@ -275,12 +303,18 @@ function toWireEvent(row: typeof sessionEvents.$inferSelect): SessionEvent {
  * would show up only under concurrency — the one condition nobody reproduces at a
  * desk.
  */
-export async function appendEvent(input: AppendEventInput): Promise<SessionEvent> {
-	const [event] = await appendEvents({
-		orgId: input.orgId,
-		sessionId: input.sessionId,
-		events: [{ type: input.type, payload: input.payload, actor: input.actor }],
-	});
+export async function appendEvent(
+	input: AppendEventInput,
+	options?: AppendOptions,
+): Promise<SessionEvent> {
+	const [event] = await appendEvents(
+		{
+			orgId: input.orgId,
+			sessionId: input.sessionId,
+			events: [{ type: input.type, payload: input.payload, actor: input.actor }],
+		},
+		options,
+	);
 	return event!;
 }
 
@@ -311,7 +345,10 @@ export async function appendEvent(input: AppendEventInput): Promise<SessionEvent
  * takes the lock once, allocates a contiguous range with one arithmetic
  * expression, and inserts in a single statement.
  */
-export async function appendEvents(input: AppendEventsInput): Promise<SessionEvent[]> {
+export async function appendEvents(
+	input: AppendEventsInput,
+	options?: AppendOptions,
+): Promise<SessionEvent[]> {
 	if (input.events.length === 0) return [];
 
 	const limit = setting("maxEventPayloadChars");
@@ -321,7 +358,7 @@ export async function appendEvents(input: AppendEventsInput): Promise<SessionEve
 		payload: truncatePayload(event.payload, limit).payload,
 	}));
 
-	const rows = await db.transaction(async (tx) => {
+	const run = async (tx: Executor) => {
 		const [session] = await tx
 			.update(sessions)
 			.set({
@@ -356,7 +393,18 @@ export async function appendEvents(input: AppendEventsInput): Promise<SessionEve
 				})),
 			)
 			.returning();
-	});
+	};
+
+	// On a caller's executor the rows are not yet committed when this returns —
+	// the caller owns the commit and the NOTIFY that must follow it (see
+	// AppendOptions). A NOTIFY sent here would arrive before the rows are
+	// visible, and a wakeup that arrives too early is worse than none.
+	if (options?.executor) {
+		const rows = await run(options.executor);
+		return rows.map(toWireEvent);
+	}
+
+	const rows = await db.transaction(run);
 
 	// After commit, never inside. A listener woken by a NOTIFY sent inside the
 	// transaction reads the table before the rows are visible and concludes there
@@ -585,11 +633,17 @@ export async function snapshotSession(
 				.limit(cap);
 			tail.reverse();
 
+			// Capped like every other list in the snapshot. This was the ONE query
+			// here without a limit — the note below about a second uncapped list
+			// defeating the event budget described participants exactly. Earliest
+			// joiners kept: the creator and the room's regulars, which is who a
+			// client rendering "who is here" actually shows.
 			const participants = await tx
 				.select()
 				.from(sessionParticipants)
 				.where(eq(sessionParticipants.sessionId, session.id))
-				.orderBy(asc(sessionParticipants.joinedAt));
+				.orderBy(asc(sessionParticipants.joinedAt))
+				.limit(cap);
 
 			// Prompts and artifacts share the snapshot's event budget rather than
 			// having caps of their own. The cap exists because of total payload size
@@ -687,13 +741,20 @@ export interface EventPage {
 }
 
 /**
- * Walk backwards through retained history, for a client that got `truncated: true`.
+ * Walk through retained history: backwards from `before`, or forwards from
+ * `after`, for a client that got `truncated: true` or is filling a reconnect gap.
  *
- * `before` is exclusive and is a seq rather than an offset or a timestamp. An
+ * Both cursors are exclusive and are seqs rather than offsets or timestamps. An
  * offset shifts under compaction — pages overlap or skip while the client is
  * paging — and two events can share a timestamp to the millisecond, which makes a
  * timestamp cursor either lossy or duplicating depending on which comparison you
  * pick. A seq is unique per session and stable for the life of the row.
+ *
+ * `before` and `after` together are refused: a range query answers a question
+ * neither pager asks, and accepting both silently would leave the caller
+ * guessing which one `has_more` refers to. `has_more` always points away from
+ * the cursor — more history below the page for `before`, more above it for
+ * `after`.
  *
  * The compacted summaries are returned like any other event, because they are
  * real rows and they are how a client learns what happened in the range it can no
@@ -703,8 +764,11 @@ export interface EventPage {
 export async function eventPage(
 	orgId: string,
 	sessionId: string,
-	options: { before?: number; limit?: number } = {},
+	options: { before?: number; after?: number; limit?: number } = {},
 ): Promise<EventPage> {
+	if (options.before !== undefined && options.after !== undefined) {
+		throw new HarborError("Pass either `before` or `after`, not both.");
+	}
 	const cap = setting("maxSnapshotEvents");
 	const limit = Math.max(1, Math.min(options.limit ?? cap, cap));
 
@@ -719,8 +783,10 @@ export async function eventPage(
 		.limit(1);
 	if (!session) throw new HarborError("No such session.");
 
+	const forward = options.after !== undefined;
 	const conditions = [eq(sessionEvents.sessionId, sessionId)];
 	if (options.before !== undefined) conditions.push(lt(sessionEvents.seq, options.before));
+	if (options.after !== undefined) conditions.push(gt(sessionEvents.seq, options.after));
 
 	// One extra row rather than a second count query: it answers "is there more"
 	// exactly, including the case where the remaining history is precisely one
@@ -729,11 +795,11 @@ export async function eventPage(
 		.select()
 		.from(sessionEvents)
 		.where(and(...conditions))
-		.orderBy(desc(sessionEvents.seq))
+		.orderBy(forward ? asc(sessionEvents.seq) : desc(sessionEvents.seq))
 		.limit(limit + 1);
 
 	const hasMore = rows.length > limit;
-	const page = rows.slice(0, limit).reverse();
+	const page = forward ? rows.slice(0, limit) : rows.slice(0, limit).reverse();
 
 	return {
 		events: page.map(toWireEvent),
@@ -777,12 +843,16 @@ export function compactionRole(type: SessionEventType): CompactionRole {
 		case "sandbox_ready":
 		case "sandbox_failed":
 		case "sandbox_stopped":
+		case "sandbox_snapshotted":
 		case "agent_finished":
 		case "artifact_created":
 		case "policy_denied":
 		case "budget_exhausted":
 		case "session_error":
 		case "participant_joined":
+		// A gap marker folded into a summary is exactly the silent hole the marker
+		// exists to prevent — the one event type whose entire value is being seen.
+		case "transcript_gap":
 			return "structural";
 	}
 	return unreachable(type, "compactionRole");
@@ -972,4 +1042,47 @@ export async function compactSession(orgId: string, sessionId: string): Promise<
 	// herd of snapshot reads.
 	if (result.compacted > 0) await notifyChange(orgId, "session_compacted");
 	return result;
+}
+
+/**
+ * The driver the compaction loop calls: find sessions over the retention count
+ * and compact each.
+ *
+ * The candidate filter is `next_event_seq`, which over-approximates — it counts
+ * events that were themselves already compacted away — but it is one indexed
+ * column on the row the loop was going to read anyway, and `compactSession`
+ * recounts precisely inside its own transaction. An exact candidate query would
+ * be a `count(*)` per session per pass, which is the scan this bound exists to
+ * avoid. A session that slips through does one cheap no-op compaction.
+ *
+ * One session's failure never stops the batch, for the same reason as
+ * `tickSessions`: the alternative symptom is "compaction stopped everywhere"
+ * caused by one wedged room.
+ */
+export async function compactEligibleSessions(now = new Date()): Promise<{
+	examined: number;
+	compacted: number;
+}> {
+	void now;
+	const retention = setting("eventRetentionCount");
+	// harbor-lint-allow-constant: a batch size, not a tunable — same reasoning as
+	// sessionsPerTick in session-tick.ts. The remainder is picked up next pass.
+	const BATCH = 20;
+
+	const candidates = await db
+		.select({ id: sessions.id, orgId: sessions.orgId })
+		.from(sessions)
+		.where(gt(sessions.nextEventSeq, retention + 1))
+		.limit(BATCH);
+
+	let compacted = 0;
+	for (const candidate of candidates) {
+		try {
+			const result = await compactSession(candidate.orgId, candidate.id);
+			compacted += result.compacted;
+		} catch (error) {
+			console.error(`[compaction] session ${candidate.id} failed:`, error);
+		}
+	}
+	return { examined: candidates.length, compacted };
 }

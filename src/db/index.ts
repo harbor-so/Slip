@@ -11,7 +11,17 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
 
-const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
+/**
+ * The one resolution of DATABASE_URL. Exported for the SSE routes, which each
+ * need a dedicated LISTEN connection outside the pool — before this existed the
+ * fallback DSN was pasted into three route files, which is three places for a
+ * changed default to be missed.
+ */
+export function databaseUrl(): string {
+	return process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
+}
+
+const url = databaseUrl();
 
 // `max: 1` in scripts avoids a pool that keeps the process alive after the work
 // is done; the server path gets a real pool.

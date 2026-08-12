@@ -126,6 +126,26 @@ export function describeProviderContract(spec: ProviderContractSpec): void {
 			await spec.provider.stop(box.externalId, { graceMs: 2_000 });
 		}, PROVIDER_TEST_TIMEOUT_MS);
 
+		test("listManaged sees the box while it lives and forgets it once stopped", async () => {
+			const config = fresh();
+			const box = await spec.provider.create(config);
+
+			// The orphan sweep reads this list as the complete population of running
+			// boxes, so a created box must appear — with the attempt label intact,
+			// because that label is the only join back to the database row.
+			const during = await spec.provider.listManaged();
+			const mine = during.find((entry) => entry.attemptId === config.attemptId);
+			expect(mine).toBeDefined();
+			expect(mine!.externalId).toBe(box.externalId);
+
+			await spec.provider.stop(box.externalId, { graceMs: 2_000 });
+
+			// Live boxes only: every entry is a stop candidate, and a stopped
+			// container kept for post-mortems must not be one.
+			const after = await spec.provider.listManaged();
+			expect(after.find((entry) => entry.attemptId === config.attemptId)).toBeUndefined();
+		}, PROVIDER_TEST_TIMEOUT_MS);
+
 		test("stop is idempotent, and says which kind of nothing it did", async () => {
 			const config = fresh();
 			const box = await spec.provider.create(config);

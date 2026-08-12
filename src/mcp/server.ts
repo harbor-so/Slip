@@ -20,10 +20,8 @@
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type Request, type Response } from "express";
-import { setting, validateConfig } from "../config.js";
 import { orgIdForKey } from "../lib/auth.js";
-import { tickAutomations } from "../triggers/automations.js";
-import { sweepExpiredClaims } from "../lib/work.js";
+import { runStartupChecks, startBackgroundLoops } from "../lib/loops.js";
 import { buildServer } from "./build.js";
 import { tools } from "./tools.js";
 
@@ -100,54 +98,23 @@ if (process.env.NODE_ENV !== "test") {
 	// An incoherent combination — a stale-heartbeat threshold below the heartbeat
 	// interval — produces a deployment where every healthy sandbox is killed
 	// seconds after booting, with nothing in the logs pointing at configuration.
-	// Failing loudly at startup with both variable names is much kinder.
+	// Failing loudly at startup with both variable names is much kinder. The same
+	// call emits the SCM-attribution warning ADR 0004 promises at deploy time.
 	try {
-		validateConfig();
+		runStartupChecks();
 	} catch (error) {
 		console.error(`\n${(error as Error).message}\n`);
 		process.exit(1);
 	}
 
-	// The sweeper is a backstop, not the mechanism — claim() already expires a
-	// stale holder before inserting. What this adds is timeliness, so a task whose
-	// agent died reads as open in the dashboard within a minute.
-	setInterval(() => {
-		sweepExpiredClaims()
-			.then((n) => {
-				if (n > 0) console.log(`[sweep] released ${n} expired claim(s)`);
-			})
-			.catch((error) => console.error("[sweep] failed:", error));
-	}, setting("claimSweepIntervalMs")).unref();
-
-	// Automations tick on the same process, and it is safe to run this on every
-	// replica: `tickAutomations` takes a Postgres advisory lock and returns
-	// immediately if another replica holds it. A dedicated scheduler process would
-	// be a serial bottleneck and a single point of failure with no sharding story,
-	// and would immediately raise the question of what happens when it dies
-	// mid-tick.
-	//
-	// It rides on the claim sweep's interval rather than having its own, because
-	// the two are the same kind of thing — a periodic reconciliation whose
-	// timeliness matters and whose exact cadence does not — and a second knob
-	// would be a second thing to get wrong.
-	setInterval(() => {
-		tickAutomations()
-			.then(({ ran, paused }) => {
-				if (ran > 0) console.log(`[automations] started ${ran} session(s)`);
-				// A pause is the automation switching itself off after repeated
-				// failures, which is precisely the event nobody is watching for — it
-				// happens to work that runs while people are not looking. Logged at
-				// error level so it reaches wherever errors go rather than only the
-				// dashboard.
-				if (paused > 0) {
-					console.error(
-						`[automations] ${paused} automation(s) paused themselves after repeated `
-							+ "failures. See /automations for the last error and the resume button.",
-					);
-				}
-			})
-			.catch((error) => console.error("[automations] tick failed:", error));
-	}, setting("claimSweepIntervalMs")).unref();
+	// Every background loop, from the one registry in src/lib/loops.ts: claim
+	// sweeps, automations, sandbox deadlines, session ticks, event compaction and
+	// the provider-orphan sweep. This process owns them; the Next.js app runs
+	// none (serverless-shaped). Safe on every replica — each loop takes an
+	// advisory lock or is a compare-and-set, so a second replica adds timeliness,
+	// not duplicate actions. Inline setIntervals were how three of the six sweeps
+	// ended up written, tested and never scheduled; the registry is the fix.
+	startBackgroundLoops();
 }
 
 export { app };

@@ -168,7 +168,8 @@ export const agentTools: AgentToolDefinition[] = [
 				);
 			}
 
-			const { createSession, queuePrompt } = await import("../lib/sessions.js");
+			const { createSession } = await import("../lib/sessions.js");
+			const { enqueueSessionPrompt } = await import("../lib/session-runner.js");
 			const child = await createSession({
 				orgId: ctx.orgId,
 				title: typeof args.title === "string" ? args.title : String(args.prompt).slice(0, 120),
@@ -187,13 +188,17 @@ export const agentTools: AgentToolDefinition[] = [
 				})
 				.where(eq(sessions.id, child.id));
 
-			await queuePrompt({
+			// The capped front door: agents spawning children is the other
+			// human-free amplification path, and a refusal surfaces as this tool's
+			// error text so the agent sees WHY instead of a silent no-op.
+			const enqueued = await enqueueSessionPrompt({
 				orgId: ctx.orgId,
 				sessionId: child.id,
 				author: `agent:${ctx.sessionId}`,
 				authorKind: "agent",
 				body: String(args.prompt),
 			});
+			if (!enqueued.ok) throw new HarborError(enqueued.message);
 
 			return `ok spawned child session ${child.key} — it runs independently; you are not blocked`;
 		},

@@ -77,6 +77,7 @@ export const SANDBOX_OPERATIONS = [
 	"stop",
 	"inspect",
 	"find_by_attempt",
+	"list_managed",
 	"snapshot",
 	"restore",
 	"pause",
@@ -446,6 +447,25 @@ interface SandboxProviderBase {
 	 * ways in mechanism. Do not "fix" one to match the other.
 	 */
 	findByAttemptId(attemptId: string): Promise<SandboxInspection | null>;
+
+	/**
+	 * Every LIVE box this backend is running that carries Harbor's management
+	 * marker. The other half of reconciliation: `findByAttemptId` answers "did
+	 * attempt X produce a box", this answers "what boxes exist at all" — which is
+	 * the only question that finds a container whose row was corrupted, whose
+	 * conclusion was raced, or whose control plane died between create and record.
+	 *
+	 * **Authority fails CLOSED, same as `findByAttemptId`.** A backend that
+	 * cannot answer MUST throw, never return `[]`: the caller treats the list as
+	 * the complete population of running boxes, and an empty answer from a dead
+	 * daemon reads as "no orphans anywhere" — the exact conclusion that lets a
+	 * stranded container bill forever.
+	 *
+	 * Live boxes only. Stopped containers are deliberately kept for post-mortems
+	 * (see the docker provider's `stop`) and must not appear here, because every
+	 * entry in this list is a stop candidate.
+	 */
+	listManaged(): Promise<SandboxInspection[]>;
 }
 
 /** Create, stop, inspect. No resume of any kind: a stopped box is gone. */

@@ -325,6 +325,23 @@ describe("snapshots", () => {
 		expect(JSON.stringify(snapshot)).not.toContain("auth_token");
 	});
 
+	it("caps the participants list — the one list that used to be unbounded", async () => {
+		// The snapshot's own comment argued that a second uncapped list defeats
+		// the event budget; participants WAS that list, so a session a bot farm
+		// joined ten thousand times made every connect and reconnect carry all of
+		// them. Earliest joiners survive the cap: the creator and the regulars.
+		useSetting("HARBOR_MAX_SNAPSHOT_EVENTS", 5);
+		const { joinSession } = await import("./sessions.js");
+		for (let n = 0; n < 8; n += 1) {
+			await joinSession(sessionId, orgId, `viewer-${n}`, "human");
+		}
+
+		const snapshot = (await snapshotSession(orgId, sessionKey))!;
+		expect(snapshot.participants).toHaveLength(5);
+		// The creator joined first and must survive.
+		expect(snapshot.participants[0]!.participant).toBe("@rin");
+	});
+
 	it("reports the next seq as the retention boundary on a brand-new session", async () => {
 		const snapshot = (await snapshotSession(orgId, sessionKey))!;
 		expect(snapshot.events).toEqual([]);

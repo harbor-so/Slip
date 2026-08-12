@@ -87,7 +87,7 @@ import { secretEquals } from "./crypto.js";
 import { promptabilityOf } from "./promptability.js";
 import { appendEvent } from "./session-events.js";
 import { queuePrompt } from "./sessions.js";
-import { claim, HarborError, release } from "./work.js";
+import { claim, HarborError, notifyChange, release } from "./work.js";
 
 // ---------------------------------------------------------------------------
 // Single writer
@@ -297,6 +297,8 @@ export async function enqueueSessionPrompt(input: {
 	sessionId: string;
 	author: string;
 	authorKind?: PromptAuthorKind;
+	/** Forwarded to the stored prompt; see `queuePrompt`. */
+	authorEmail?: string | null;
 	body: string;
 	repoOverrides?: RepoOverrides;
 }): Promise<EnqueueOutcome> {
@@ -351,6 +353,7 @@ export async function enqueueSessionPrompt(input: {
 			sessionId: input.sessionId,
 			author: input.author,
 			authorKind: input.authorKind ?? "human",
+			authorEmail: input.authorEmail ?? null,
 			body: input.body,
 		});
 		return {
@@ -433,6 +436,15 @@ export async function takeNextPrompt(
 	orgId: string,
 	sessionId: string,
 	now = new Date(),
+	options: {
+		/**
+		 * The turn's correlation id, persisted on the delivered prompt so the
+		 * commands route — which sends prompts from persisted state, with no
+		 * runner in its call stack — can carry it into the sandbox. Cleared on
+		 * requeue: a retried delivery is a new turn with a new trace.
+		 */
+		traceId?: string;
+	} = {},
 ): Promise<QueuedPrompt | null> {
 	return db.transaction(async (tx) => {
 		const [next] = await tx
@@ -453,7 +465,7 @@ export async function takeNextPrompt(
 
 		await tx
 			.update(sessionPrompts)
-			.set({ status: "delivered", deliveredAt: now })
+			.set({ status: "delivered", deliveredAt: now, traceId: options.traceId ?? null })
 			// The status predicate is repeated even though the row is locked. If this
 			// is ever refactored into a read outside the transaction, the zero-row
 			// result turns a double delivery into a visible no-op instead of a second
@@ -486,7 +498,9 @@ export async function takeNextPrompt(
 export async function requeuePrompt(orgId: string, promptId: string): Promise<void> {
 	await db
 		.update(sessionPrompts)
-		.set({ status: "queued", deliveredAt: null })
+		// The trace is cleared with the delivery: a retried delivery is a new
+		// turn, and a stale trace id would stitch two attempts into one story.
+		.set({ status: "queued", deliveredAt: null, traceId: null })
 		.where(
 			and(
 				eq(sessionPrompts.id, promptId),
@@ -760,7 +774,14 @@ async function driveOneTurn(
 					+ `${claimed.expiresAt.toISOString()}. Nothing was booted.`,
 			};
 		}
-		claimId = await activeClaimId(session.taskId);
+		// The id of the claim THIS call inserted, straight from the insert. The old
+		// shape re-read `activeClaimId(session.taskId)` here, and the re-read races
+		// everything: the claim released or expired between the insert and the read
+		// came back as null, which `readLeaseState` used to treat as "no lease
+		// asserted" — authorised — so a runner whose lease had just lapsed spawned
+		// with no lease at all. The value from the insert cannot lie about whose
+		// claim it is, and `readLeaseState` re-verifies the row is still live.
+		claimId = claimed.claimId;
 
 		// The handoff, recorded. See the file header for why the session is reused
 		// rather than superseded by a child: the transcript is in Postgres, so there
@@ -790,7 +811,7 @@ async function driveOneTurn(
 		}
 	}
 
-	const taken = await takeNextPrompt(orgId, sessionId, now);
+	const taken = await takeNextPrompt(orgId, sessionId, now, { traceId });
 	if (!taken) {
 		// The peek saw a prompt and the take did not. Under the advisory lock this
 		// is nearly impossible — it needs somebody calling the queue functions
@@ -807,6 +828,7 @@ async function driveOneTurn(
 			sessionId,
 			claimId,
 			actor: taken.author,
+			traceId,
 			repoOverrides: input.repoOverrides,
 			now,
 		});
@@ -914,16 +936,6 @@ async function driveOneTurn(
 	return assertNever(outcome, "ensureSandbox outcome");
 }
 
-/** The active claim's id for a task, or null if nothing holds it. */
-async function activeClaimId(taskId: string): Promise<string | null> {
-	const [row] = await db
-		.select({ id: claims.id })
-		.from(claims)
-		.where(and(eq(claims.taskId, taskId), isNull(claims.releasedAt)))
-		.limit(1);
-	return row?.id ?? null;
-}
-
 /**
  * Who held this task most recently, active or released.
  *
@@ -1021,26 +1033,38 @@ export async function completeTurn(input: {
 	// here. Only one UPDATE matches. Writing `prompt_finished` regardless puts the
 	// same turn on the timeline twice, and worse, the loser then goes on to read the
 	// queue and hand the lease back on the strength of work it did not finish.
-	const claimed = await db
-		.update(sessionPrompts)
-		.set({ status: input.outcome })
-		.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
-		.returning({ id: sessionPrompts.id });
-	if (claimed.length === 0) return { finished: [], leaseReleased: false };
-
-	await appendEvent({
-		orgId: input.orgId,
-		sessionId: input.sessionId,
-		type: "prompt_finished",
-		actor: prompt.author,
-		payload: {
-			prompt_id: prompt.id,
-			prompt_seq: prompt.seq,
-			outcome: input.outcome,
-			finished_at: now.toISOString(),
-			...(input.detail ?? {}),
-		},
+	//
+	// The CAS and its `prompt_finished` event share one transaction: a prompt in a
+	// terminal status whose timeline still says "running" is the exact lost fact
+	// this ledger exists to rule out. The NOTIFY fires after the commit, per
+	// AppendOptions in session-events.ts.
+	const claimed = await db.transaction(async (tx) => {
+		const updated = await tx
+			.update(sessionPrompts)
+			.set({ status: input.outcome })
+			.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
+			.returning({ id: sessionPrompts.id });
+		if (updated.length === 0) return false;
+		await appendEvent(
+			{
+				orgId: input.orgId,
+				sessionId: input.sessionId,
+				type: "prompt_finished",
+				actor: prompt.author,
+				payload: {
+					prompt_id: prompt.id,
+					prompt_seq: prompt.seq,
+					outcome: input.outcome,
+					finished_at: now.toISOString(),
+					...(input.detail ?? {}),
+				},
+			},
+			{ executor: tx },
+		);
+		return true;
 	});
+	if (!claimed) return { finished: [], leaseReleased: false };
+	await notifyChange(input.orgId, "session_event");
 
 	const remaining = await peekNextPrompt(input.orgId, input.sessionId);
 	if (remaining) return { finished: [prompt.id], leaseReleased: false };

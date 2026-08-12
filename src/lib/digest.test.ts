@@ -165,7 +165,13 @@ describe("generateDigest", () => {
 	});
 
 	it("returns an explicit empty-week result without constructing a client", async () => {
-		expect(await generateDigest({ projects: [] })).toBe("No agent activity this week.");
+		const generation = await generateDigest({ projects: [] });
+		expect(generation.body).toBe("No agent activity this week.");
+		// No model was called, so there is no usage to account for — a digest
+		// that cost nothing must report nothing, or the cost table gains rows
+		// for API calls that never happened.
+		expect(generation.usage).toBeNull();
+		expect(generation.model).toBeNull();
 		expect(anthropicConstructor).not.toHaveBeenCalled();
 	});
 });
@@ -197,9 +203,11 @@ describe("demo mode", () => {
 	it("produces a digest in demo mode without a key", async () => {
 		process.env.ANTHROPIC_API_KEY = "";
 		process.env.HARBOR_DEMO_MODE = "1";
-		const body = await generateDigest(activity);
-		expect(body).toContain("Fix auth refresh");
-		expect(body).toContain("collision avoided");
+		const generation = await generateDigest(activity);
+		expect(generation.body).toContain("Fix auth refresh");
+		expect(generation.body).toContain("collision avoided");
+		// The mock called no model; usage must say so.
+		expect(generation.usage).toBeNull();
 	});
 
 	it("labels every mocked digest so it can never pass for the model's work", async () => {
@@ -208,7 +216,7 @@ describe("demo mode", () => {
 		// with it.
 		process.env.ANTHROPIC_API_KEY = "";
 		process.env.HARBOR_DEMO_MODE = "1";
-		expect(await generateDigest(activity)).toContain(MOCK_PREFIX);
+		expect((await generateDigest(activity)).body).toContain(MOCK_PREFIX);
 		expect(mockDigest(activity).startsWith(MOCK_PREFIX)).toBe(true);
 	});
 
@@ -224,8 +232,8 @@ describe("demo mode", () => {
 	it("short-circuits an empty week without calling anything", async () => {
 		process.env.ANTHROPIC_API_KEY = "";
 		process.env.HARBOR_DEMO_MODE = "";
-		const body = await generateDigest({ projects: [] });
-		expect(body).not.toContain(MOCK_PREFIX);
-		expect(body.length).toBeGreaterThan(0);
+		const generation = await generateDigest({ projects: [] });
+		expect(generation.body).not.toContain(MOCK_PREFIX);
+		expect(generation.body.length).toBeGreaterThan(0);
 	});
 });

@@ -12,6 +12,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { and, asc, eq, gte, inArray, lt } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { digests, events, projects, tasks } from "../db/schema.js";
+import { recordTokenUsage } from "./cost.js";
 
 const DIGEST_INSTRUCTION =
 	"Summarize this week's agent activity for a team standup. Group by project. " +
@@ -189,38 +190,80 @@ export function demoMode(): boolean {
 	return process.env.HARBOR_DEMO_MODE === "1";
 }
 
-export async function generateDigest(activity: Activity): Promise<string> {
-	if (!hasActivity(activity)) return EMPTY_DIGEST;
+/**
+ * What one digest generation produced — the prose, and what it cost.
+ *
+ * `usage` is null exactly when no model was called (empty activity, demo mode):
+ * a digest that cost nothing reports nothing, and a digest that called the API
+ * reports the real token counts so `generateAndStoreDigest` can write the cost
+ * row. This was the one model call in the product with no accounting at all.
+ */
+export interface DigestGeneration {
+	body: string;
+	model: string | null;
+	usage: { inputTokens: number; outputTokens: number } | null;
+}
+
+export async function generateDigest(activity: Activity): Promise<DigestGeneration> {
+	if (!hasActivity(activity)) return { body: EMPTY_DIGEST, model: null, usage: null };
 
 	const apiKey = process.env.ANTHROPIC_API_KEY;
 	// A real key always wins, even in demo mode: if one is present there is no
 	// reason to show a fake.
 	if (!apiKey) {
-		if (demoMode()) return mockDigest(activity);
+		if (demoMode()) return { body: mockDigest(activity), model: null, usage: null };
 		throw new MissingAnthropicApiKeyError();
 	}
 
 	const client = new Anthropic({ apiKey });
+	const model = "claude-sonnet-4-5";
 	const response = await client.messages.create({
-		model: "claude-sonnet-4-5",
+		model,
 		max_tokens: 300,
 		system: DIGEST_INSTRUCTION,
 		messages: [{ role: "user", content: renderActivityPrompt(activity) }],
 	});
-	return response.content
+	const body = response.content
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("\n")
 		.trim();
+	return {
+		body,
+		model,
+		usage: {
+			inputTokens: response.usage.input_tokens,
+			outputTokens: response.usage.output_tokens,
+		},
+	};
 }
 
 export async function generateAndStoreDigest(orgId: string, since: Date, until: Date) {
 	const activity = await collectActivity(orgId, since, until);
-	const body = await generateDigest(activity);
+	const generation = await generateDigest(activity);
 	const [digest] = await db
 		.insert(digests)
-		.values({ orgId, periodStart: since, periodEnd: until, body })
+		.values({ orgId, periodStart: since, periodEnd: until, body: generation.body })
 		.returning();
 	if (!digest) throw new Error("Digest insert did not return a row.");
+
+	// The cost row, keyed on the digest row so a retry cannot double-count.
+	// Recorded after the insert because the digest id IS the idempotency key;
+	// a failure here loses accounting, not the digest, and is said so.
+	if (generation.usage !== null) {
+		try {
+			await recordTokenUsage({
+				orgId,
+				key: `digest:${digest.id}`,
+				model: generation.model,
+				usage: {
+					inputTokens: generation.usage.inputTokens,
+					outputTokens: generation.usage.outputTokens,
+				},
+			});
+		} catch (error) {
+			console.error(`[digest] cost row for digest ${digest.id} failed:`, error);
+		}
+	}
 	return digest;
 }

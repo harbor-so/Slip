@@ -1,12 +1,13 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { setting } from "../../../../../config.js";
 import type { SandboxEvent, SandboxEventType, SessionEventType } from "../../../../../contracts/index.js";
 import { SANDBOX_EVENT_TYPES } from "../../../../../contracts/index.js";
 import { db } from "../../../../../db/index.js";
-import { sandboxes } from "../../../../../db/schema.js";
+import { claims, sandboxes, sessions } from "../../../../../db/schema.js";
 import { assertNever } from "../../../../../sandbox/decisions.js";
 import { markSandboxReady, validateFence } from "../../../../../sandbox/manager.js";
+import { recordAgentUsage } from "../../../../../lib/cost.js";
 import { appendEvents } from "../../../../../lib/session-events.js";
 import {
 	authenticateSandbox,
@@ -275,6 +276,29 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 			continue;
 		}
 
+		// The bridge's buffer-overflow gap marker rides on `log`, and it is the
+		// one log that is RECORD rather than log: the bridge dropped events during
+		// a partition and built a visible marker saying so. `timelineTypeFor` is a
+		// type-only function and correctly maps `log` to null, so the marker is
+		// picked out here by its code, before that mapping discards it. This route
+		// used to drop it with the rest of the logs — the visible-gap design was
+		// built, tested, sent, and thrown away at the receiving end, so the
+		// transcript showed an unbroken timeline across a window where events
+		// were destroyed.
+		if (event.type === "log") {
+			const code = (event.payload as { code?: unknown } | undefined)?.code;
+			if (code === "bridge.buffer_overflow") {
+				appendable.push({
+					type: "transcript_gap",
+					actor: "harbor",
+					payload: gapPayloadFrom(event, auth.sandbox.id, fence.token),
+				});
+				continue;
+			}
+			ignored += 1;
+			continue;
+		}
+
 		const timelineType = timelineTypeFor(event.type);
 		if (timelineType === null) {
 			ignored += 1;
@@ -355,7 +379,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		// for every event before this change.
 		const promptId = finish.payload.prompt_id;
 		const namedPrompt = typeof promptId === "string" && PROMPT_UUID.test(promptId);
-		await completeTurn({
+		const completion = await completeTurn({
 			orgId: auth.sandbox.orgId,
 			sessionId: auth.sandbox.sessionId,
 			outcome: finish.outcome,
@@ -363,6 +387,36 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 			detail: { sandbox_id: auth.sandbox.id, trace_id: finish.payload.trace_id ?? null },
 			now,
 		});
+
+		// THE COST ROW. Every finished turn carries the agent's usage block, and
+		// this is where it becomes a `cost_events` row attributed to the session's
+		// lease — the write that makes the daily cap mean something, because a cap
+		// checked against a table nothing writes to can never trip.
+		//
+		// A failure here is logged and never fails the ingest: the transcript is
+		// the priority, and this batch is retryable — the row's id is derived from
+		// the prompt id, so the bridge's retry of a lost 200 records it then and a
+		// double-recorded batch is absorbed as a duplicate.
+		const usage = usageFrom(finish.payload);
+		const costKey =
+			(namedPrompt ? (promptId as string) : null) ?? completion.finished[0] ?? null;
+		if (usage !== null && costKey !== null) {
+			try {
+				await recordAgentUsage({
+					orgId: auth.sandbox.orgId,
+					sessionId: auth.sandbox.sessionId,
+					claimId: await activeClaimForSession(auth.sandbox.sessionId),
+					key: costKey,
+					usage,
+					createdAt: now,
+				});
+			} catch (error) {
+				console.error(
+					`[ingest] cost row for prompt ${costKey} failed (turn is recorded, spend is not):`,
+					error,
+				);
+			}
+		}
 	}
 
 	return NextResponse.json({
@@ -371,4 +425,86 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		ignored,
 		through_seq: appended.length > 0 ? appended[appended.length - 1]!.seq : null,
 	});
+}
+
+/**
+ * The gap marker's timeline payload: the KNOWN fields copied one by one, never
+ * the whole payload spread. The sandbox wrote this object, and spreading it
+ * verbatim would let a compromised bridge plant arbitrary keys on a
+ * harbor-actored event — the one actor a reader trusts.
+ */
+function gapPayloadFrom(
+	event: SandboxEvent,
+	sandboxId: string,
+	fencingToken: number,
+): Record<string, unknown> {
+	const payload = (event.payload ?? {}) as Record<string, unknown>;
+	const copy = (value: unknown) =>
+		typeof value === "number" || typeof value === "string" ? value : null;
+	return {
+		dropped_events: copy(payload.dropped_events),
+		first_dropped_at: copy(payload.first_dropped_at),
+		last_dropped_at: copy(payload.last_dropped_at),
+		message: copy(payload.message),
+		sandbox_event: event.type,
+		sandbox_id: sandboxId,
+		fencing_token: fencingToken,
+		...(event.at ? { sandbox_at: event.at } : {}),
+	};
+}
+
+/**
+ * The agent's usage block, shape-checked field by field — this payload is
+ * written by the sandbox, and the sandbox is not trusted. A malformed block
+ * returns null and the turn is simply unbilled-but-visible, never a 500.
+ */
+function usageFrom(payload: Record<string, unknown>): Parameters<typeof recordAgentUsage>[0]["usage"] | null {
+	const raw = payload.usage;
+	if (typeof raw !== "object" || raw === null) return null;
+	const candidate = raw as Record<string, unknown>;
+	if (candidate.source !== "agent_reported" && candidate.source !== "unavailable") return null;
+	if (typeof candidate.input_tokens !== "number" || !Number.isFinite(candidate.input_tokens)) {
+		return null;
+	}
+	if (typeof candidate.output_tokens !== "number" || !Number.isFinite(candidate.output_tokens)) {
+		return null;
+	}
+	const optionalNumber = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+	return {
+		source: candidate.source,
+		input_tokens: Math.max(0, Math.round(candidate.input_tokens)),
+		output_tokens: Math.max(0, Math.round(candidate.output_tokens)),
+		cache_read_tokens: optionalNumber(candidate.cache_read_tokens),
+		cache_write_tokens: optionalNumber(candidate.cache_write_tokens),
+		model: typeof candidate.model === "string" ? candidate.model : null,
+		micro_usd: optionalNumber(candidate.micro_usd),
+	};
+}
+
+/**
+ * The lease this spend attributes to: the active claim on the session's task.
+ *
+ * Null when the session has no task or the lease already lapsed — a legal row
+ * (the spend rolls up to the org), not an error. A read failure also returns
+ * null rather than throwing, because attribution must never be the reason a
+ * transcript batch is refused; the money is still counted against the org cap.
+ */
+async function activeClaimForSession(sessionId: string): Promise<string | null> {
+	try {
+		const [session] = await db
+			.select({ taskId: sessions.taskId })
+			.from(sessions)
+			.where(eq(sessions.id, sessionId))
+			.limit(1);
+		if (!session?.taskId) return null;
+		const [holder] = await db
+			.select({ id: claims.id })
+			.from(claims)
+			.where(and(eq(claims.taskId, session.taskId), isNull(claims.releasedAt)))
+			.limit(1);
+		return holder?.id ?? null;
+	} catch {
+		return null;
+	}
 }

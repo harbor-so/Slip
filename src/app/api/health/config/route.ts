@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { describeConfig } from "../../../../config.js";
+import { scmOAuthConfig } from "../../../../git/credentials.js";
+import { startupAttributionWarning } from "../../../../git/provider.js";
 import { currentSession } from "../../../../lib/session.js";
 
 /**
@@ -20,5 +22,19 @@ export const dynamic = "force-dynamic";
 export async function GET() {
 	const session = await currentSession();
 	if (!session) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
-	return NextResponse.json({ settings: describeConfig() });
+
+	// The SCM attribution posture, in the SAME sentence the startup warning uses.
+	// credentials.ts promised "a health endpoint can show the same text" while no
+	// endpoint did — and this is the degradation an operator most needs to see on
+	// a dashboard, because its symptom (PRs that never open) presents days later
+	// and nowhere near its cause. The pure text builder, not the console-warning
+	// wrapper: a health poll every ten seconds must not spam the log.
+	const oauth = scmOAuthConfig();
+	return NextResponse.json({
+		settings: describeConfig(),
+		scm_attribution: {
+			configured: oauth.configured,
+			warning: startupAttributionWarning(oauth.configured),
+		},
+	});
 }

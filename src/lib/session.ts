@@ -20,11 +20,11 @@
 import { cookies } from "next/headers";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { orgs, users } from "../db/schema.js";
 
 const COOKIE = "harbor_session";
-const MAX_AGE_SECONDS = 30 * 86_400;
 
 export interface Session {
 	orgId: string;
@@ -33,11 +33,22 @@ export interface Session {
 	 * principal (a keypair) be tied back to who registered it. */
 	userId: string | null;
 	userName: string | null;
+	/**
+	 * The viewer's email from their GitHub sign-in, when the profile exposes
+	 * one. This is what makes an `attributed-user` prompt possible: the commands
+	 * route can only claim a commit's authorship when there is an identity to
+	 * claim it FOR. Null degrades the viewer's prompts to `agent-only` — bot
+	 * commits, honestly labelled — never to a refusal.
+	 */
+	userEmail: string | null;
 	/** True when this session came from the dev bypass rather than a real login. */
 	unauthenticated: boolean;
 }
 
 const DEV_SECRET = "harbor-dev-secret-not-for-production";
+// harbor-lint-allow-constant: a security floor, not a tunable — the only
+// direction an operator would ever move it is down, and 32 bytes is the
+// minimum for the HMAC key to be as strong as the HMAC.
 const MIN_SECRET_LENGTH = 32;
 
 /**
@@ -102,7 +113,7 @@ export const sessionCookie = {
 		sameSite: "lax" as const,
 		secure: process.env.NODE_ENV === "production",
 		path: "/",
-		maxAge: MAX_AGE_SECONDS,
+		maxAge: setting("sessionCookieMaxAgeSeconds"),
 	},
 };
 
@@ -124,6 +135,7 @@ export async function currentSession(): Promise<Session | null> {
 					orgName: org.name,
 					userId: user.id,
 					userName: user.name,
+					userEmail: user.email,
 					unauthenticated: false,
 				};
 			}
@@ -134,5 +146,12 @@ export async function currentSession(): Promise<Session | null> {
 
 	const [org] = await db.select().from(orgs).orderBy(asc(orgs.createdAt)).limit(1);
 	if (!org) return null;
-	return { orgId: org.id, orgName: org.name, userId: null, userName: null, unauthenticated: true };
+	return {
+		orgId: org.id,
+		orgName: org.name,
+		userId: null,
+		userName: null,
+		userEmail: null,
+		unauthenticated: true,
+	};
 }

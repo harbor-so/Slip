@@ -25,7 +25,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { artifacts, sessions } from "../db/schema.js";
-import { createSession, queuePrompt } from "../lib/sessions.js";
+import { createSession } from "../lib/sessions.js";
+import { enqueueSessionPrompt } from "../lib/session-runner.js";
 import { resolveTarget } from "./routing.js";
 import type {
 	Connector,
@@ -51,6 +52,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * session — which is to say, an attacker who saw one valid webhook once can spawn
  * sandboxes indefinitely. Five minutes is Slack's own recommendation and is
  * generous enough to survive clock skew between their servers and yours.
+ *
+ * harbor-lint-allow-constant: Slack's own v0 signing recommendation. A knob
+ * here would only let an operator silently weaken replay protection.
  */
 const REPLAY_WINDOW_SECONDS = 60 * 5;
 
@@ -197,13 +201,20 @@ export async function handleSlackWebhook(
 	// in the UI rather than living in a cache somewhere.
 	const existing = await findSessionForThread(ctx.orgId, threadRef);
 	if (existing) {
-		await queuePrompt({
+		// The capped front door, not the raw insert: a Slack thread wired to a
+		// retrying workflow is exactly the human-free amplification path the
+		// queue-depth cap exists for, and an archived session must refuse rather
+		// than silently swallow the message.
+		const outcome = await enqueueSessionPrompt({
 			orgId: ctx.orgId,
 			sessionId: existing.id,
 			author,
 			authorKind: "human",
 			body,
 		});
+		if (!outcome.ok) {
+			return { action: "ignored", reason: outcome.message };
+		}
 		return { action: "updated", sessionId: existing.id, reason: "Queued into the thread's session." };
 	}
 
@@ -246,13 +257,19 @@ export async function handleSlackWebhook(
 		payload: { threadRef, channel: event.channel, ts: event.thread_ts ?? event.ts },
 	});
 
-	await queuePrompt({
+	// A freshly created session cannot be over its cap, but the front door also
+	// carries the promptability check and the body validation, and two enqueue
+	// paths with different rules is how the second one rots.
+	const queued = await enqueueSessionPrompt({
 		orgId: ctx.orgId,
 		sessionId: session.id,
 		author,
 		authorKind: "human",
 		body,
 	});
+	if (!queued.ok) {
+		return { action: "ignored", reason: queued.message };
+	}
 
 	await postMessage(ctx, event.channel, event.thread_ts ?? event.ts, [
 		`Started a session — <${sessionUrl(session.key)}|open it>`,

@@ -1,6 +1,7 @@
 import { channelByKey, mayRead } from "../../../../../lib/chat.js";
 import { resolveConn } from "../../../../../lib/conn.js";
 import postgres from "postgres";
+import { databaseUrl } from "../../../../../db/index.js";
 
 /**
  * A live feed for one channel, over Server-Sent Events.
@@ -33,8 +34,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 	const as = new URL(request.url).searchParams.get("as") ?? undefined;
 	if (!(await mayRead(channel, as))) return new Response("Not a member.", { status: 403 });
 
-	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor_raleigh";
-	const listener = postgres(url, { max: 1 });
+	// The one resolution of DATABASE_URL, shared with every other SSE route.
+	// This line previously carried its own fallback naming a DIFFERENT database
+	// (harbor_raleigh) than the rest of the product — exactly the drift the
+	// shared resolver and its test exist to prevent.
+	const listener = postgres(databaseUrl(), { max: 1 });
 	const encoder = new TextEncoder();
 
 	const stream = new ReadableStream({

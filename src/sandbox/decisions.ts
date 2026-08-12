@@ -185,9 +185,116 @@ export function isDeadSandboxStatus(status: string): boolean {
  * we asked the provider to stop it, or we reaped it — so anything still talking
  * from that box is a zombie holding a stale fencing token, and admitting it is
  * how two agents end up pushing the same branch.
+ *
+ * An exhaustive switch rather than the string comparison it used to be, because
+ * this predicate gates `validateFence`, `heartbeat` and `markSandboxReady` — the
+ * entire "lifecycle is authoritative over transport" rule. As a comparison,
+ * adding a terminal status to `SANDBOX_STATUSES` silently admitted zombies in
+ * the new status everywhere at once; as a switch, the new member is a compile
+ * error at this exact line demanding a decision. A status this build does not
+ * recognise fails OPEN (reconnect allowed) — the same direction as
+ * `classifyLiveness`, and for the same reason: this is a transport question,
+ * not an authority one, and the fence still gates every privileged write.
  */
 export function isReconnectBlockedStatus(status: string): boolean {
-	return status === "stopped" || status === "stale";
+	if (!isKnownSandboxStatus(status)) return false;
+	switch (status) {
+		case "stopped":
+		case "stale":
+			return true;
+		case "requested":
+		case "spawning":
+		case "ready":
+		case "busy":
+		case "idle":
+		case "stopping":
+		case "failed":
+			return false;
+	}
+	return assertNever(status, "isReconnectBlockedStatus");
+}
+
+/**
+ * Is this row an attempt nobody has concluded — the one `classifyPendingAttempt`
+ * may resume?
+ *
+ * Same shape and same reasoning as `isReconnectBlockedStatus`: the predicate
+ * used to be an inline `status === "requested"` in the manager, so a new
+ * pre-attach status would silently fall out of reconciliation and its attempts
+ * would wedge as "existing" forever. The exhaustive switch turns that into a
+ * compile error. Unknown statuses are NOT open attempts — resuming a row whose
+ * meaning this build does not know would attach a provider call to it.
+ */
+export function isOpenAttemptStatus(status: string): boolean {
+	if (!isKnownSandboxStatus(status)) return false;
+	switch (status) {
+		case "requested":
+			return true;
+		case "spawning":
+		case "ready":
+		case "busy":
+		case "idle":
+		case "stopping":
+		case "stopped":
+		case "stale":
+		case "failed":
+			return false;
+	}
+	return assertNever(status, "isOpenAttemptStatus");
+}
+
+// ---------------------------------------------------------------------------
+// Destruction authority
+// ---------------------------------------------------------------------------
+
+/**
+ * What the reapers know about the authority behind a session when they decide
+ * whether to destroy its sandbox. `no_task` is a first-class member rather than
+ * a null: a leaseless dashboard session has NO lease to consult, which is a
+ * different fact from a lease that answered `not_held`, even though both
+ * permit destruction.
+ */
+export type DestructionAuthority = "no_task" | LeaseState;
+
+export type DestructionDecision =
+	| { verdict: "destroy" }
+	| { verdict: "defer"; reason: "lease_unknown" | "lease_held" };
+
+/**
+ * May a reaper destroy this sandbox, given the lease behind its session?
+ *
+ * **DESTRUCTION FAILS CLOSED, and this is the direction a tidy-minded reader
+ * will want to "fix". Do not.** The three authority rules look inconsistent and
+ * are not:
+ *
+ *  - an unknown sandbox status is LIVE (liveness fails open — wrongly alive
+ *    wastes a probe);
+ *  - an unknown lease refuses a SPAWN (granting fails closed — wrongly granting
+ *    puts two agents on one branch);
+ *  - an unknown lease DEFERS a destruction (destroying fails closed — wrongly
+ *    destroying kills a box whose lease holder is mid-flight, and unlike the
+ *    other two there is no retry that undoes it).
+ *
+ * `unknown` defers: an unreadable claims table is not evidence of abandonment,
+ * and the sweep runs again in seconds — the cost of deferring is one interval
+ * of idle billing, the cost of guessing is a working agent's sandbox killed
+ * under it. `held` defers too: somebody authorised is mid-flight, and
+ * `validateConfig` guarantees the inactivity timeout exceeds a turn, so a held
+ * lease plus an expired idle clock resolves within one lease window either
+ * way. `not_held` and `no_task` destroy — the first is a lapsed or released
+ * authority, the second never had one and is governed by its idle clock alone.
+ */
+export function evaluateDestruction(authority: DestructionAuthority): DestructionDecision {
+	switch (authority) {
+		case "unknown":
+			return { verdict: "defer", reason: "lease_unknown" };
+		case "held":
+			return { verdict: "defer", reason: "lease_held" };
+		case "not_held":
+		case "no_task":
+			return { verdict: "destroy" };
+	}
+	return assertNever(authority, "evaluateDestruction");
 }
 
 // ---------------------------------------------------------------------------

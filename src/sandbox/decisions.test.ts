@@ -24,16 +24,19 @@ import {
 	classifyProviderError,
 	evaluateCircuitBreaker,
 	evaluateConnectingTimeout,
+	evaluateDestruction,
 	evaluateExecutionTimeout,
 	evaluateHeartbeatHealth,
 	evaluateInactivityTimeout,
 	evaluateSpawnDecision,
 	isDeadSandboxStatus,
 	isKnownSandboxStatus,
+	isOpenAttemptStatus,
 	isReconnectBlockedStatus,
 	resolveBootMode,
 	type CircuitBreakerState,
 	type CircuitDecision,
+	type DestructionAuthority,
 	type LeaseState,
 	type SpawnDecisionInput,
 } from "./decisions.js";
@@ -926,5 +929,57 @@ describe("classifyProviderError", () => {
 		for (const sample of samples) {
 			expect(PROVIDER_ERROR_TYPES).toContain(classifyProviderError(sample));
 		}
+	});
+});
+
+describe("evaluateDestruction — destruction fails closed", () => {
+	it("covers the whole truth table, and the defer directions carry their reasons", () => {
+		// The full matrix, spelled out rather than looped, because each row is a
+		// distinct policy somebody will one day want to "fix": unknown defers
+		// (unreadable authority is not proof of abandonment), held defers
+		// (somebody authorised is mid-flight), not_held and no_task destroy.
+		expect(evaluateDestruction("unknown")).toEqual({
+			verdict: "defer",
+			reason: "lease_unknown",
+		});
+		expect(evaluateDestruction("held")).toEqual({ verdict: "defer", reason: "lease_held" });
+		expect(evaluateDestruction("not_held")).toEqual({ verdict: "destroy" });
+		expect(evaluateDestruction("no_task")).toEqual({ verdict: "destroy" });
+	});
+
+	it("is total over every declared authority value", () => {
+		const authorities: DestructionAuthority[] = ["no_task", "held", "not_held", "unknown"];
+		for (const authority of authorities) {
+			const decision = evaluateDestruction(authority);
+			expect(["destroy", "defer"]).toContain(decision.verdict);
+		}
+	});
+});
+
+describe("isReconnectBlockedStatus is total over the status set", () => {
+	it("blocks exactly stopped and stale, admits every other declared status", () => {
+		const blocked = SANDBOX_STATUSES.filter((status) => isReconnectBlockedStatus(status));
+		expect(blocked.sort()).toEqual(["stale", "stopped"]);
+		// `failed` deliberately reconnects — the slow boot that outruns its
+		// watchdog and then comes up working. See the function's doc comment.
+		expect(isReconnectBlockedStatus("failed")).toBe(false);
+	});
+
+	it("fails OPEN on a status this build does not know", () => {
+		// Transport question, not authority: the fence still gates every
+		// privileged write, so admitting an unknown status costs nothing the
+		// fence does not already protect against.
+		expect(isReconnectBlockedStatus("hibernating")).toBe(false);
+	});
+});
+
+describe("isOpenAttemptStatus is total over the status set", () => {
+	it("treats exactly `requested` as an open attempt", () => {
+		const open = SANDBOX_STATUSES.filter((status) => isOpenAttemptStatus(status));
+		expect(open).toEqual(["requested"]);
+	});
+
+	it("an unknown status is NOT an open attempt — resuming it would attach a provider call", () => {
+		expect(isOpenAttemptStatus("hibernating")).toBe(false);
 	});
 });

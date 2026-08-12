@@ -477,6 +477,39 @@ export class DockerSandboxProvider implements SnapshotProvider {
 		return found.find((f) => f.state === "running" || f.state === "starting") ?? found[0]!;
 	}
 
+	/**
+	 * Every live container carrying `harbor.managed=1`.
+	 *
+	 * No `--all`, deliberately: stopped containers are kept for post-mortems and
+	 * must never become stop candidates. A daemon that cannot answer throws
+	 * (`this.run` already does), never returns `[]` — see the authority note on
+	 * the base interface.
+	 */
+	async listManaged(): Promise<SandboxInspection[]> {
+		const { stdout } = await this.run(
+			[
+				"ps",
+				"--no-trunc",
+				"--filter",
+				`label=${LABEL.managed}=1`,
+				"--format",
+				"{{.ID}}",
+			],
+			"list_managed",
+			this.probeTimeoutMs(),
+		);
+
+		const ids = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+		const found: SandboxInspection[] = [];
+		for (const id of ids) {
+			const inspection = await this.inspect(id);
+			// Vanished between the `ps` and the `inspect`: a real race with a
+			// concurrent stop, and definitively gone — the one case skipping is right.
+			if (inspection) found.push(inspection);
+		}
+		return found;
+	}
+
 	async stop(externalId: string, options?: StopOptions): Promise<StopOutcome> {
 		assertArgSafe(externalId, "container id", "stop");
 

@@ -22,9 +22,6 @@ import { db } from "../db/index.js";
 import { agentPresence, claims, events, projects, tasks } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
 
-const DEFAULT_LEASE_MINUTES = 30;
-const MAX_LEASE_MINUTES = 8 * 60;
-
 export class HarborError extends Error {}
 
 /**
@@ -132,8 +129,8 @@ export async function presentAgents(orgId: string): Promise<PresentAgent[]> {
 type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function leaseExpiry(minutes: number | undefined, now: Date): Date {
-	const requested = minutes ?? DEFAULT_LEASE_MINUTES;
-	const bounded = Math.min(Math.max(requested, 1), MAX_LEASE_MINUTES);
+	const requested = minutes ?? setting("leaseMinutes");
+	const bounded = Math.min(Math.max(requested, 1), setting("maxLeaseMinutes"));
 	return new Date(now.getTime() + bounded * 60_000);
 }
 
@@ -291,7 +288,21 @@ export async function listWork(
 }
 
 export type ClaimResult =
-	| { ok: true; taskId: string; title: string; expiresAt: Date }
+	| {
+			ok: true;
+			taskId: string;
+			title: string;
+			expiresAt: Date;
+			/**
+			 * The claim row this call inserted. Callers that go on to spawn MUST pass
+			 * this to `ensureSandbox` rather than re-reading the active claim: a
+			 * re-read races the release/expiry of the very row it is looking for, and
+			 * a null from that race used to collapse into "no lease asserted" — which
+			 * `readLeaseState` treats as authorised. The id from the insert cannot be
+			 * anybody else's claim.
+			 */
+			claimId: string;
+	  }
 	| { ok: false; taskId: string; title: string; heldBy: string; expiresAt: Date };
 
 /**
@@ -394,7 +405,7 @@ export async function claim(
 					intentRef: opts.intentRef ?? null,
 				},
 			});
-			return { ok: true, taskId, title: task.title, expiresAt };
+			return { ok: true, taskId, title: task.title, expiresAt, claimId: inserted[0]!.id };
 		}
 
 		const holder = await tx.query.claims.findFirst({
@@ -622,27 +633,35 @@ export async function createTask(
  */
 export async function sweepExpiredClaims(): Promise<number> {
 	const now = new Date();
-	const expired = await db
-		.update(claims)
-		.set({ releasedAt: now })
-		.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
-		.returning({ taskId: claims.taskId, agentId: claims.agentId });
+	// One transaction for the release, the task updates and the events. The old
+	// shape ran the bulk UPDATE first and the per-row bookkeeping after it, with
+	// no transaction around any of it — a crash mid-loop left claims released
+	// with their tasks still `claimed` and no `claim_expired` event saying why,
+	// which reads in the dashboard as a task that is held by nobody and open to
+	// nobody. All three writes are one fact and now commit as one.
+	return db.transaction(async (tx) => {
+		const expired = await tx
+			.update(claims)
+			.set({ releasedAt: now })
+			.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
+			.returning({ taskId: claims.taskId, agentId: claims.agentId });
 
-	for (const row of expired) {
-		const task = await db.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
-		if (!task) continue;
-		await db
-			.update(tasks)
-			.set({ status: "open", updatedAt: now })
-			.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
-		await db.insert(events).values({
-			orgId: task.orgId,
-			taskId: row.taskId,
-			agentId: row.agentId,
-			type: "claim_expired",
-			payload: { reason: "lease elapsed, swept" },
-		});
-	}
+		for (const row of expired) {
+			const task = await tx.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
+			if (!task) continue;
+			await tx
+				.update(tasks)
+				.set({ status: "open", updatedAt: now })
+				.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+			await tx.insert(events).values({
+				orgId: task.orgId,
+				taskId: row.taskId,
+				agentId: row.agentId,
+				type: "claim_expired",
+				payload: { reason: "lease elapsed, swept" },
+			});
+		}
 
-	return expired.length;
+		return expired.length;
+	});
 }

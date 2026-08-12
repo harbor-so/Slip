@@ -1,3 +1,5 @@
+import { setting } from "../../../config.js";
+import { databaseUrl } from "../../../db/index.js";
 import { currentSession } from "../../../lib/session.js";
 import postgres from "postgres";
 
@@ -24,7 +26,7 @@ export async function GET(request: Request) {
 	const session = await currentSession();
 	if (!session) return new Response("Not signed in.", { status: 401 });
 
-	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
+	const url = databaseUrl();
 	const listener = postgres(url, { max: 1 });
 	const encoder = new TextEncoder();
 
@@ -60,7 +62,9 @@ export async function GET(request: Request) {
 				} catch {
 					/* closed */
 				}
-			}, 25_000);
+				// The same knob the other two SSE routes use: one keep-alive cadence
+				// for every stream, not an inline 25s that drifts from them.
+			}, setting("sandboxHeartbeatIntervalMs"));
 
 			request.signal.addEventListener("abort", () => {
 				clearInterval(keepAlive);

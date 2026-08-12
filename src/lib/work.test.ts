@@ -133,6 +133,58 @@ describe("release", () => {
 	});
 });
 
+describe("lease duration settings", () => {
+	// leaseExpiry reads the settings at call time, so pinning the env inside a
+	// test works without any module-cache gymnastics. Restore in finally: a
+	// leaked HARBOR_LEASE_MINUTES would silently reshape every later suite.
+	const withEnv = async (env: Record<string, string>, fn: () => Promise<void>) => {
+		const saved = new Map(Object.entries(env).map(([k]) => [k, process.env[k]]));
+		for (const [k, v] of Object.entries(env)) process.env[k] = v;
+		try {
+			await fn();
+		} finally {
+			for (const [k, v] of saved.entries()) {
+				if (v === undefined) delete process.env[k];
+				else process.env[k] = v;
+			}
+		}
+	};
+
+	it("HARBOR_LEASE_MINUTES sets the default lease", async () => {
+		await withEnv({ HARBOR_LEASE_MINUTES: "5" }, async () => {
+			const before = Date.now();
+			const result = await claim(orgId, taskId, "agent-a");
+			if (!result.ok) throw new Error("expected claim");
+			const minutes = (result.expiresAt.getTime() - before) / 60_000;
+			expect(minutes).toBeGreaterThan(4.9);
+			expect(minutes).toBeLessThan(5.5);
+		});
+	});
+
+	it("a requested lease is clamped to HARBOR_MAX_LEASE_MINUTES, not refused", async () => {
+		await withEnv({ HARBOR_MAX_LEASE_MINUTES: "60" }, async () => {
+			const before = Date.now();
+			const result = await claim(orgId, taskId, "agent-a", 480);
+			if (!result.ok) throw new Error("expected claim");
+			const minutes = (result.expiresAt.getTime() - before) / 60_000;
+			expect(minutes).toBeGreaterThan(59.9);
+			expect(minutes).toBeLessThan(60.5);
+		});
+	});
+
+	it("renewClaim honours the configured default", async () => {
+		const first = await claim(orgId, taskId, "agent-a", 5);
+		if (!first.ok) throw new Error("expected claim");
+		await withEnv({ HARBOR_LEASE_MINUTES: "90" }, async () => {
+			const before = Date.now();
+			const renewed = await renewClaim(orgId, taskId, "agent-a");
+			const minutes = (renewed.expiresAt.getTime() - before) / 60_000;
+			expect(minutes).toBeGreaterThan(89.9);
+			expect(minutes).toBeLessThan(90.5);
+		});
+	});
+});
+
 describe("renewClaim", () => {
 	it("extends the lease for the holder and refuses everyone else", async () => {
 		const first = await claim(orgId, taskId, "agent-a", 5);

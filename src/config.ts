@@ -74,14 +74,15 @@ export const SETTINGS = {
 
 	sandboxBootTimeoutMs: {
 		env: "HARBOR_SANDBOX_BOOT_TIMEOUT_MS",
-		fallback: 180_000,
+		fallback: 480_000,
 		derivation:
-			"A fresh boot is clone + setup.sh + start.sh. Cloning a large monorepo and "
-			+ "installing dependencies is 30-90s on a warm provider and several minutes "
-			+ "on a cold one, so the default covers the slow case rather than the median. "
-			+ "Too tight is worse than too loose here: a boot killed at 90s that would "
-			+ "have succeeded at 100s looks to the user like the platform is broken, "
-			+ "while an extra minute of waiting looks like a slow repo.",
+			"A fresh boot is clone + setup.sh + start.sh. The setup hook's own budget is "
+			+ "five minutes and the start hook's is two, so the outer timeout is their sum "
+			+ "plus a minute of headroom for the clone — validateConfig() enforces that "
+			+ "relationship, because an outer timeout smaller than the hooks' own budgets "
+			+ "kills a repository that is behaving exactly as configured and blames the "
+			+ "hooks. Too tight is worse than too loose here: a boot killed early looks "
+			+ "like the platform is broken, while an extra minute looks like a slow repo.",
 		parse: asInt,
 	} satisfies Setting<number>,
 
@@ -109,13 +110,14 @@ export const SETTINGS = {
 
 	sandboxInactivityTimeoutMs: {
 		env: "HARBOR_SANDBOX_INACTIVITY_TIMEOUT_MS",
-		fallback: 900_000,
+		fallback: 2_100_000,
 		derivation:
-			"Fifteen minutes of no prompts and no agent activity before the box is "
-			+ "snapshotted and stopped. Long enough that a human reading a diff and "
-			+ "typing a follow-up does not pay a cold start; short enough that an "
-			+ "abandoned session does not bill for an hour. This is the single largest "
-			+ "lever on cost in the whole system.",
+			"One full agent turn (thirty minutes) plus five minutes of human follow-up "
+			+ "before the box is snapshotted and stopped. It must exceed the turn timeout "
+			+ "— validateConfig() enforces this — because a long turn that is working "
+			+ "correctly emits no prompts and must not be reaped as idle. Short enough "
+			+ "that an abandoned session does not bill for an hour. This is the single "
+			+ "largest lever on cost in the whole system.",
 		parse: asInt,
 	} satisfies Setting<number>,
 
@@ -126,7 +128,32 @@ export const SETTINGS = {
 			"Thirty minutes for one prompt. Matches the default claim lease so a turn "
 			+ "cannot outlive the lease that authorises it — if these disagree, an agent "
 			+ "keeps working after its lease lapsed and another agent legitimately takes "
-			+ "the same task. Validated at startup against the lease default.",
+			+ "the same task. validateConfig() enforces turn <= lease at startup.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	// -- Leases ----------------------------------------------------------------
+
+	leaseMinutes: {
+		env: "HARBOR_LEASE_MINUTES",
+		fallback: 30,
+		derivation:
+			"The default claim lease, in minutes. Thirty matches the agent turn timeout "
+			+ "— a lease that expires mid-turn means two agents on one task, and a lease "
+			+ "much longer than a turn means a dead agent's task reads as claimed for "
+			+ "the difference. validateConfig() enforces turn <= lease at startup.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	maxLeaseMinutes: {
+		env: "HARBOR_MAX_LEASE_MINUTES",
+		fallback: 480,
+		derivation:
+			"The ceiling on any lease an agent can request, in minutes. Eight hours is a "
+			+ "working day: long enough for a legitimately long-running migration task, "
+			+ "short enough that a claim taken by an agent that then died does not park "
+			+ "the task until somebody notices. A request above this is clamped, not "
+			+ "refused — the agent asked for 'a long time' and gets the longest allowed.",
 		parse: asInt,
 	} satisfies Setting<number>,
 
@@ -309,6 +336,33 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	sandboxSpawnEstimateMicroUsd: {
+		env: "HARBOR_SANDBOX_SPAWN_ESTIMATE_MICRO_USD",
+		fallback: 0,
+		derivation:
+			"The budget reservation taken before each spawn, in millionths of a dollar. "
+			+ "Zero by default — an honest zero, because Harbor cannot know what a "
+			+ "sandbox-hour costs on the operator's infrastructure, and inventing a "
+			+ "number would make the spend report confidently wrong. An operator who "
+			+ "knows their per-spawn cost raises this so the daily cap actually gates "
+			+ "spawns rather than only the token spend recorded after the fact.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	// -- Dashboard -------------------------------------------------------------
+
+	sessionCookieMaxAgeSeconds: {
+		env: "HARBOR_SESSION_COOKIE_MAX_AGE_SECONDS",
+		fallback: 2_592_000,
+		derivation:
+			"Thirty days before a dashboard sign-in expires. A security-posture choice, "
+			+ "not a technical one, which is exactly why it is a knob: an SSO shop wants "
+			+ "hours, a solo self-hoster wants to never think about it. The cookie is "
+			+ "HMAC-signed and revocation is by rotating AUTH_SECRET, so a shorter age "
+			+ "is the only per-user lever an operator has.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Triggers (inbound event automations) --------------------------------
 
 	triggerMaxBodyBytes: {
@@ -373,6 +427,54 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	deadlineSweepIntervalMs: {
+		env: "HARBOR_DEADLINE_SWEEP_INTERVAL_MS",
+		fallback: 15_000,
+		derivation:
+			"How often sandbox deadlines — inactivity, stale heartbeats, boot timeouts, "
+			+ "execution timeouts — are checked. One heartbeat interval: checking faster "
+			+ "than heartbeats arrive learns nothing new, and checking much slower adds "
+			+ "the gap to every timeout's effective latency. validateConfig() enforces "
+			+ "that this is well below the inactivity timeout, because a sweep interval "
+			+ "near the timeout it enforces makes the timeout meaningless.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	sessionTickIntervalMs: {
+		env: "HARBOR_SESSION_TICK_INTERVAL_MS",
+		fallback: 2_000,
+		derivation:
+			"How often sessions with queued prompts are advanced. This is the latency a "
+			+ "prompt waits when no request-path tick picked it up, so it is the most "
+			+ "user-visible interval in the system: two seconds reads as 'the agent is "
+			+ "starting', ten reads as 'it is broken'. The tick is cheap when there is "
+			+ "nothing to do — one indexed query — which is what allows it to be frequent.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	compactionSweepIntervalMs: {
+		env: "HARBOR_COMPACTION_SWEEP_INTERVAL_MS",
+		fallback: 300_000,
+		derivation:
+			"How often sessions over the retention count are compacted. Five minutes: "
+			+ "compaction is a bound on growth, not a latency guarantee, and each pass "
+			+ "costs real reads. The retention count already caps how far past the limit "
+			+ "a session can get between passes at any sane event rate.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	orphanSweepIntervalMs: {
+		env: "HARBOR_ORPHAN_SWEEP_INTERVAL_MS",
+		fallback: 300_000,
+		derivation:
+			"How often the provider's live containers are reconciled against the "
+			+ "database. Five minutes: an orphan costs its hourly rate, not correctness, "
+			+ "and each pass lists every managed container. The sweep is the backstop "
+			+ "for crash windows the saga cannot close on its own — a control plane that "
+			+ "died between spawn and record — so it needs to run soon, not instantly.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Runs ----------------------------------------------------------------
 
 	runOutputFlushMs: {
@@ -410,7 +512,7 @@ export const SETTINGS = {
 	sandboxImage: {
 		env: "HARBOR_SANDBOX_IMAGE",
 		fallback: "harbor-sandbox:latest",
-		derivation: "The image `docker` and `fly` boot. Built by `npm run sandbox:build`.",
+		derivation: "The image the `docker` provider boots. Built by `npm run sandbox:build`.",
 		parse: asString,
 	} satisfies Setting<string>,
 
@@ -523,6 +625,44 @@ export function validateConfig(overrides?: RepoOverrides): void {
 				+ `HARBOR_AGENT_TURN_TIMEOUT_MS (${turn}). Otherwise a long turn that is working `
 				+ "correctly is reaped as idle, and the user sees their agent stop mid-task with "
 				+ "no explanation.",
+		);
+	}
+
+	const lease = setting("leaseMinutes", overrides);
+	const maxLease = setting("maxLeaseMinutes", overrides);
+	if (lease < 1) {
+		problems.push(
+			`HARBOR_LEASE_MINUTES (${lease}) must be at least 1. A lease that expires `
+				+ "before the claim transaction returns means every claim is already lapsed "
+				+ "when the agent first acts on it, and every task is permanently contested.",
+		);
+	}
+	if (maxLease < lease) {
+		problems.push(
+			`HARBOR_MAX_LEASE_MINUTES (${maxLease}) is below HARBOR_LEASE_MINUTES (${lease}). `
+				+ "The ceiling would then clamp every claim below its own default, so the "
+				+ "configured default is unreachable and every lease is silently shorter than "
+				+ "the operator believes.",
+		);
+	}
+	if (turn > lease * 60_000) {
+		problems.push(
+			`HARBOR_AGENT_TURN_TIMEOUT_MS (${turn}) exceeds HARBOR_LEASE_MINUTES `
+				+ `(${lease} minutes = ${lease * 60_000}ms). A turn would then outlive the lease `
+				+ "that authorises it: the lease lapses mid-turn, another agent legitimately "
+				+ "claims the same task, and two agents work the same task at once — the exact "
+				+ "condition leases exist to prevent.",
+		);
+	}
+
+	const deadlineSweep = setting("deadlineSweepIntervalMs", overrides);
+	if (deadlineSweep >= inactivity) {
+		problems.push(
+			`HARBOR_DEADLINE_SWEEP_INTERVAL_MS (${deadlineSweep}) is not below `
+				+ `HARBOR_SANDBOX_INACTIVITY_TIMEOUT_MS (${inactivity}). The sweep that enforces `
+				+ "the inactivity timeout would then run at most once per timeout window, so an "
+				+ "idle sandbox bills for up to double the configured timeout before anything "
+				+ "notices it.",
 		);
 	}
 

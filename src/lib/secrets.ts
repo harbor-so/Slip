@@ -55,7 +55,13 @@ export async function resolveSecrets(target: SecretTarget): Promise<Record<strin
 		.from(secrets)
 		.where(eq(secrets.orgId, target.orgId));
 
-	const applicable = rows.filter((row) => {
+	// The `: boolean` annotation is load-bearing, not style. The comment below
+	// promises that a fourth scope is a compile error — but a filter callback's
+	// contextual parameter type accepts an implicit `undefined` return, so
+	// without the annotation the new scope's secrets would silently apply to
+	// NOTHING (undefined is falsy) with the suite green. Annotated, the switch
+	// missing an arm is TS2366 exactly as the comment claims.
+	const applicable = rows.filter((row): boolean => {
 		switch (row.scope as SecretScope) {
 			case "global":
 				return true;
