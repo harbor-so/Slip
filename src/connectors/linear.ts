@@ -9,7 +9,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { tasks } from "../db/schema.js";
 import { createTask } from "../lib/work.js";
-import type { Connector, WebhookResult } from "./types.js";
+import type { Connector, ConnectorActivity, ConnectorContext, WebhookResult } from "./types.js";
 
 interface LinearIssue {
 	id: string;
@@ -70,10 +70,34 @@ export function verifyLinearWebhook(
 	return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+export function resolveLinearAccount(payload: unknown): string | null {
+	if (!isRecord(payload)) return null;
+	if (typeof payload.organizationId === "string") return payload.organizationId;
+	if (isRecord(payload.organization) && typeof payload.organization.id === "string") {
+		return payload.organization.id;
+	}
+	return null;
+}
+
+/**
+ * `sourceRef` holds the issue **UUID**, not the `ACM-482` identifier.
+ *
+ * This was a real bug and it is worth naming because the wrong choice looks
+ * obviously right. The identifier is what a person types and what Harbor should
+ * display, so storing it reads as the friendly option. But Linear's API takes the
+ * UUID everywhere, and the identifier is not stable: moving an issue between
+ * teams renumbers it. So the outbound comment path — implemented, but calling
+ * `commentCreate` with `ACM-482` where a UUID belongs — failed for every issue,
+ * and moving an issue silently orphaned its Harbor task and created a duplicate
+ * on the next webhook.
+ *
+ * The identifier still travels, in the task title, where a human wants it.
+ */
 export async function handleLinearWebhook(
 	payload: unknown,
-	orgId: string,
+	ctx: ConnectorContext,
 ): Promise<WebhookResult> {
+	const orgId = ctx.orgId;
 	const parsed = parsePayload(payload);
 	if (!parsed) return { action: "ignored", reason: "Only Linear Issue create and update events are synced." };
 	const issue = parsed.data;
@@ -81,16 +105,16 @@ export async function handleLinearWebhook(
 		where: and(
 			eq(tasks.orgId, orgId),
 			eq(tasks.source, "linear"),
-			eq(tasks.sourceRef, issue.identifier),
+			eq(tasks.sourceRef, issue.id),
 		),
 	});
 	const completed = issue.state?.type === "completed" || issue.state?.type === "canceled";
 	if (!existing) {
 		const created = await createTask(orgId, {
-			title: issue.title,
+			title: `${issue.identifier} ${issue.title}`,
 			description: issue.description ?? undefined,
 			source: "linear",
-			sourceRef: issue.identifier,
+			sourceRef: issue.id,
 		});
 		if (completed) {
 			await db.update(tasks).set({ status: "completed", updatedAt: new Date() }).where(eq(tasks.id, created.id));
@@ -103,7 +127,7 @@ export async function handleLinearWebhook(
 	await db
 		.update(tasks)
 		.set({
-			title: issue.title,
+			title: `${issue.identifier} ${issue.title}`,
 			description: issue.description ?? null,
 			status: existing.status === "claimed" ? "claimed" : completed ? "completed" : "open",
 			updatedAt: new Date(),
@@ -111,6 +135,47 @@ export async function handleLinearWebhook(
 		.where(eq(tasks.id, existing.id));
 	return { action: "updated", taskId: existing.id };
 }
+
+/**
+ * One place that talks to Linear, so the token handling and the error shape
+ * cannot diverge between the two callers.
+ *
+ * The token is read from the connector row first and only falls back to the
+ * environment variable, because an environment variable is per-deployment and a
+ * connector row is per-organisation — a deployment serving two orgs would
+ * otherwise comment on both of their issues with one org's credentials.
+ */
+async function linearGraphql(
+	ctx: Pick<ConnectorContext, "config">,
+	query: string,
+	variables: Record<string, unknown>,
+): Promise<void> {
+	const token =
+		(typeof ctx.config.accessToken === "string" ? ctx.config.accessToken : null)
+		?? process.env.LINEAR_API_KEY;
+	if (!token) {
+		throw new Error(
+			"No Linear credential: this connector row has no accessToken and LINEAR_API_KEY "
+				+ "is unset. Re-run the Linear install, or set the variable.",
+		);
+	}
+
+	const response = await fetch("https://api.linear.app/graphql", {
+		method: "POST",
+		headers: { Authorization: token, "Content-Type": "application/json" },
+		body: JSON.stringify({ query, variables }),
+		signal: AbortSignal.timeout(10_000),
+	});
+	if (!response.ok) throw new Error(`Linear call failed with HTTP ${response.status}.`);
+	const result: unknown = await response.json();
+	if (!isRecord(result) || "errors" in result) {
+		throw new Error("Linear rejected the request.");
+	}
+}
+
+const COMMENT_MUTATION =
+	"mutation Comment($issueId: String!, $body: String!) "
+	+ "{ commentCreate(input: { issueId: $issueId, body: $body }) { success } }";
 
 export async function syncLinearOutbound(
 	taskId: string,
@@ -121,25 +186,73 @@ export async function syncLinearOutbound(
 		where: and(eq(tasks.id, taskId), eq(tasks.orgId, orgId), eq(tasks.source, "linear")),
 	});
 	if (!task?.sourceRef) throw new Error("Linear task not found for outbound comment.");
-	const apiKey = process.env.LINEAR_API_KEY;
-	if (!apiKey) throw new Error("LINEAR_API_KEY is required for outbound comments.");
-
-	const response = await fetch("https://api.linear.app/graphql", {
-		method: "POST",
-		headers: { Authorization: apiKey, "Content-Type": "application/json" },
-		body: JSON.stringify({
-			query: "mutation Comment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }",
-			variables: { issueId: task.sourceRef, body: summary },
-		}),
+	await linearGraphql({ config: {} }, COMMENT_MUTATION, {
+		issueId: task.sourceRef,
+		body: summary,
 	});
-	if (!response.ok) throw new Error(`Linear comment failed with HTTP ${response.status}.`);
-	const result: unknown = await response.json();
-	if (!isRecord(result) || "errors" in result) throw new Error("Linear rejected the completion comment.");
+}
+
+/**
+ * Progress back onto the issue.
+ *
+ * `threadRef` is the issue UUID — the same value `sourceRef` now holds, which is
+ * the point of that fix. Failures are logged rather than thrown: Linear retries a
+ * non-2xx webhook delivery, and a retry re-runs the inbound handler, so letting
+ * an outbound comment failure escape would create a duplicate task every time
+ * Linear had a bad minute.
+ */
+export async function postLinearActivity(
+	ctx: ConnectorContext,
+	activity: ConnectorActivity,
+): Promise<void> {
+	const marker = {
+		started: "▶️",
+		progress: "⚙️",
+		needs_input: "🙋",
+		finished: "✅",
+		failed: "❌",
+	}[activity.kind];
+
+	try {
+		await linearGraphql(ctx, COMMENT_MUTATION, {
+			issueId: activity.threadRef,
+			body: `${marker} ${activity.text}`,
+		});
+	} catch (error) {
+		console.error("[linear] activity comment failed:", error);
+	}
 }
 
 export const linearConnector: Connector = {
 	type: "linear",
 	verifyWebhook: verifyLinearWebhook,
+	resolveAccount: resolveLinearAccount,
 	handleWebhook: handleLinearWebhook,
+	postActivity: postLinearActivity,
+	linkArtifact: async (ctx, artifact) => {
+		if (!artifact.url) return;
+		try {
+			await linearGraphql(ctx, COMMENT_MUTATION, {
+				issueId: artifact.threadRef,
+				body: `🔗 [${artifact.title}](${artifact.url})`,
+			});
+		} catch (error) {
+			console.error("[linear] artifact comment failed:", error);
+		}
+	},
 	syncOutbound: syncLinearOutbound,
+	outboundWrites: [
+		{
+			action: "commentCreate",
+			scope: "write (comments)",
+			description:
+				"Adds a comment to the issue a session came from. Harbor never changes issue "
+				+ "state, assignee, labels or estimates — full two-way state sync is an explicit "
+				+ "non-goal, because two state machines mean webhook ordering decides which "
+				+ "system wins.",
+			triggeredBy:
+				"A session starting, reaching a progress inflection point, producing an "
+				+ "artifact, or a task being completed with a summary.",
+		},
+	],
 };

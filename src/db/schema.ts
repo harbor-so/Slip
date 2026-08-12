@@ -13,6 +13,7 @@
 
 import { relations, sql } from "drizzle-orm";
 import {
+	boolean,
 	index,
 	integer,
 	jsonb,
@@ -200,6 +201,38 @@ export const sessions = pgTable(
 		 * takes a row lock, so the second transaction waits and gets the next value.
 		 */
 		nextSeq: integer("next_seq").notNull().default(1),
+		/**
+		 * The same counter discipline, for the timeline rather than the queue.
+		 *
+		 * Kept separate from `nextSeq` on purpose. Prompt ordering is what humans
+		 * see in the composer; event ordering is what a reconnecting client uses to
+		 * work out what it missed. Sharing one counter would make every agent token
+		 * advance the prompt numbering, so "message #3" would mean nothing, and any
+		 * future change to how events are emitted would silently renumber the
+		 * conversation.
+		 */
+		nextEventSeq: integer("next_event_seq").notNull().default(1),
+		/**
+		 * What this session works on. Both nullable: a session with neither is a
+		 * scratch sandbox, which is a legitimate and useful thing to want.
+		 *
+		 * `environmentId` records which environment was chosen, but the *contents*
+		 * are snapshotted into `session_repos` at creation — see the note there.
+		 */
+		repoId: uuid("repo_id"),
+		environmentId: uuid("environment_id"),
+		/** What the agent branches from. Defaults to the primary repo's default branch. */
+		baseBranch: text("base_branch"),
+		/**
+		 * Which agent runs here: claude-code | codex | opencode | custom.
+		 *
+		 * Per session rather than per deployment, because the interesting comparison
+		 * — three agents on the same prompt, see which lands — is only possible if
+		 * the choice travels with the session.
+		 */
+		runtime: text("runtime"),
+		/** Paused sessions stop consuming the queue. Set by a budget or by a human. */
+		pausedReason: text("paused_reason"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
 	},
@@ -421,6 +454,22 @@ export const connectors = pgTable(
 			.notNull()
 			.references(() => orgs.id),
 		type: text("type").notNull(),
+		/**
+		 * The id of the account on the other side: a Slack team id, a GitHub
+		 * installation id, a Linear organisation id.
+		 *
+		 * This column is what makes Harbor multi-tenant per connector, and its
+		 * absence was a documented bug: webhook ingest selected the connector row
+		 * by `type` alone, so the first active row won and two orgs sharing a
+		 * connector type delivered each other's issues. The connector extracts this
+		 * from the *verified* payload — never from a header or a query parameter,
+		 * because the whole point is that the sender cannot assert which tenant it
+		 * belongs to.
+		 *
+		 * Nullable only so existing rows survive the migration; ingest refuses a
+		 * payload whose account it cannot resolve rather than guessing.
+		 */
+		externalAccountId: text("external_account_id"),
 		/** OAuth tokens, workspace/repo ids, webhook secrets. Never sent to a client. */
 		config: jsonb("config").notNull(),
 		status: text("status").notNull().default("active"),
@@ -432,6 +481,12 @@ export const connectors = pgTable(
 		// A webhook arrives before we know which org it belongs to, so the
 		// external account id has to be reachable by one indexed lookup.
 		index("connectors_external_idx").on(table.type, table.status),
+		// Two orgs may both install Slack; the same Slack workspace may not be
+		// installed into two orgs, because then a message genuinely has two homes
+		// and nothing in the payload can break the tie.
+		uniqueIndex("connectors_account_idx")
+			.on(table.type, table.externalAccountId)
+			.where(sql`${table.externalAccountId} is not null`),
 	],
 );
 
@@ -448,6 +503,479 @@ export const digests = pgTable(
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => [index("digests_org_created_idx").on(table.orgId, table.createdAt)],
+);
+
+// ---------------------------------------------------------------------------
+// Execution plane
+// ---------------------------------------------------------------------------
+
+/**
+ * A repository Harbor can work in.
+ *
+ * `config` holds per-repository overrides for anything an operator can tune
+ * globally — boot timeouts, auto-review filters, which agent runtime to use.
+ * Per-repo rather than global-only because the friction that stops a self-hoster
+ * on day one is a monorepo that legitimately takes four minutes to boot against a
+ * ninety-second default, and forking the project to change a constant is not an
+ * acceptable answer. See `src/config.ts` for the resolution order.
+ */
+export const repos = pgTable(
+	"repos",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** `github` | `gitlab`. One provider per deployment; see docs/adr/0006. */
+		provider: text("provider").notNull().default("github"),
+		owner: text("owner").notNull(),
+		name: text("name").notNull(),
+		defaultBranch: text("default_branch").notNull().default("main"),
+		/** The App installation that can reach it. Null until the App is installed. */
+		installationId: text("installation_id"),
+		description: text("description"),
+		/** Per-repo overrides. Every key is optional; absent means "use the global". */
+		config: jsonb("config").notNull().default(sql`'{}'::jsonb`),
+		archivedAt: timestamp("archived_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("repos_org_slug_idx").on(table.orgId, table.provider, table.owner, table.name),
+		index("repos_org_idx").on(table.orgId),
+	],
+);
+
+/**
+ * A reusable, named set of repositories — frontend + API, service + shared lib.
+ *
+ * The load-bearing decision is not here but in `session_repos`: a session
+ * *snapshots* the environment at creation. Editing or deleting an environment
+ * therefore never mutates what an in-flight session is working on. The obvious
+ * alternative — resolve the environment's repos on every read — means renaming a
+ * repo mid-run silently changes the workspace under a running agent, and deleting
+ * an environment strands every session that referenced it.
+ */
+export const environments = pgTable(
+	"environments",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		name: text("name").notNull(),
+		description: text("description"),
+		archivedAt: timestamp("archived_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [uniqueIndex("environments_org_name_idx").on(table.orgId, table.name)],
+);
+
+export const environmentRepos = pgTable(
+	"environment_repos",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		environmentId: uuid("environment_id")
+			.notNull()
+			.references(() => environments.id),
+		repoId: uuid("repo_id")
+			.notNull()
+			.references(() => repos.id),
+		/** Ordered. Position 0 is primary and drives defaults. */
+		position: integer("position").notNull().default(0),
+	},
+	(table) => [
+		uniqueIndex("environment_repos_idx").on(table.environmentId, table.repoId),
+		index("environment_repos_env_idx").on(table.environmentId, table.position),
+	],
+);
+
+/**
+ * The repositories one session actually works in — the snapshot described above.
+ *
+ * Written once at session creation, from an environment, from an ad-hoc
+ * selection, or from a single repo. Never recomputed. `branch` is resolved here
+ * too, so "what did this session branch from" survives someone changing the
+ * repository's default branch afterwards.
+ */
+export const sessionRepos = pgTable(
+	"session_repos",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		repoId: uuid("repo_id")
+			.notNull()
+			.references(() => repos.id),
+		position: integer("position").notNull().default(0),
+		baseBranch: text("base_branch").notNull(),
+		/** The branch the agent pushed, once it has. `harbor/lse_<claim>`. */
+		workingBranch: text("working_branch"),
+	},
+	(table) => [
+		uniqueIndex("session_repos_idx").on(table.sessionId, table.repoId),
+		index("session_repos_session_idx").on(table.sessionId, table.position),
+	],
+);
+
+/**
+ * A sandbox instance. One row per boot, not one row per session.
+ *
+ * Keeping a row per boot rather than mutating one row per session is what makes
+ * "why was this session slow on Tuesday" answerable: each boot carries its mode,
+ * its provider, its time-to-ready and how it ended. A single mutated row loses
+ * every previous attempt, which is exactly the history you want when a repo starts
+ * failing to boot.
+ *
+ * `authTokenHash` is a SHA-256 digest for the same reason `api_keys.key_hash` is:
+ * the token grants a sandbox the ability to write into its session's event stream
+ * and fetch git credentials, and a compromised database should not hand that over.
+ */
+export const sandboxes = pgTable(
+	"sandboxes",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		provider: text("provider").notNull(),
+		/** The provider's own id: a container id, a Modal sandbox id, a Fly machine id. */
+		externalId: text("external_id"),
+		/** One of SANDBOX_STATUSES in src/contracts. */
+		status: text("status").notNull().default("requested"),
+		/** One of BOOT_MODES. Null until the supervisor reports which it resolved. */
+		bootMode: text("boot_mode"),
+		/** Provider-specific handle for the filesystem state this box was restored from. */
+		restoredFrom: text("restored_from"),
+		/** Provider-specific handle for the most recent snapshot taken of this box. */
+		snapshotRef: text("snapshot_ref"),
+		authTokenHash: text("auth_token_hash"),
+		/** Set once when the bridge first reports ready — the number time-to-ready comes from. */
+		readyAt: timestamp("ready_at", { withTimezone: true }),
+		lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+		stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+		/** Typed reason, not prose. See SandboxFailure in src/sandbox/decisions.ts. */
+		failureReason: text("failure_reason"),
+		/** Warnings the supervisor collected during boot — a failed setup.sh, a tunnel timeout. */
+		bootWarnings: jsonb("boot_warnings"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		index("sandboxes_session_idx").on(table.sessionId, table.createdAt),
+		index("sandboxes_org_status_idx").on(table.orgId, table.status),
+		// The heartbeat sweep reads exactly this: live boxes ordered by staleness.
+		index("sandboxes_heartbeat_idx").on(table.status, table.lastHeartbeatAt),
+	],
+);
+
+/**
+ * The session timeline. Append-only, monotonic, and the basis of reconnection.
+ *
+ * A client holds a `seq` and knows precisely what it has. On reconnect it is sent
+ * a snapshot carrying a cursor, and anything that arrives on the live channel with
+ * a lower or equal seq is discarded by number rather than guessed at from a
+ * timestamp. That is what makes "no gaps, no duplicates" a property of the data
+ * rather than of the ordering of two statements in a function.
+ *
+ * `compactedAt` is not decoration. A session streaming tokens for two days
+ * accumulates events without bound, and a snapshot is read whole on every
+ * reconnect — so the largest payload in the system grows monotonically with the
+ * age of the session, and reconnect storms on a flaky network ship it repeatedly.
+ * Old token-level events are folded into one summarised turn and the originals
+ * deleted; `compactedAt` marks the survivor so a second pass does not re-summarise
+ * a summary.
+ */
+export const sessionEvents = pgTable(
+	"session_events",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		/** Monotonic within a session. From sessions.nextEventSeq, never max()+1. */
+		seq: integer("seq").notNull(),
+		/** One of SESSION_EVENT_TYPES in src/contracts. */
+		type: text("type").notNull(),
+		/** Bounded at ingest. This is a timeline, not a log pipeline. */
+		payload: jsonb("payload"),
+		/** A human handle, an agent id, or `harbor` for the system itself. */
+		actor: text("actor"),
+		compactedAt: timestamp("compacted_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("session_events_seq_idx").on(table.sessionId, table.seq),
+		index("session_events_session_created_idx").on(table.sessionId, table.createdAt),
+	],
+);
+
+/** What a session produced: a branch, a PR, a screenshot, a file. */
+export const artifacts = pgTable(
+	"artifacts",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		sessionId: uuid("session_id")
+			.notNull()
+			.references(() => sessions.id),
+		repoId: uuid("repo_id").references(() => repos.id),
+		/** One of ARTIFACT_KINDS. */
+		kind: text("kind").notNull(),
+		title: text("title").notNull(),
+		url: text("url"),
+		payload: jsonb("payload"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		index("artifacts_session_idx").on(table.sessionId, table.createdAt),
+		// Connectors store their thread link here (`slack:<channel>:<ts>`) and look it
+		// up on EVERY inbound message in every channel the bot can see. That makes
+		// this the hottest read in the connector path, so it has to be one indexed
+		// equality test rather than a jsonb scan that gets slower every day the
+		// product is used.
+		index("artifacts_org_url_idx").on(table.orgId, table.url),
+	],
+);
+
+// ---------------------------------------------------------------------------
+// Secrets and credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Encrypted values injected into a sandbox as environment variables.
+ *
+ * Three scopes with defined precedence — environment beats repository beats
+ * global on a key collision — so a staging environment can override one key
+ * without duplicating the other forty.
+ *
+ * A repository's secrets deliberately do NOT flow into an environment that
+ * contains it. An environment is its own trust scope; inheriting member repos'
+ * secrets would mean adding a repo to an environment silently widens what every
+ * session in that environment can read.
+ *
+ * `keyId` is present from the first migration even though rotation is not
+ * implemented. Adding the field now costs one column; retrofitting it later is a
+ * migration of every secret and token in the system, because a ciphertext that
+ * cannot say which key made it can only be rotated by decrypting all of them at
+ * once with the key you are trying to retire.
+ */
+export const secrets = pgTable(
+	"secrets",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** `global` | `repo` | `environment`. */
+		scope: text("scope").notNull(),
+		/** The repo or environment id. Null for global. */
+		scopeId: uuid("scope_id"),
+		name: text("name").notNull(),
+		/** base64(key_id ‖ iv ‖ ciphertext ‖ tag). See src/lib/crypto.ts. */
+		ciphertext: text("ciphertext").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// `coalesce` because Postgres treats NULLs as distinct in a unique index, so
+		// without it two global secrets could share a name.
+		uniqueIndex("secrets_scope_name_idx").on(
+			table.orgId,
+			table.scope,
+			sql`coalesce(${table.scopeId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+			table.name,
+		),
+		index("secrets_org_scope_idx").on(table.orgId, table.scope, table.scopeId),
+	],
+);
+
+/**
+ * A user's own token for the source control host.
+ *
+ * This exists for one reason: **the pull request is opened with the prompting
+ * human's token, never with the app's.** The sandbox pushes a branch using
+ * short-lived brokered credentials, reports the branch name, and the control plane
+ * opens the PR as the person who asked. The consequence is that they cannot
+ * approve their own agent's changes, which makes unreviewed agent code a
+ * structural impossibility rather than a policy somebody has to enforce.
+ *
+ * A user without a row here — signed in through SSO with no SCM identity — does
+ * not silently fall back to the bot. `src/git/` refuses, pushes the branch, hands
+ * back a compare URL, and says loudly which property was lost.
+ */
+export const userScmTokens = pgTable(
+	"user_scm_tokens",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		userId: uuid("user_id")
+			.notNull()
+			.references(() => users.id),
+		provider: text("provider").notNull().default("github"),
+		login: text("login").notNull(),
+		email: text("email"),
+		/** Same envelope as `secrets.ciphertext`. */
+		ciphertext: text("ciphertext").notNull(),
+		scopes: text("scopes"),
+		expiresAt: timestamp("expires_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [uniqueIndex("user_scm_tokens_idx").on(table.userId, table.provider)],
+);
+
+// ---------------------------------------------------------------------------
+// Automations
+// ---------------------------------------------------------------------------
+
+/**
+ * Something that starts a session without a human present.
+ *
+ * `consecutiveFailures` and the auto-pause it drives are the whole reason this
+ * table is more than a cron string. An automation that fails is usually going to
+ * keep failing, and one that fires hourly against a broken repo will spawn
+ * twenty-four sandboxes a day, each costing money, until somebody notices. Three
+ * strikes and it pauses itself.
+ */
+export const automations = pgTable(
+	"automations",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		name: text("name").notNull(),
+		/** `cron` | `webhook` | `github` | `slack` | `linear`. */
+		source: text("source").notNull(),
+		/** Cron expression + timezone, or the condition set for an event source. */
+		spec: jsonb("spec").notNull().default(sql`'{}'::jsonb`),
+		/** `repo` | `environment`. */
+		targetKind: text("target_kind").notNull(),
+		targetId: uuid("target_id").notNull(),
+		prompt: text("prompt").notNull(),
+		runtime: text("runtime"),
+		enabled: boolean("enabled").notNull().default(true),
+		consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+		pausedReason: text("paused_reason"),
+		lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+		nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		index("automations_org_idx").on(table.orgId),
+		// The scheduler reads exactly this: enabled automations that are due.
+		index("automations_due_idx").on(table.enabled, table.nextRunAt),
+	],
+);
+
+export const automationRuns = pgTable(
+	"automation_runs",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		automationId: uuid("automation_id")
+			.notNull()
+			.references(() => automations.id),
+		sessionId: uuid("session_id").references(() => sessions.id),
+		status: text("status").notNull().default("running"),
+		error: text("error"),
+		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+		endedAt: timestamp("ended_at", { withTimezone: true }),
+	},
+	(table) => [index("automation_runs_idx").on(table.automationId, table.startedAt)],
+);
+
+// ---------------------------------------------------------------------------
+// Cost
+// ---------------------------------------------------------------------------
+
+/**
+ * What everything cost, attributed to the lease it was spent under.
+ *
+ * Server-side and present from the first migration rather than added when
+ * somebody gets a surprise invoice. A background agent platform has at least four
+ * independent amplification paths — automations firing on a schedule, child
+ * sessions spawning siblings, connectors turning every issue into a session, and
+ * retries — and each of them is a loop that spends money without a human in it.
+ *
+ * Attribution is to `claimId`, not to a session, because the claim is the unit of
+ * work that has an intent, a holder and a scope attached. "This lease cost $4.20"
+ * is a sentence somebody can act on; "session 8fda cost $4.20" is not.
+ *
+ * `microUsd` is an integer of millionths of a dollar. Money in a float accumulates
+ * error over a million rows, and the error is always in the direction of the
+ * total being wrong in a report somebody makes a decision from.
+ */
+export const costEvents = pgTable(
+	"cost_events",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** `sandbox_spawn` | `sandbox_seconds` | `tokens` | `provider_call`. */
+		kind: text("kind").notNull(),
+		claimId: uuid("claim_id").references(() => claims.id),
+		sessionId: uuid("session_id").references(() => sessions.id),
+		repoId: uuid("repo_id").references(() => repos.id),
+		/** The human this is charged to, when there is one. */
+		actor: text("actor"),
+		provider: text("provider"),
+		model: text("model"),
+		/** Tokens, seconds, or calls — units depend on `kind`. */
+		quantity: integer("quantity").notNull().default(0),
+		microUsd: integer("micro_usd").notNull().default(0),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		index("cost_events_org_created_idx").on(table.orgId, table.createdAt),
+		index("cost_events_claim_idx").on(table.claimId),
+		index("cost_events_repo_idx").on(table.repoId, table.createdAt),
+	],
+);
+
+/**
+ * Circuit breaker state, one row per provider per org — deliberately NOT per session.
+ *
+ * A per-session breaker means that when a provider's API is down, every session
+ * independently discovers this by burning its own three spawns and its own
+ * cooldown. Fifty sessions produce a hundred and fifty doomed spawn attempts
+ * against a dependency that is already failing, which is a thundering herd aimed
+ * at the thing least able to absorb it. Shared state means the first session pays
+ * the discovery cost and the rest are refused instantly with an accurate reason.
+ */
+export const circuitBreakers = pgTable(
+	"circuit_breakers",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		provider: text("provider").notNull(),
+		consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+		firstFailureAt: timestamp("first_failure_at", { withTimezone: true }),
+		lastFailureAt: timestamp("last_failure_at", { withTimezone: true }),
+		openedAt: timestamp("opened_at", { withTimezone: true }),
+		lastErrorType: text("last_error_type"),
+	},
+	(table) => [uniqueIndex("circuit_breakers_idx").on(table.orgId, table.provider)],
 );
 
 // ---------------------------------------------------------------------------
