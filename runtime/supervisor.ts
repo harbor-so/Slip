@@ -71,6 +71,8 @@ export interface SupervisorConfig {
 	sandboxId: string;
 	sessionId: string;
 	token: string;
+	/** The spawn attempt's fence. Presented on every privileged call to the control plane. */
+	fencingToken: number;
 	traceId?: string;
 	runtime: AgentRuntime;
 	workspaceRoot: string;
@@ -111,6 +113,17 @@ export function readSupervisorConfig(env: NodeJS.ProcessEnv): ConfigResolution {
 	const sessionId = required("HARBOR_SESSION_ID");
 	const token = required("HARBOR_SANDBOX_TOKEN");
 
+	const fenceRaw = (env.HARBOR_FENCING_TOKEN ?? "").trim();
+	const fencingToken = Number(fenceRaw);
+	if (!/^\d{1,9}$/.test(fenceRaw)) {
+		problems.push(
+			"HARBOR_FENCING_TOKEN is not a positive integer. Every privileged call from a sandbox "
+				+ "carries one; without it the control plane cannot tell this box from one whose lease "
+				+ "lapsed while it kept running, and it refuses rather than guessing. Booting without "
+				+ "one would produce a box that comes up cleanly and is rejected by every call it makes.",
+		);
+	}
+
 	const runtimeRaw = (env.HARBOR_AGENT_RUNTIME ?? "").trim();
 	if (!isAgentRuntime(runtimeRaw)) {
 		problems.push(
@@ -134,6 +147,7 @@ export function readSupervisorConfig(env: NodeJS.ProcessEnv): ConfigResolution {
 		sandboxId,
 		sessionId,
 		token,
+		fencingToken,
 		runtime: runtimeRaw as AgentRuntime,
 		workspaceRoot: (env.HARBOR_WORKSPACE_ROOT ?? "/workspace").trim(),
 		repos,
@@ -371,6 +385,10 @@ async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): P
 			execFile("git", ["config", "--global", key, value], { env }, () => resolve());
 		});
 	await set("credential.helper", "harbor");
+	// Without this git omits `path` from the credential request, and the broker then
+	// has no repository to scope the token to — which forces either a refusal or an
+	// installation-wide credential handed to an unattended boot clone.
+	await set("credential.useHttpPath", "true");
 	// Without this a helper that declines leaves git waiting on a terminal that
 	// does not exist, and the turn hangs until the turn timeout rather than
 	// failing in milliseconds with a message naming the host.
@@ -380,6 +398,23 @@ async function configureGit(config: SupervisorConfig, env: NodeJS.ProcessEnv): P
 	env.GIT_TERMINAL_PROMPT = "0";
 	env.HARBOR_SANDBOX_ID = config.sandboxId;
 	env.HARBOR_SESSION_ID = config.sessionId;
+
+	// The one host the credential helper will authorise. Derived from the primary
+	// repository's own URL when the control plane did not state it, because the
+	// alternative — leaving it unset — makes the helper decline every request and
+	// presents as "clone asked for a password", which sends whoever is debugging it
+	// looking at GitHub App permissions rather than at one missing variable.
+	if ((env.HARBOR_SCM_HOST ?? "") === "") {
+		const primaryUrl = config.repos[0]?.url;
+		if (primaryUrl !== undefined) {
+			try {
+				env.HARBOR_SCM_HOST = new URL(primaryUrl).host.toLowerCase();
+			} catch {
+				// A URL we cannot parse leaves the helper with no authorised host, which
+				// is the fail-closed direction: no credential is issued to anyone.
+			}
+		}
+	}
 }
 
 /**
@@ -410,7 +445,10 @@ async function cloneRepos(
 		if (repo.ref !== undefined) args.splice(2, 0, "--branch", repo.ref);
 		const result = await runCommand("git", args, {
 			cwd: config.workspaceRoot,
-			env,
+			// git's credential protocol carries no operation, so the privilege the
+			// broker should mint is stated here instead of inferred. A boot clone is
+			// read-only; an agent turn (below) is the only thing that gets write.
+			env: { ...env, HARBOR_GIT_OPERATION: "clone" },
 			timeoutMs: setting("sandboxBootTimeoutMs"),
 		});
 		if (result.code !== 0) {
@@ -610,7 +648,10 @@ export function createTurnRunner(
 			const plan = adapter.command(request);
 			const child = spawn(plan.bin, plan.args, {
 				cwd: workspace,
-				env: { ...env, ...plan.env },
+				// `push` is stated, not guessed. A turn is the one context in which
+				// writing to the repository is legitimate, and every other process in the
+				// box falls back to the helper's read-only default.
+				env: { ...env, HARBOR_GIT_OPERATION: "push", ...plan.env },
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			active = child;
@@ -728,6 +769,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 			sandboxId: config.sandboxId,
 			sessionId: config.sessionId,
 			token: config.token,
+			fencingToken: config.fencingToken,
 			workspace: join(config.workspaceRoot, config.repos[0]?.name ?? ""),
 			...(config.traceId !== undefined ? { traceId: config.traceId } : {}),
 		},

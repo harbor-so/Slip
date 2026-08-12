@@ -169,6 +169,49 @@ export function authoriseRequest(input: {
 	return { kind: "authorise", host };
 }
 
+/**
+ * The repository a credential request is for, taken from git's `path` field.
+ *
+ * This is why the supervisor sets `credential.useHttpPath true`. Without it git
+ * omits `path` entirely and the broker gets no repository to scope the token to,
+ * which forces either a refusal or an installation-wide credential — and an
+ * installation-wide credential handed to a clone at boot, before any human is
+ * watching, can rewrite every repository the app covers.
+ */
+export function repoFromPath(path: string | undefined): { owner: string; name: string } | null {
+	const segments = (path ?? "").replace(/^\/+/, "").split("/");
+	const owner = segments[0];
+	const name = segments[1]?.replace(/\.git$/, "");
+	if (owner === undefined || owner === "" || name === undefined || name === "") return null;
+	return { owner, name };
+}
+
+export const GIT_OPERATIONS = ["clone", "fetch", "push"] as const;
+export type GitOperation = (typeof GIT_OPERATIONS)[number];
+
+/**
+ * Which operation to ask the broker to scope the token to.
+ *
+ * git's credential protocol carries **no** operation — the same helper invocation
+ * serves a clone and a force-push — so this cannot be read off the request and
+ * must not be inferred from one. The supervisor therefore states it in the
+ * environment of the process it is about to start: `clone` for the boot clone,
+ * `push` for an agent turn, which is the only one that legitimately writes.
+ *
+ * The default when nothing says is `fetch`, the **least privileged** of the three.
+ * That is the fail-closed direction and it has a concrete consequence worth
+ * accepting: a stray `git push` from a process the supervisor did not label gets a
+ * read-only token and fails with a permissions error. That is a clear, one-line
+ * fix. The other default — assuming `push` — hands write access to every
+ * unattended operation in the box, which fails silently and only once, badly.
+ */
+export function operationFromEnvironment(value: string | undefined): GitOperation {
+	const candidate = (value ?? "").trim().toLowerCase();
+	return (GIT_OPERATIONS as readonly string[]).includes(candidate)
+		? (candidate as GitOperation)
+		: "fetch";
+}
+
 // ---------------------------------------------------------------------------
 // The cache
 // ---------------------------------------------------------------------------
@@ -189,10 +232,18 @@ export function cachePath(sandboxId: string): string {
 	return join(tmpdir(), `harbor-credential-${sandboxId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
 }
 
-export function readCache(path: string, host: string, now: number): BrokeredCredential | null {
+/**
+ * `key` is host + repository + operation, not just the host.
+ *
+ * Caching per host would let a read-only token minted for a boot clone be replayed
+ * for a push — the cache would hand back the wrong-privilege credential and the
+ * push would fail confusingly — and worse, would let a token scoped to one
+ * repository be offered for another. The key is the scope.
+ */
+export function readCache(path: string, key: string, now: number): BrokeredCredential | null {
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-		if (parsed.host !== host) return null;
+		if (parsed.key !== key) return null;
 		const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : 0;
 		if (expiresAt <= now) return null;
 		if (typeof parsed.username !== "string" || typeof parsed.password !== "string") return null;
@@ -204,13 +255,13 @@ export function readCache(path: string, host: string, now: number): BrokeredCred
 	}
 }
 
-export function writeCache(path: string, host: string, credential: BrokeredCredential): void {
+export function writeCache(path: string, key: string, credential: BrokeredCredential): void {
 	try {
 		mkdirSync(dirname(path), { recursive: true });
 		// Written 0600 and then chmodded, because the umask in an image is whatever
 		// the base image chose and a world-readable token file in /tmp is a token
 		// every process in the box can read.
-		writeFileSync(path, JSON.stringify({ host, ...credential }), { encoding: "utf8", mode: 0o600 });
+		writeFileSync(path, JSON.stringify({ key, ...credential }), { encoding: "utf8", mode: 0o600 });
 		chmodSync(path, 0o600);
 	} catch {
 		// A cache we cannot write is slower, not broken.
@@ -266,9 +317,9 @@ export function readHelperEnvironment(env: NodeJS.ProcessEnv): HelperEnvironment
  */
 export async function fetchCredential(
 	environment: HelperEnvironment,
-	host: string,
+	request: { host: string; repo: { owner: string; name: string }; operation: GitOperation },
 	fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<BrokeredCredential | null> {
+): Promise<BrokerResult> {
 	const headers: Record<string, string> = {
 		authorization: `Bearer ${environment.token}`,
 		"content-type": "application/json",
@@ -278,21 +329,46 @@ export async function fetchCredential(
 	if (environment.traceId !== undefined) headers[correlationHeader("trace_id")] = environment.traceId;
 
 	const response = await fetchImpl(
-		`${environment.controlUrl}/api/sandboxes/${environment.sandboxId}/git-credential`,
-		{ method: "POST", headers, body: JSON.stringify({ host }) },
+		`${environment.controlUrl}/api/sandbox/${environment.sandboxId}/credentials`,
+		{
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				repo: { owner: request.repo.owner, name: request.repo.name, host: request.host, protocol: "https" },
+				operation: request.operation,
+			}),
+		},
 	);
-	if (!response.ok) return null;
+
+	// 403 and 502 are kept apart all the way to the caller because they imply
+	// opposite next moves. A refusal is a decision — this repository is not covered
+	// by the installation — and retrying it a hundred times helps nobody. A failure
+	// is upstream and transient, and giving up on it turns a thirty-second GitHub
+	// blip into a session that cannot push. Collapsing them is how a helper ends up
+	// either hammering a permanent 403 or abandoning a recoverable outage.
+	if (response.status === 403) return { kind: "refused" };
+	if (!response.ok) return { kind: "failed", status: response.status };
 
 	const body = (await response.json()) as Record<string, unknown>;
-	if (typeof body.username !== "string" || typeof body.password !== "string") return null;
+	if (typeof body.username !== "string" || typeof body.password !== "string") {
+		return { kind: "failed", status: response.status };
+	}
 	const expiresAt =
 		typeof body.expires_at === "string" ? Date.parse(body.expires_at) : Number.NaN;
 	return {
-		username: body.username,
-		password: body.password,
-		expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + setting("credentialCacheMs"),
+		kind: "minted",
+		credential: {
+			username: body.username,
+			password: body.password,
+			expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + setting("credentialCacheMs"),
+		},
 	};
 }
+
+export type BrokerResult =
+	| { kind: "minted"; credential: BrokeredCredential }
+	| { kind: "refused" }
+	| { kind: "failed"; status: number };
 
 /**
  * Render git's expected reply. An empty string means "I have nothing".
@@ -320,14 +396,14 @@ export async function runHelper(
 	env: NodeJS.ProcessEnv,
 	fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<{ stdout: string; note: string | null }> {
-	const operation = argv[0] ?? "";
-	const request = parseCredentialRequest(stdin, operation);
+	const gitVerb = argv[0] ?? "";
+	const request = parseCredentialRequest(stdin, gitVerb);
 	const environment = readHelperEnvironment(env);
 
 	if (environment === null) {
 		return { stdout: "", note: "credential.sandbox_env_missing" };
 	}
-	if (operation === "erase") {
+	if (gitVerb === "erase") {
 		// git calls `erase` when the credential was rejected. Dropping the cache here
 		// is what stops a token that was revoked mid-session from being replayed for
 		// the rest of its cache window on every subsequent call.
@@ -340,28 +416,43 @@ export async function runHelper(
 		return { stdout: "", note: `credential.declined:${decision.reason} ${decision.message}` };
 	}
 
+	const repo = repoFromPath(request.path);
+	if (repo === null) {
+		return {
+			stdout: "",
+			note:
+				"credential.no_repo_path git did not send a repository path, so the broker has "
+				+ "nothing to scope a token to. Check that `credential.useHttpPath` is true.",
+		};
+	}
+	const scope = operationFromEnvironment(env.HARBOR_GIT_OPERATION);
+
 	const path = cachePath(environment.sandboxId);
-	const cached = readCache(path, decision.host, Date.now());
+	const key = `${decision.host}/${repo.owner}/${repo.name}#${scope}`;
+	const cached = readCache(path, key, Date.now());
 	if (cached !== null) return { stdout: formatCredentialReply(cached), note: "credential.cache_hit" };
 
-	let fresh: BrokeredCredential | null = null;
+	let result: BrokerResult;
 	try {
-		fresh = await fetchCredential(environment, decision.host, fetchImpl);
+		result = await fetchCredential(environment, { host: decision.host, repo, operation: scope }, fetchImpl);
 	} catch {
 		// A broker we cannot reach yields no credential and a clear git error, rather
 		// than an exception that git reports as "credential helper crashed".
 		return { stdout: "", note: "credential.broker_unreachable" };
 	}
-	if (fresh === null) return { stdout: "", note: "credential.broker_refused" };
+	if (result.kind === "refused") return { stdout: "", note: "credential.broker_refused" };
+	if (result.kind === "failed") {
+		return { stdout: "", note: `credential.broker_failed status=${result.status}` };
+	}
 
 	// Never cache past the window, even when the control plane says the token lives
 	// for an hour: the window is the revocation bound, and honouring a longer expiry
 	// would silently widen it.
 	const bounded: BrokeredCredential = {
-		...fresh,
-		expiresAt: Math.min(fresh.expiresAt, Date.now() + setting("credentialCacheMs")),
+		...result.credential,
+		expiresAt: Math.min(result.credential.expiresAt, Date.now() + setting("credentialCacheMs")),
 	};
-	writeCache(path, decision.host, bounded);
+	writeCache(path, key, bounded);
 	return { stdout: formatCredentialReply(bounded), note: "credential.brokered" };
 }
 

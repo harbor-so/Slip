@@ -270,6 +270,15 @@ function isBootMode(value: string): value is BootMode {
 
 export type HookName = "setup" | "start";
 
+/**
+ * The two tunables a hook can be bounded by, as a narrowed subset of `SettingKey`.
+ *
+ * `Extract` rather than a plain string union so that renaming either setting in
+ * `src/config.ts` is a compile error here, instead of a key that resolves to
+ * `undefined` and a hook that runs with no timeout at all.
+ */
+export type HookTimeoutSetting = Extract<SettingKey, "setupTimeoutMs" | "startTimeoutMs">;
+
 export type HookSkipReason =
 	/** `repo_image`: setup ran at image build time and its output is baked in. */
 	| "already_applied_in_image"
@@ -287,7 +296,7 @@ export type HookPolicy =
 			/** What a non-zero exit does. See the asymmetry note below. */
 			fatality: "fatal" | "non_fatal";
 			/** Which tunable bounds it. A key, not a number — this module reads no config. */
-			timeoutSetting: SettingKey;
+			timeoutSetting: HookTimeoutSetting;
 	  };
 
 /**

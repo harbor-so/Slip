@@ -31,6 +31,7 @@
     "allowJs": true
   },
   "include": [
+    "runtime/**/*.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "scripts/**/*.ts",

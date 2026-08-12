@@ -115,6 +115,15 @@ export interface BridgeConfig {
 	sessionId: string;
 	/** Bearer token minted for this sandbox. Never logged, never in an event. */
 	token: string;
+	/**
+	 * The fence this box was spawned with, presented on every privileged call.
+	 *
+	 * Authentication alone cannot distinguish the current box from an honest zombie:
+	 * a sandbox whose lease lapsed while it kept running still holds a genuine
+	 * token. The control plane rejects a stale fence with 409, and this bridge
+	 * treats that as final rather than retryable — see `handleFenceRefusal`.
+	 */
+	fencingToken: number;
 	traceId?: string;
 	/** Where `git config` is applied before an attributed turn. */
 	workspace: string;
@@ -215,6 +224,16 @@ export class Bridge {
 	private heartbeat: NodeJS.Timeout | null = null;
 	private stopped = false;
 	private attempt = 0;
+	/**
+	 * Prompt ids this box has already accepted, for the life of the process.
+	 *
+	 * Unbounded, and that is the right call rather than an oversight: it holds one
+	 * short string per prompt, `maxQueueDepth` bounds how many can be outstanding,
+	 * and a session long enough for this to matter has cost thousands of times more
+	 * in tokens than it has in strings. An LRU here would evict the id of a prompt
+	 * whose redelivery is still possible, which is the one thing it must not do.
+	 */
+	private readonly seenPrompts = new Set<string>();
 
 	constructor(
 		private readonly config: BridgeConfig,
@@ -362,21 +381,40 @@ export class Bridge {
 		if (this.flushing !== null) return this.flushing;
 		if (this.buffer.length === 0) return Promise.resolve();
 
-		const inFlight = this.buffer.slice();
+		// One batch per call, capped at the ingest endpoint's own per-batch limit
+		// rather than at a number invented here. `bridgeBufferLimit` defaults to twice
+		// `maxSnapshotEvents`, so a full buffer flushed in one POST would be refused
+		// with a 413 — and a bridge that only fails when the buffer is full is a
+		// bridge that only fails during the outage it exists to survive.
+		const inFlight = this.buffer.slice(0, setting("maxSnapshotEvents"));
 		const body = JSON.stringify({ events: inFlight.map((entry) => this.toWire(entry)) });
 
 		const run = (async () => {
 			try {
 				const response = await this.deps.fetch(
-					`${this.config.controlUrl}/api/sandboxes/${this.config.sandboxId}/events`,
+					`${this.config.controlUrl}/api/sandbox/${this.config.sandboxId}/events`,
 					{ method: "POST", headers: this.headers({ "content-type": "application/json" }), body },
 				);
+				if (response.status === 409) {
+					// The fence was refused. This box is superseded and everything it has to
+					// say is now noise at best and a second writer at worst, so it stops
+					// rather than retrying — retrying is what turns a lapsed lease into two
+					// agents interleaving sentences into one transcript.
+					this.deps.log("bridge.fence_refused", { status: 409, direction: "up" });
+					this.handlers.shutdown("fence_superseded");
+					return;
+				}
 				if (!response.ok) {
 					this.deps.log("bridge.flush_rejected", { status: response.status });
 					return;
 				}
 				const sent = new Set<BufferEntry<SandboxEvent>>(inFlight);
 				this.buffer = this.buffer.filter((entry) => !sent.has(entry));
+				// A backlog larger than one batch drains over several POSTs rather than
+				// waiting for the next `emit` to nudge it — an agent that goes quiet right
+				// after a partition would otherwise leave the rest of its transcript in the
+				// buffer until the box was stopped.
+				if (this.buffer.length > 0) queueMicrotask(() => void this.flush());
 			} catch (error) {
 				this.deps.log("bridge.flush_failed", { message: (error as Error).message });
 			} finally {
@@ -420,6 +458,7 @@ export class Bridge {
 	private headers(extra: Record<string, string> = {}): Record<string, string> {
 		const headers: Record<string, string> = {
 			authorization: `Bearer ${this.config.token}`,
+			"x-harbor-fencing-token": String(this.config.fencingToken),
 			[correlationHeader("sandbox_id")]: this.config.sandboxId,
 			[correlationHeader("session_id")]: this.config.sessionId,
 			...extra,
@@ -434,9 +473,18 @@ export class Bridge {
 
 	private async streamCommands(): Promise<void> {
 		const response = await this.deps.fetch(
-			`${this.config.controlUrl}/api/sandboxes/${this.config.sandboxId}/commands`,
+			`${this.config.controlUrl}/api/sandbox/${this.config.sandboxId}/commands`,
 			{ method: "GET", headers: this.headers({ accept: "text/event-stream" }) },
 		);
+		if (response.status === 409) {
+			// Same reasoning as the uplink: a refused fence is a verdict, not a blip.
+			// Backing off and retrying a superseded box forever is how a zombie stays
+			// connected long enough to be handed a prompt.
+			this.deps.log("bridge.fence_refused", { status: 409, direction: "down" });
+			this.handlers.shutdown("fence_superseded");
+			this.stopped = true;
+			return;
+		}
 		if (!response.ok || response.body === null) {
 			throw new Error(`command stream returned ${response.status}`);
 		}
@@ -473,11 +521,20 @@ export class Bridge {
 	 * being retransmitted, disconnecting turns one bad frame into a reconnect loop.
 	 */
 	private handleFrame(frame: string): void {
-		const data = frame
-			.split("\n")
+		const lines = frame.split("\n");
+		// `: keep-alive` comments and the `ready` handshake are not commands. Naming
+		// them here rather than letting them fall through to the parser keeps the
+		// "unrecognised frame" log meaningful — a log that fires four times a minute
+		// on healthy traffic is a log nobody reads when it fires for a real reason.
+		const name = lines.find((line) => line.startsWith("event:"))?.slice("event:".length).trim();
+		const data = lines
 			.filter((line) => line.startsWith("data:"))
 			.map((line) => line.slice("data:".length).trim())
 			.join("\n");
+		if (name === "ready") {
+			this.deps.log("bridge.stream_ready");
+			return;
+		}
 		if (data === "" || data === "[DONE]") return;
 
 		let parsed: unknown;
@@ -515,6 +572,17 @@ export class Bridge {
 					this.deps.log("bridge.prompt_without_body");
 					return;
 				}
+				// **Deduplicate by prompt id.** Commands are derived from persisted state
+				// rather than from an in-memory queue, precisely so that a bridge which
+				// reconnects to a different replica still receives its prompt — and the
+				// price of that design is redelivery. Without this check a flaky
+				// connection runs the same prompt two, three, five times, each one a full
+				// paid turn against the same workspace.
+				if (this.seenPrompts.has(prompt.id)) {
+					this.deps.log("bridge.prompt_redelivered", { prompt_id: prompt.id });
+					return;
+				}
+				this.seenPrompts.add(prompt.id);
 				this.enqueueTurn(command, prompt);
 				return;
 			}
