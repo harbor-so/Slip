@@ -20,11 +20,11 @@
 import { cookies } from "next/headers";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { orgs, users } from "../db/schema.js";
 
 const COOKIE = "harbor_session";
-const MAX_AGE_SECONDS = 30 * 86_400;
 
 export interface Session {
 	orgId: string;
@@ -35,6 +35,9 @@ export interface Session {
 }
 
 const DEV_SECRET = "harbor-dev-secret-not-for-production";
+// harbor-lint-allow-constant: a security floor, not a tunable — the only
+// direction an operator would ever move it is down, and 32 bytes is the
+// minimum for the HMAC key to be as strong as the HMAC.
 const MIN_SECRET_LENGTH = 32;
 
 /**
@@ -99,7 +102,7 @@ export const sessionCookie = {
 		sameSite: "lax" as const,
 		secure: process.env.NODE_ENV === "production",
 		path: "/",
-		maxAge: MAX_AGE_SECONDS,
+		maxAge: setting("sessionCookieMaxAgeSeconds"),
 	},
 };
 

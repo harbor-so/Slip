@@ -22,9 +22,6 @@ import { db } from "../db/index.js";
 import { agentPresence, claims, events, projects, tasks } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
 
-const DEFAULT_LEASE_MINUTES = 30;
-const MAX_LEASE_MINUTES = 8 * 60;
-
 export class HarborError extends Error {}
 
 /**
@@ -132,8 +129,8 @@ export async function presentAgents(orgId: string): Promise<PresentAgent[]> {
 type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function leaseExpiry(minutes: number | undefined, now: Date): Date {
-	const requested = minutes ?? DEFAULT_LEASE_MINUTES;
-	const bounded = Math.min(Math.max(requested, 1), MAX_LEASE_MINUTES);
+	const requested = minutes ?? setting("leaseMinutes");
+	const bounded = Math.min(Math.max(requested, 1), setting("maxLeaseMinutes"));
 	return new Date(now.getTime() + bounded * 60_000);
 }
 

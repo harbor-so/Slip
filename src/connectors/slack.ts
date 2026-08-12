@@ -51,6 +51,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * session — which is to say, an attacker who saw one valid webhook once can spawn
  * sandboxes indefinitely. Five minutes is Slack's own recommendation and is
  * generous enough to survive clock skew between their servers and yours.
+ *
+ * harbor-lint-allow-constant: Slack's own v0 signing recommendation. A knob
+ * here would only let an operator silently weaken replay protection.
  */
 const REPLAY_WINDOW_SECONDS = 60 * 5;
 
