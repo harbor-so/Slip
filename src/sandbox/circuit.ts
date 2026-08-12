@@ -187,13 +187,18 @@ export async function recordProviderFailure(
 	}
 
 	const threshold = setting("circuitFailureThreshold", overrides);
-	const windowStart = new Date(now.getTime() - setting("circuitWindowMs", overrides));
+	// ISO strings with an explicit cast rather than `Date` objects. A `Date` bound
+	// inside a raw fragment reaches the driver without the column mapper that
+	// normally encodes it, and the failure is a runtime type error from deep inside
+	// the socket writer rather than anything resembling a query problem.
+	const at = now.toISOString();
+	const windowStart = new Date(now.getTime() - setting("circuitWindowMs", overrides)).toISOString();
 
 	// `<=` mirrors the `>=` in `evaluateCircuitBreaker`: a streak whose last failure
 	// is *exactly* one window old has aged out in both places. If the two boundaries
 	// disagreed, one failure per window would keep a counter climbing that every
 	// reader reports as closed.
-	const agedOut = raw`(${circuitBreakers.lastFailureAt} is null or ${circuitBreakers.lastFailureAt} <= ${windowStart})`;
+	const agedOut = raw`(${circuitBreakers.lastFailureAt} is null or ${circuitBreakers.lastFailureAt} <= ${windowStart}::timestamptz)`;
 	const nextCount = raw`(case when ${agedOut} then 1 else ${circuitBreakers.consecutiveFailures} + 1 end)`;
 
 	const [row] = await db
@@ -213,7 +218,7 @@ export async function recordProviderFailure(
 			target: [circuitBreakers.orgId, circuitBreakers.provider],
 			set: {
 				consecutiveFailures: nextCount,
-				firstFailureAt: raw`(case when ${agedOut} then ${now} else coalesce(${circuitBreakers.firstFailureAt}, ${now}) end)`,
+				firstFailureAt: raw`(case when ${agedOut} then ${at}::timestamptz else coalesce(${circuitBreakers.firstFailureAt}, ${at}::timestamptz) end)`,
 				lastFailureAt: now,
 				lastErrorType: errorType,
 				// `coalesce` keeps the ORIGINAL opening instant, because the cooldown is
@@ -221,8 +226,8 @@ export async function recordProviderFailure(
 				// provider that keeps failing never becomes half-open, so the breaker
 				// never probes, never recovers, and stays open until a human notices.
 				openedAt: raw`(case
-					when ${agedOut} then (case when 1 >= ${threshold} then ${now} else null end)
-					when ${nextCount} >= ${threshold} then coalesce(${circuitBreakers.openedAt}, ${now})
+					when ${agedOut} then (case when 1 >= ${threshold} then ${at}::timestamptz else null end)
+					when ${nextCount} >= ${threshold} then coalesce(${circuitBreakers.openedAt}, ${at}::timestamptz)
 					else ${circuitBreakers.openedAt}
 				end)`,
 			},

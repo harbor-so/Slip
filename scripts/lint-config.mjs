@@ -53,6 +53,22 @@ const EXEMPT_PATTERNS = [
 /** `export const FOO_TIMEOUT_MS = 30_000;` and `const fooIntervalMs = 5000;` */
 const MODULE_CONST = /^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*([\d_]+)\s*;?\s*(?:\/\/.*)?$/;
 
+/**
+ * Walk back through the contiguous comment block above a line, looking for the
+ * marker. Stops at the first line that is not a comment, so a marker attached to
+ * some unrelated declaration ten lines up does not silently license this one.
+ */
+function hasAllowMarker(lines, index) {
+	for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+		const line = (lines[cursor] ?? "").trim();
+		if (line === "") continue;
+		const isComment = line.startsWith("//") || line.startsWith("*") || line.startsWith("/*");
+		if (!isComment) return false;
+		if (line.includes("harbor-lint-allow-constant:")) return true;
+	}
+	return false;
+}
+
 export function findViolations(source, file) {
 	const violations = [];
 	const lines = source.split("\n");
@@ -65,11 +81,16 @@ export function findViolations(source, file) {
 		const [, name, literal] = match;
 		if (!TUNABLE_NAME.test(name)) continue;
 
-		// A one-line escape hatch, because there is always one legitimate case and
-		// forcing it through the rule is how the rule gets deleted. It must say why,
-		// on the line above, so the exception is reviewable.
-		const previous = lines[index - 1] ?? "";
-		if (/harbor-lint-allow-constant:/.test(previous)) continue;
+		// An escape hatch, because there is always one legitimate case and forcing it
+		// through the rule is how the rule gets deleted. It must say why, in the
+		// comment block immediately above, so the exception is reviewable.
+		//
+		// The whole contiguous comment block is scanned rather than only the line
+		// directly above. The first version checked one line, which meant a
+		// well-written five-line justification did not suppress the rule and a
+		// terse one did — training people to write the terse one. That is exactly
+		// backwards for a mechanism whose entire value is the explanation.
+		if (hasAllowMarker(lines, index)) continue;
 
 		violations.push({
 			file,

@@ -233,7 +233,7 @@ async function fencingTokenOf(row: SandboxRow): Promise<number> {
 		select count(*)::int as ordinal
 		from ${sandboxes}
 		where ${sandboxes.sessionId} = ${row.sessionId}::uuid
-			and (${sandboxes.createdAt}, ${sandboxes.id}) <= (${row.createdAt}::timestamptz, ${row.id}::uuid)
+			and (${sandboxes.createdAt}, ${sandboxes.id}) <= (${row.createdAt.toISOString()}::timestamptz, ${row.id}::uuid)
 	`)) as unknown as Array<{ ordinal: number }>;
 	return Number(result[0]?.ordinal ?? 0);
 }
@@ -471,7 +471,7 @@ async function tokenWithin(
 		select count(*)::int as ordinal
 		from ${sandboxes}
 		where ${sandboxes.sessionId} = ${row.sessionId}::uuid
-			and (${sandboxes.createdAt}, ${sandboxes.id}) <= (${row.createdAt}::timestamptz, ${row.id}::uuid)
+			and (${sandboxes.createdAt}, ${sandboxes.id}) <= (${row.createdAt.toISOString()}::timestamptz, ${row.id}::uuid)
 	`)) as unknown as Array<{ ordinal: number }>;
 	return Number(result[0]?.ordinal ?? 0);
 }

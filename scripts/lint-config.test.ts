@@ -119,3 +119,52 @@ describe("the tree as it actually stands", () => {
 		expect(violations).toHaveLength(0);
 	});
 });
+
+describe("the escape hatch", () => {
+	/**
+	 * The first version of this rule checked only the line directly above, which
+	 * meant a well-written five-line justification did NOT suppress it and a terse
+	 * one did — training people to write the terse one. That is exactly backwards
+	 * for a mechanism whose entire value is the explanation, and it was caught by
+	 * the rule firing on its own author.
+	 */
+	it("accepts a marker anywhere in the comment block above", () => {
+		const source = [
+			"// harbor-lint-allow-constant: the protocol fixes this, so it is not a",
+			"// deployment choice and a knob here would only make the endpoint easier",
+			"// to abuse.",
+			"const MAX_BODY_BYTES = 4_096;",
+			"",
+		].join("\n");
+		expect(findViolations(source, "src/a.ts")).toHaveLength(0);
+	});
+
+	it("accepts a marker inside a jsdoc block", () => {
+		const source = [
+			"/**",
+			" * harbor-lint-allow-constant: fixed by the wire format.",
+			" */",
+			"const MAX_FRAME_BYTES = 65_536;",
+			"",
+		].join("\n");
+		expect(findViolations(source, "src/a.ts")).toHaveLength(0);
+	});
+
+	/**
+	 * A marker attached to some unrelated declaration further up must not silently
+	 * license this one — otherwise one exception in a file exempts the whole file,
+	 * which is how an escape hatch becomes an opt-out.
+	 */
+	it("does not carry a marker across a non-comment line", () => {
+		const source = [
+			"// harbor-lint-allow-constant: this one is fine",
+			"const MAX_FRAME_BYTES = 65_536;",
+			"const somethingElse = compute();",
+			"const POLL_INTERVAL_MS = 5_000;",
+			"",
+		].join("\n");
+		const found = findViolations(source, "src/a.ts");
+		expect(found).toHaveLength(1);
+		expect(found[0]!.name).toBe("POLL_INTERVAL_MS");
+	});
+});
