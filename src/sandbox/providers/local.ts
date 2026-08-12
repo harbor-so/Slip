@@ -428,6 +428,46 @@ export class LocalSandboxProvider implements EphemeralProvider {
 		return assertNeverProbe(probe);
 	}
 
+	/**
+	 * Every record whose process the probe confirms as ours and alive.
+	 *
+	 * An `indeterminate` probe THROWS rather than skipping the record: skipping
+	 * would report a population that silently omits exactly the processes nobody
+	 * can account for, and the caller reads this list as complete. Same authority
+	 * rule as `findByAttemptId`, one paragraph up.
+	 */
+	async listManaged(): Promise<SandboxInspection[]> {
+		const root = this.requireEnabled("list_managed");
+		const records = await listLocalRecords(this.stateDir(root));
+		const found: SandboxInspection[] = [];
+		for (const record of records) {
+			const probe = await probeProcess(record);
+			switch (probe.kind) {
+				case "ours_alive": {
+					const inspection = await this.inspect(externalIdFor(record));
+					if (inspection) found.push(inspection);
+					break;
+				}
+				case "gone":
+				case "not_ours":
+					break;
+				case "indeterminate":
+					throw new SandboxProviderError({
+						message:
+							`Cannot determine whether the local sandbox for attempt ${record.attemptId} `
+							+ `is still running (${probe.detail}). Refusing to return a partial list: the `
+							+ "caller treats it as the complete population of running boxes.",
+						errorType: "transient",
+						provider: PROVIDER_NAME,
+						operation: "list_managed",
+					});
+				default:
+					assertNeverProbe(probe);
+			}
+		}
+		return found;
+	}
+
 	async stop(externalId: string, options?: StopOptions): Promise<StopOutcome> {
 		const root = this.requireEnabled("stop");
 		const parsed = parseExternalId(externalId, "stop");

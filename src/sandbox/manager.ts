@@ -1636,7 +1636,7 @@ export interface SweepOptions {
  * the long comment on `evaluateDestruction` for why this deliberately differs
  * from both the liveness rule and the spawn rule.
  */
-async function readDestructionAuthority(
+export async function readDestructionAuthority(
 	taskId: string | null,
 	now: Date,
 	readLease?: SweepOptions["readLease"],
