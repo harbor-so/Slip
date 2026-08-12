@@ -85,8 +85,8 @@ import {
 import { db } from "../db/index.js";
 import { claims, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
 import { budgetStatus, finalizeReservation, reserveBudget } from "../lib/cost.js";
-import { appendEvent } from "../lib/session-events.js";
-import { HarborError } from "../lib/work.js";
+import { type Executor, appendEvent } from "../lib/session-events.js";
+import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
 import {
 	type LeaseState,
@@ -469,7 +469,17 @@ async function openAttempt(ctx: SpawnContext, allowResume: boolean): Promise<Ope
 	});
 }
 
-/** Reuse the resumable attempt, or write a new intent row. Called under the lock. */
+/**
+ * Reuse the resumable attempt, or write a new intent row. Called under the lock.
+ *
+ * The `sandbox_requested` event is appended HERE, on this transaction, so the
+ * intent row and the ledger entry that records it commit together or not at
+ * all. Before this, the event was appended by `ensureSandbox` after the
+ * transaction returned, and a crash in between produced an attempt with no
+ * record — an attempt id a post-mortem could never find, on the one payload
+ * (this event's) that persists the fencing token for humans. The caller fires
+ * `notifyChange` after commit; see `AppendOptions` in session-events.ts.
+ */
 async function persistIntent(
 	tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
 	ctx: SpawnContext,
@@ -478,6 +488,7 @@ async function persistIntent(
 ): Promise<OpenedAttempt> {
 	if (pending.state === "resumable") {
 		const token = await tokenWithin(tx, pending.row);
+		await appendRequestedEvent(tx, ctx, pending.row, token, true);
 		return { kind: "opened", row: pending.row, token, resumed: true };
 	}
 
@@ -507,7 +518,37 @@ async function persistIntent(
 		.returning();
 
 	const token = await tokenWithin(tx, row!);
+	await appendRequestedEvent(tx, ctx, row!, token, false);
 	return { kind: "opened", row: row!, token, resumed: false };
+}
+
+/** The ledger half of `persistIntent`, on the same transaction. */
+async function appendRequestedEvent(
+	tx: Executor,
+	ctx: SpawnContext,
+	row: SandboxRow,
+	token: number,
+	resumed: boolean,
+): Promise<void> {
+	await appendEvent(
+		{
+			orgId: ctx.orgId,
+			sessionId: ctx.sessionId,
+			type: "sandbox_requested",
+			actor: ctx.actor,
+			payload: {
+				sandbox_id: row.id,
+				// The attempt id IS the row id. One identifier means there is no second
+				// thing to keep in sync, and no way for a label on a container to point at
+				// a row that does not exist.
+				attempt_id: row.id,
+				fencing_token: token,
+				provider: ctx.provider.name,
+				resumed,
+			},
+		},
+		{ executor: tx },
+	);
 }
 
 /** `fencingTokenOf` against a transaction, so the token is read under the lock. */
@@ -625,23 +666,10 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 
 	const opened = await openAttempt(ctx, true);
 	if (opened.kind === "refused") return refuse(ctx, opened.reason, opened.detail);
-
-	await appendEvent({
-		orgId: ctx.orgId,
-		sessionId: ctx.sessionId,
-		type: "sandbox_requested",
-		actor,
-		payload: {
-			sandbox_id: opened.row.id,
-			// The attempt id IS the row id. One identifier means there is no second
-			// thing to keep in sync, and no way for a label on a container to point at
-			// a row that does not exist.
-			attempt_id: opened.row.id,
-			fencing_token: opened.token,
-			provider: provider.name,
-			resumed: opened.resumed,
-		},
-	});
+	// The `sandbox_requested` event committed with the intent row inside
+	// `openAttempt`; the NOTIFY the executor-mode append skipped is fired here,
+	// after that commit, per the AppendOptions contract.
+	await notifyChange(ctx.orgId, "session_event");
 
 	if (opened.resumed) {
 		const reconciled = await reconcile(ctx, opened.row, opened.token);
@@ -655,6 +683,7 @@ export async function ensureSandbox(input: EnsureSandboxInput): Promise<SpawnOut
 		await retireAttempt(opened.row, "provider_error", ctx.now);
 		const reopened = await openAttempt(ctx, false);
 		if (reopened.kind === "refused") return refuse(ctx, reopened.reason, reopened.detail);
+		await notifyChange(ctx.orgId, "session_event");
 		return spawn(ctx, reopened.row, reopened.token);
 	}
 
@@ -744,10 +773,34 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
 			// is to leave the box for the watchdog rather than to attach to it.
 			return { kind: "no_orphan" };
 		case "adopt": {
-			const claimed = await claimAttempt(row.id, {
-				externalId: decision.externalId,
-				status: "spawning",
-				failureReason: null,
+			// Adoption and its ledger event commit together, same as the created
+			// path: an adopted box must never exist without the `sandbox_spawning`
+			// event that says which attempt owns it.
+			const claimed = await db.transaction(async (tx) => {
+				const attached = await claimAttempt(tx, row.id, {
+					externalId: decision.externalId,
+					status: "spawning",
+					failureReason: null,
+				});
+				if (!attached) return false;
+				await appendEvent(
+					{
+						orgId: ctx.orgId,
+						sessionId: ctx.sessionId,
+						type: "sandbox_spawning",
+						actor: ctx.actor,
+						payload: {
+							sandbox_id: row.id,
+							attempt_id: row.id,
+							external_id: decision.externalId,
+							fencing_token: token,
+							adopted: true,
+							reason: decision.reason,
+						},
+					},
+					{ executor: tx },
+				);
+				return true;
 			});
 			if (!claimed) {
 				// The attempt was closed while we were asking the provider about it — the
@@ -771,20 +824,7 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
 					},
 				};
 			}
-			await appendEvent({
-				orgId: ctx.orgId,
-				sessionId: ctx.sessionId,
-				type: "sandbox_spawning",
-				actor: ctx.actor,
-				payload: {
-					sandbox_id: row.id,
-					attempt_id: row.id,
-					external_id: decision.externalId,
-					fencing_token: token,
-					adopted: true,
-					reason: decision.reason,
-				},
-			});
+			await notifyChange(ctx.orgId, "session_event");
 			return {
 				kind: "resolved",
 				outcome: {
@@ -895,12 +935,37 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			command: ctx.command,
 		});
 
-		const claimed = await claimAttempt(row.id, {
-			externalId: created.externalId,
-			status: "spawning",
-			bootMode: boot.mode,
-			restoredFrom: boot.restoredFrom,
-			failureReason: null,
+		// The attach and its ledger event commit together: a crash after this
+		// transaction leaves either a `requested` row (reconcilable) or a
+		// `spawning` row WITH its `sandbox_spawning` event — never a box attached
+		// to a row the timeline knows nothing about.
+		const claimed = await db.transaction(async (tx) => {
+			const attached = await claimAttempt(tx, row.id, {
+				externalId: created.externalId,
+				status: "spawning",
+				bootMode: boot.mode,
+				restoredFrom: boot.restoredFrom,
+				failureReason: null,
+			});
+			if (!attached) return false;
+			await appendEvent(
+				{
+					orgId: ctx.orgId,
+					sessionId: ctx.sessionId,
+					type: "sandbox_spawning",
+					actor: ctx.actor,
+					payload: {
+						sandbox_id: row.id,
+						attempt_id: row.id,
+						external_id: created.externalId,
+						fencing_token: token,
+						boot_mode: boot.mode,
+						provider: ctx.provider.name,
+					},
+				},
+				{ executor: tx },
+			);
+			return true;
 		});
 		if (!claimed) {
 			// The lifecycle moved on while the provider was creating the box, and this is
@@ -922,6 +987,7 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 					+ "attached to a row that no longer owns the session.",
 			};
 		}
+		await notifyChange(ctx.orgId, "session_event");
 
 		// The breaker is cleared by the thing that proves the provider works, not by a
 		// timer. Left uncleared, a successful half-open probe leaves the row open and
@@ -942,21 +1008,6 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			microUsd: estimate,
 			quantity: 1,
 			createdAt: ctx.now,
-		});
-
-		await appendEvent({
-			orgId: ctx.orgId,
-			sessionId: ctx.sessionId,
-			type: "sandbox_spawning",
-			actor: ctx.actor,
-			payload: {
-				sandbox_id: row.id,
-				attempt_id: row.id,
-				external_id: created.externalId,
-				fencing_token: token,
-				boot_mode: boot.mode,
-				provider: ctx.provider.name,
-			},
 		});
 
 		return { kind: "created", sandbox_id: row.id, external_id: created.externalId };
@@ -1047,30 +1098,40 @@ async function recordSpawnFailure(
 		error instanceof SandboxProviderError ? error.errorType : classifyProviderError(error);
 	const message = error instanceof Error ? error.message : String(error);
 
-	await db
-		.update(sandboxes)
-		.set({ failureReason: "provider_error" })
-		.where(and(eq(sandboxes.id, row.id), eq(sandboxes.status, "requested")));
+	// The failure mark and its event commit together. Separately, a crash between
+	// them left a row that reconciles as `ambiguous_failure` with a timeline that
+	// never says a provider call failed — the row's behaviour was right and the
+	// record was wrong, which is the combination a post-mortem cannot survive.
+	//
+	// The reservation is deliberately NOT released. The box may exist — that is
+	// what "ambiguous" means — and releasing it would under-count spend for
+	// exactly the containers nobody can see. Reservations age out on their own.
+	await db.transaction(async (tx) => {
+		await tx
+			.update(sandboxes)
+			.set({ failureReason: "provider_error" })
+			.where(and(eq(sandboxes.id, row.id), eq(sandboxes.status, "requested")));
+		await appendEvent(
+			{
+				orgId: ctx.orgId,
+				sessionId: ctx.sessionId,
+				type: "sandbox_failed",
+				actor: ctx.actor,
+				payload: {
+					sandbox_id: row.id,
+					attempt_id: row.id,
+					error_type: errorType,
+					message,
+					provider: ctx.provider.name,
+					reconcilable: true,
+				},
+			},
+			{ executor: tx },
+		);
+	});
+	await notifyChange(ctx.orgId, "session_event");
 
 	await recordProviderFailure(ctx.orgId, ctx.provider.name, errorType, ctx.now, ctx.overrides);
-
-	// The reservation is deliberately NOT released. The box may exist — that is what
-	// "ambiguous" means — and releasing it would under-count spend for exactly the
-	// containers nobody can see. Reservations age out on their own.
-	await appendEvent({
-		orgId: ctx.orgId,
-		sessionId: ctx.sessionId,
-		type: "sandbox_failed",
-		actor: ctx.actor,
-		payload: {
-			sandbox_id: row.id,
-			attempt_id: row.id,
-			error_type: errorType,
-			message,
-			provider: ctx.provider.name,
-			reconcilable: true,
-		},
-	});
 
 	return { kind: "failed", error_type: errorType, message };
 }
@@ -1087,6 +1148,7 @@ async function recordSpawnFailure(
  * the one state the callers must not write over.
  */
 async function claimAttempt(
+	tx: Executor,
 	sandboxId: string,
 	next: {
 		externalId: string;
@@ -1096,7 +1158,7 @@ async function claimAttempt(
 		restoredFrom?: string | null;
 	},
 ): Promise<boolean> {
-	const updated = await db
+	const updated = await tx
 		.update(sandboxes)
 		.set({
 			externalId: next.externalId,
@@ -1230,17 +1292,45 @@ export async function markSandboxReady(
 	// accepts it, every sweep keeps examining it, and the client is shown a sandbox
 	// to talk to that no longer exists. Zero rows updated means somebody else moved
 	// the lifecycle on, and the honest answer is the one a blocked status gets.
-	const applied = await db
-		.update(sandboxes)
-		.set({
-			status: "ready",
-			readyAt: row.readyAt ?? now,
-			lastHeartbeatAt: now,
-			failureReason: null,
-			bootMode: options.bootMode ?? row.bootMode,
-		})
-		.where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, row.status)))
-		.returning({ id: sandboxes.id });
+	//
+	// The CAS and the `sandbox_ready` event share one transaction, so time-to-ready
+	// (computed from `readyAt`) can never exist without the event a human reads to
+	// learn the box came up — or vice versa.
+	const announce = row.status !== "ready" && options.announce !== false;
+	const applied = await db.transaction(async (tx) => {
+		const updated = await tx
+			.update(sandboxes)
+			.set({
+				status: "ready",
+				readyAt: row.readyAt ?? now,
+				lastHeartbeatAt: now,
+				failureReason: null,
+				bootMode: options.bootMode ?? row.bootMode,
+			})
+			.where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, row.status)))
+			.returning({ id: sandboxes.id });
+		if (updated.length > 0 && announce) {
+			await appendEvent(
+				{
+					orgId: row.orgId,
+					sessionId: row.sessionId,
+					type: "sandbox_ready",
+					actor: options.actor ?? "harbor",
+					payload: {
+						sandbox_id: row.id,
+						external_id: row.externalId,
+						boot_mode: options.bootMode ?? row.bootMode,
+						// A box that reported ready after being written off is the case
+						// `isReconnectBlockedStatus` deliberately allows. Recording it makes that
+						// self-healing visible instead of mysterious.
+						recovered_from: row.status === "failed" ? "failed" : null,
+					},
+				},
+				{ executor: tx },
+			);
+		}
+		return updated;
+	});
 
 	if (applied.length === 0) {
 		const [current] = await db
@@ -1254,27 +1344,11 @@ export async function markSandboxReady(
 		}
 		// Another live transition won the race — a second `boot_ready` from the same
 		// bridge, most likely. The box is up either way and whoever won has already
-		// written the event below, so this is accepted and silent.
+		// written the event, so this is accepted and silent.
 		return { accepted: true };
 	}
 
-	if (row.status !== "ready" && options.announce !== false) {
-		await appendEvent({
-			orgId: row.orgId,
-			sessionId: row.sessionId,
-			type: "sandbox_ready",
-			actor: options.actor ?? "harbor",
-			payload: {
-				sandbox_id: row.id,
-				external_id: row.externalId,
-				boot_mode: options.bootMode ?? row.bootMode,
-				// A box that reported ready after being written off is the case
-				// `isReconnectBlockedStatus` deliberately allows. Recording it makes that
-				// self-healing visible instead of mysterious.
-				recovered_from: row.status === "failed" ? "failed" : null,
-			},
-		});
-	}
+	if (announce) await notifyChange(row.orgId, "session_event");
 	return { accepted: true };
 }
 
@@ -1312,7 +1386,21 @@ export async function stopSandbox(
 	if (!row) return { kind: "unknown_sandbox" };
 	if (isDeadSandboxStatus(row.status)) return { kind: "already_terminal", status: row.status };
 
-	const claimed = await transition(row, { status: "stopped", failureReason: reason, stoppedAt: now });
+	// The dead status and the `sandbox_stopped` event commit together, BEFORE the
+	// provider is asked to do anything — the decision is the fact the ledger
+	// records, and it is a fact whether or not the container obeys. A crash after
+	// this transaction leaves a stopped row with its event and, at worst, a
+	// container the orphan sweep will find; the old shape (event after the stop)
+	// could leave a stopped row whose timeline never says so.
+	const claimed = await transitionWithEvent(
+		row,
+		{ status: "stopped", failureReason: reason, stoppedAt: now },
+		{
+			type: "sandbox_stopped",
+			actor: options.actor ?? "harbor",
+			payload: { sandbox_id: row.id, external_id: row.externalId, reason },
+		},
+	);
 	if (!claimed) {
 		const [current] = await db
 			.select({ status: sandboxes.status })
@@ -1330,6 +1418,8 @@ export async function stopSandbox(
 		} catch (error) {
 			const errorType: ProviderErrorType =
 				error instanceof SandboxProviderError ? error.errorType : classifyProviderError(error);
+			// A second event, not a replacement: the decision above is already on
+			// the record, and this one says the container may still be running.
 			await appendEvent({
 				orgId: row.orgId,
 				sessionId: row.sessionId,
@@ -1347,13 +1437,6 @@ export async function stopSandbox(
 		}
 	}
 
-	await appendEvent({
-		orgId: row.orgId,
-		sessionId: row.sessionId,
-		type: "sandbox_stopped",
-		actor: options.actor ?? "harbor",
-		payload: { sandbox_id: row.id, external_id: row.externalId, reason, outcome, confirmed: true },
-	});
 	return { kind: "stopped", outcome };
 }
 
@@ -1411,13 +1494,35 @@ export async function snapshotSandbox(
 
 	try {
 		const ref = await provider.snapshot(row.externalId);
-		await db
-			.update(sandboxes)
-			// Stored as JSON rather than as a bare handle: a restore needs the
-			// originating provider too, and a handle alone is silently restorable on the
-			// wrong backend.
-			.set({ snapshotRef: JSON.stringify(ref) })
-			.where(eq(sandboxes.id, row.id));
+		// The ref and its `sandbox_snapshotted` event commit together. A snapshot
+		// used to be invisible: nothing on the timeline said state was captured, so
+		// a session that restored from one looked like it resumed from nowhere, and
+		// a snapshot that silently replaced an older one left no record of either.
+		await db.transaction(async (tx) => {
+			await tx
+				.update(sandboxes)
+				// Stored as JSON rather than as a bare handle: a restore needs the
+				// originating provider too, and a handle alone is silently restorable on the
+				// wrong backend.
+				.set({ snapshotRef: JSON.stringify(ref) })
+				.where(eq(sandboxes.id, row.id));
+			await appendEvent(
+				{
+					orgId: row.orgId,
+					sessionId: row.sessionId,
+					type: "sandbox_snapshotted",
+					actor: options.actor ?? "harbor",
+					payload: {
+						sandbox_id: row.id,
+						external_id: row.externalId,
+						snapshot_handle: ref.handle,
+						provider: ref.provider,
+					},
+				},
+				{ executor: tx },
+			);
+		});
+		await notifyChange(row.orgId, "session_event");
 		return { kind: "captured", ref };
 	} catch (error) {
 		const errorType: ProviderErrorType =
@@ -1435,10 +1540,11 @@ export async function snapshotSandbox(
  * second stop.
  */
 async function transition(
+	tx: Executor,
 	row: SandboxRow,
 	next: { status: SandboxStatus; failureReason: SandboxFailure | null; stoppedAt?: Date | null },
 ): Promise<boolean> {
-	const updated = await db
+	const updated = await tx
 		.update(sandboxes)
 		.set({
 			status: next.status,
@@ -1448,6 +1554,38 @@ async function transition(
 		.where(and(eq(sandboxes.id, row.id), eq(sandboxes.status, row.status)))
 		.returning({ id: sandboxes.id });
 	return updated.length > 0;
+}
+
+/**
+ * A dead-status transition and the event that records it, in one transaction.
+ *
+ * This is the shape every reaper and `stopSandbox` share: the CAS that claims
+ * the row and the ledger entry that explains it commit together, and the NOTIFY
+ * fires after the commit. A `false` return means the CAS lost — somebody else
+ * moved the lifecycle on — and nothing was written, including the event.
+ */
+async function transitionWithEvent(
+	row: SandboxRow,
+	next: { status: SandboxStatus; failureReason: SandboxFailure | null; stoppedAt?: Date | null },
+	event: { type: SessionEventType; actor: string | null; payload: Record<string, unknown> },
+): Promise<boolean> {
+	const claimed = await db.transaction(async (tx) => {
+		const moved = await transition(tx, row, next);
+		if (!moved) return false;
+		await appendEvent(
+			{
+				orgId: row.orgId,
+				sessionId: row.sessionId,
+				type: event.type,
+				actor: event.actor,
+				payload: event.payload,
+			},
+			{ executor: tx },
+		);
+		return true;
+	});
+	if (claimed) await notifyChange(row.orgId, "session_event");
+	return claimed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,9 +1609,17 @@ export interface DeadlineReport {
 	acted: string[];
 	/** Rows another sweep or another replica had already transitioned. */
 	raced: string[];
+	/**
+	 * Rows the handler chose NOT to conclude this pass — the provider could not
+	 * be asked about a possible orphan, or the lease behind the session was
+	 * unreadable. Deferral is the fail-closed direction for destruction: an
+	 * unreadable answer is never treated as permission to destroy, and the row
+	 * stays in a status the next sweep will revisit.
+	 */
+	deferred: string[];
 }
 
-const emptyReport = (): DeadlineReport => ({ examined: 0, acted: [], raced: [] });
+const emptyReport = (): DeadlineReport => ({ examined: 0, acted: [], raced: [], deferred: [] });
 
 export interface SweepReport {
 	inactivity: DeadlineReport;
@@ -1552,29 +1698,28 @@ export async function onInactivity(now: Date, options: SweepOptions = {}): Promi
 		);
 		if (verdict.verdict !== "expired") continue;
 
-		const claimed = await transition(row, {
-			status: "stopped",
-			failureReason: "inactivity_timeout",
-			stoppedAt: now,
-		});
+		// Status and event commit together; the provider stop follows the commit,
+		// preserving the persist-before-close rule from the file header.
+		const claimed = await transitionWithEvent(
+			row,
+			{ status: "stopped", failureReason: "inactivity_timeout", stoppedAt: now },
+			{
+				type: "sandbox_stopped",
+				actor: "harbor",
+				payload: {
+					sandbox_id: row.id,
+					reason: "inactivity_timeout",
+					idle_ms: verdict.idleMs,
+					threshold_ms: verdict.thresholdMs,
+				},
+			},
+		);
 		if (!claimed) {
 			report.raced.push(row.id);
 			continue;
 		}
 		report.acted.push(row.id);
 		await bestEffortStop(provider, row);
-		await appendEvent({
-			orgId: row.orgId,
-			sessionId: row.sessionId,
-			type: "sandbox_stopped",
-			actor: "harbor",
-			payload: {
-				sandbox_id: row.id,
-				reason: "inactivity_timeout",
-				idle_ms: verdict.idleMs,
-				threshold_ms: verdict.thresholdMs,
-			},
-		});
 	}
 	return report;
 }
@@ -1610,29 +1755,26 @@ export async function onStaleHeartbeat(
 		);
 		if (verdict.verdict !== "stale") continue;
 
-		const claimed = await transition(row, {
-			status: "stale",
-			failureReason: "heartbeat_lost",
-			stoppedAt: now,
-		});
+		const claimed = await transitionWithEvent(
+			row,
+			{ status: "stale", failureReason: "heartbeat_lost", stoppedAt: now },
+			{
+				type: "sandbox_failed",
+				actor: "harbor",
+				payload: {
+					sandbox_id: row.id,
+					reason: "heartbeat_lost",
+					age_ms: verdict.ageMs,
+					threshold_ms: verdict.thresholdMs,
+				},
+			},
+		);
 		if (!claimed) {
 			report.raced.push(row.id);
 			continue;
 		}
 		report.acted.push(row.id);
 		await bestEffortStop(provider, row);
-		await appendEvent({
-			orgId: row.orgId,
-			sessionId: row.sessionId,
-			type: "sandbox_failed",
-			actor: "harbor",
-			payload: {
-				sandbox_id: row.id,
-				reason: "heartbeat_lost",
-				age_ms: verdict.ageMs,
-				threshold_ms: verdict.thresholdMs,
-			},
-		});
 	}
 	return report;
 }
@@ -1668,48 +1810,65 @@ export async function onConnectingTimeout(
 		);
 		if (verdict.verdict !== "timed_out") continue;
 
-		const claimed = await transition(row, {
-			status: "failed",
-			failureReason: "boot_timeout",
-			stoppedAt: now,
-		});
+		// RECONCILE BEFORE CONCLUDING, and the order is load-bearing. `failed` is
+		// on the dead deny-list: once a row is written there, no sweep ever looks
+		// at it again. The old shape transitioned first and asked the provider
+		// second, swallowing the provider's error — so one transient backend
+		// failure at exactly this moment stranded a running container behind a row
+		// nothing would revisit, forever. Asking first means an unanswerable
+		// provider DEFERS the row: it stays `requested`, `classifyPendingAttempt`
+		// still reads it as resumable, and both a retrying caller and the next
+		// sweep get another chance at it.
+		let orphan: string | null = null;
+		if (row.externalId === null) {
+			try {
+				const found = await provider.findByAttemptId(row.id);
+				if (found !== null && isLive(found.state)) orphan = found.externalId;
+			} catch {
+				report.deferred.push(row.id);
+				continue;
+			}
+		}
+
+		// The CAS is what serialises this handler against a concurrent adoption:
+		// `ensureSandbox` may be reconciling the same attempt right now, and its
+		// `claimAttempt` moves the row off `requested`. Whoever writes first wins;
+		// the loser here reports a race and — critically — does NOT stop the box,
+		// because the box may now be somebody's adopted sandbox.
+		const claimed = await transitionWithEvent(
+			row,
+			{ status: "failed", failureReason: "boot_timeout", stoppedAt: now },
+			{
+				type: "sandbox_failed",
+				actor: "harbor",
+				payload: {
+					sandbox_id: row.id,
+					attempt_id: row.id,
+					reason: "boot_timeout",
+					elapsed_ms: verdict.elapsedMs,
+					threshold_ms: verdict.thresholdMs,
+					reconciled_orphan: orphan,
+				},
+			},
+		);
 		if (!claimed) {
 			report.raced.push(row.id);
 			continue;
 		}
 		report.acted.push(row.id);
 
-		let orphan: string | null = null;
-		if (row.externalId === null) {
+		if (orphan !== null) {
+			// Best-effort: the row is concluded and carries the orphan's id in its
+			// event, so a failed stop here leaves a container the provider-orphan
+			// sweep can still find by its attempt label.
 			try {
-				const found = await provider.findByAttemptId(row.id);
-				if (found !== null && isLive(found.state)) {
-					orphan = found.externalId;
-					await provider.stop(found.externalId);
-				}
-			} catch {
-				// Swallowed, and only here. A provider that cannot answer leaves the row
-				// marked failed and the orphan for the next sweep; throwing would abandon
-				// every remaining candidate in this pass because one backend was slow.
+				await provider.stop(orphan);
+			} catch (error) {
+				console.error(`[sandbox] orphan stop failed for ${orphan}:`, (error as Error).message);
 			}
-		} else {
+		} else if (row.externalId !== null) {
 			await bestEffortStop(provider, row);
 		}
-
-		await appendEvent({
-			orgId: row.orgId,
-			sessionId: row.sessionId,
-			type: "sandbox_failed",
-			actor: "harbor",
-			payload: {
-				sandbox_id: row.id,
-				attempt_id: row.id,
-				reason: "boot_timeout",
-				elapsed_ms: verdict.elapsedMs,
-				threshold_ms: verdict.thresholdMs,
-				reconciled_orphan: orphan,
-			},
-		});
 	}
 	return report;
 }
@@ -1748,31 +1907,40 @@ export async function onExecutionTimeout(
 
 		// Compare-and-set on the status, exactly as `transition` does for sandboxes:
 		// the second sweep matches nothing and reports a race rather than appending a
-		// second `prompt_finished` to the timeline.
-		const claimed = await db
-			.update(sessionPrompts)
-			.set({ status: "timed_out" })
-			.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
-			.returning({ id: sessionPrompts.id });
-		if (claimed.length === 0) {
+		// second `prompt_finished` to the timeline. The CAS and the event share one
+		// transaction — a prompt must never be `timed_out` with a timeline that says
+		// it is still running.
+		const claimed = await db.transaction(async (tx) => {
+			const updated = await tx
+				.update(sessionPrompts)
+				.set({ status: "timed_out" })
+				.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
+				.returning({ id: sessionPrompts.id });
+			if (updated.length === 0) return false;
+			await appendEvent(
+				{
+					orgId: prompt.orgId,
+					sessionId: prompt.sessionId,
+					type: "prompt_finished",
+					actor: "harbor",
+					payload: {
+						prompt_id: prompt.id,
+						seq: prompt.seq,
+						reason: "execution_timeout",
+						elapsed_ms: verdict.elapsedMs,
+						threshold_ms: verdict.thresholdMs,
+					},
+				},
+				{ executor: tx },
+			);
+			return true;
+		});
+		if (!claimed) {
 			report.raced.push(prompt.id);
 			continue;
 		}
 		report.acted.push(prompt.id);
-
-		await appendEvent({
-			orgId: prompt.orgId,
-			sessionId: prompt.sessionId,
-			type: "prompt_finished",
-			actor: "harbor",
-			payload: {
-				prompt_id: prompt.id,
-				seq: prompt.seq,
-				reason: "execution_timeout",
-				elapsed_ms: verdict.elapsedMs,
-				threshold_ms: verdict.thresholdMs,
-			},
-		});
+		await notifyChange(prompt.orgId, "session_event");
 	}
 	return report;
 }

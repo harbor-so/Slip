@@ -65,8 +65,11 @@ import { HarborError, notifyChange } from "./work.js";
  * Derived from `db.transaction`'s own callback for the same reason `work.ts`
  * does it: casting a transaction to `typeof db` compiles only because the cast
  * silences a real difference — a transaction has no `$client`.
+ *
+ * Exported because it is the type of `AppendOptions.executor`, which is how a
+ * state change and its ledger event share one transaction.
  */
-type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Compile-time exhaustiveness, with a runtime story that is not a crash.
@@ -251,6 +254,31 @@ export interface AppendEventsInput {
 	}>;
 }
 
+/**
+ * How an append participates in a caller's transaction.
+ *
+ * The rule this option exists to enforce: **a state change and the ledger event
+ * that records it commit together or not at all.** Before it existed, every
+ * sandbox transition committed first and appended its event in a second
+ * transaction — a crash between the two produced a sandbox that stopped with no
+ * record of why, which is precisely the kind of rare lost fact that is never
+ * reproduced at a desk.
+ *
+ * When `executor` is a caller's transaction, two things change:
+ *
+ *  - the seq allocation and insert run on that transaction, so they commit and
+ *    roll back with the caller's state change;
+ *  - **no NOTIFY is sent.** The notify-after-commit invariant (see the comment
+ *    at the bottom of `appendEvents`) cannot be honoured from inside somebody
+ *    else's transaction, because only the caller knows when it commits. The
+ *    caller MUST call `notifyChange(orgId, "session_event")` after its
+ *    transaction returns, or every dashboard misses the event until the next
+ *    unrelated wakeup.
+ */
+export interface AppendOptions {
+	executor?: Executor;
+}
+
 function toWireEvent(row: typeof sessionEvents.$inferSelect): SessionEvent {
 	return {
 		id: row.id,
@@ -275,12 +303,18 @@ function toWireEvent(row: typeof sessionEvents.$inferSelect): SessionEvent {
  * would show up only under concurrency — the one condition nobody reproduces at a
  * desk.
  */
-export async function appendEvent(input: AppendEventInput): Promise<SessionEvent> {
-	const [event] = await appendEvents({
-		orgId: input.orgId,
-		sessionId: input.sessionId,
-		events: [{ type: input.type, payload: input.payload, actor: input.actor }],
-	});
+export async function appendEvent(
+	input: AppendEventInput,
+	options?: AppendOptions,
+): Promise<SessionEvent> {
+	const [event] = await appendEvents(
+		{
+			orgId: input.orgId,
+			sessionId: input.sessionId,
+			events: [{ type: input.type, payload: input.payload, actor: input.actor }],
+		},
+		options,
+	);
 	return event!;
 }
 
@@ -311,7 +345,10 @@ export async function appendEvent(input: AppendEventInput): Promise<SessionEvent
  * takes the lock once, allocates a contiguous range with one arithmetic
  * expression, and inserts in a single statement.
  */
-export async function appendEvents(input: AppendEventsInput): Promise<SessionEvent[]> {
+export async function appendEvents(
+	input: AppendEventsInput,
+	options?: AppendOptions,
+): Promise<SessionEvent[]> {
 	if (input.events.length === 0) return [];
 
 	const limit = setting("maxEventPayloadChars");
@@ -321,7 +358,7 @@ export async function appendEvents(input: AppendEventsInput): Promise<SessionEve
 		payload: truncatePayload(event.payload, limit).payload,
 	}));
 
-	const rows = await db.transaction(async (tx) => {
+	const run = async (tx: Executor) => {
 		const [session] = await tx
 			.update(sessions)
 			.set({
@@ -356,7 +393,18 @@ export async function appendEvents(input: AppendEventsInput): Promise<SessionEve
 				})),
 			)
 			.returning();
-	});
+	};
+
+	// On a caller's executor the rows are not yet committed when this returns —
+	// the caller owns the commit and the NOTIFY that must follow it (see
+	// AppendOptions). A NOTIFY sent here would arrive before the rows are
+	// visible, and a wakeup that arrives too early is worse than none.
+	if (options?.executor) {
+		const rows = await run(options.executor);
+		return rows.map(toWireEvent);
+	}
+
+	const rows = await db.transaction(run);
 
 	// After commit, never inside. A listener woken by a NOTIFY sent inside the
 	// transaction reads the table before the rows are visible and concludes there
@@ -777,12 +825,16 @@ export function compactionRole(type: SessionEventType): CompactionRole {
 		case "sandbox_ready":
 		case "sandbox_failed":
 		case "sandbox_stopped":
+		case "sandbox_snapshotted":
 		case "agent_finished":
 		case "artifact_created":
 		case "policy_denied":
 		case "budget_exhausted":
 		case "session_error":
 		case "participant_joined":
+		// A gap marker folded into a summary is exactly the silent hole the marker
+		// exists to prevent — the one event type whose entire value is being seen.
+		case "transcript_gap":
 			return "structural";
 	}
 	return unreachable(type, "compactionRole");

@@ -619,27 +619,35 @@ export async function createTask(
  */
 export async function sweepExpiredClaims(): Promise<number> {
 	const now = new Date();
-	const expired = await db
-		.update(claims)
-		.set({ releasedAt: now })
-		.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
-		.returning({ taskId: claims.taskId, agentId: claims.agentId });
+	// One transaction for the release, the task updates and the events. The old
+	// shape ran the bulk UPDATE first and the per-row bookkeeping after it, with
+	// no transaction around any of it — a crash mid-loop left claims released
+	// with their tasks still `claimed` and no `claim_expired` event saying why,
+	// which reads in the dashboard as a task that is held by nobody and open to
+	// nobody. All three writes are one fact and now commit as one.
+	return db.transaction(async (tx) => {
+		const expired = await tx
+			.update(claims)
+			.set({ releasedAt: now })
+			.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
+			.returning({ taskId: claims.taskId, agentId: claims.agentId });
 
-	for (const row of expired) {
-		const task = await db.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
-		if (!task) continue;
-		await db
-			.update(tasks)
-			.set({ status: "open", updatedAt: now })
-			.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
-		await db.insert(events).values({
-			orgId: task.orgId,
-			taskId: row.taskId,
-			agentId: row.agentId,
-			type: "claim_expired",
-			payload: { reason: "lease elapsed, swept" },
-		});
-	}
+		for (const row of expired) {
+			const task = await tx.query.tasks.findFirst({ where: eq(tasks.id, row.taskId) });
+			if (!task) continue;
+			await tx
+				.update(tasks)
+				.set({ status: "open", updatedAt: now })
+				.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+			await tx.insert(events).values({
+				orgId: task.orgId,
+				taskId: row.taskId,
+				agentId: row.agentId,
+				type: "claim_expired",
+				payload: { reason: "lease elapsed, swept" },
+			});
+		}
 
-	return expired.length;
+		return expired.length;
+	});
 }

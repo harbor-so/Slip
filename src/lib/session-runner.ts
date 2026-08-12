@@ -87,7 +87,7 @@ import { secretEquals } from "./crypto.js";
 import { promptabilityOf } from "./promptability.js";
 import { appendEvent } from "./session-events.js";
 import { queuePrompt } from "./sessions.js";
-import { claim, HarborError, release } from "./work.js";
+import { claim, HarborError, notifyChange, release } from "./work.js";
 
 // ---------------------------------------------------------------------------
 // Single writer
@@ -1021,26 +1021,38 @@ export async function completeTurn(input: {
 	// here. Only one UPDATE matches. Writing `prompt_finished` regardless puts the
 	// same turn on the timeline twice, and worse, the loser then goes on to read the
 	// queue and hand the lease back on the strength of work it did not finish.
-	const claimed = await db
-		.update(sessionPrompts)
-		.set({ status: input.outcome })
-		.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
-		.returning({ id: sessionPrompts.id });
-	if (claimed.length === 0) return { finished: [], leaseReleased: false };
-
-	await appendEvent({
-		orgId: input.orgId,
-		sessionId: input.sessionId,
-		type: "prompt_finished",
-		actor: prompt.author,
-		payload: {
-			prompt_id: prompt.id,
-			prompt_seq: prompt.seq,
-			outcome: input.outcome,
-			finished_at: now.toISOString(),
-			...(input.detail ?? {}),
-		},
+	//
+	// The CAS and its `prompt_finished` event share one transaction: a prompt in a
+	// terminal status whose timeline still says "running" is the exact lost fact
+	// this ledger exists to rule out. The NOTIFY fires after the commit, per
+	// AppendOptions in session-events.ts.
+	const claimed = await db.transaction(async (tx) => {
+		const updated = await tx
+			.update(sessionPrompts)
+			.set({ status: input.outcome })
+			.where(and(eq(sessionPrompts.id, prompt.id), eq(sessionPrompts.status, "delivered")))
+			.returning({ id: sessionPrompts.id });
+		if (updated.length === 0) return false;
+		await appendEvent(
+			{
+				orgId: input.orgId,
+				sessionId: input.sessionId,
+				type: "prompt_finished",
+				actor: prompt.author,
+				payload: {
+					prompt_id: prompt.id,
+					prompt_seq: prompt.seq,
+					outcome: input.outcome,
+					finished_at: now.toISOString(),
+					...(input.detail ?? {}),
+				},
+			},
+			{ executor: tx },
+		);
+		return true;
 	});
+	if (!claimed) return { finished: [], leaseReleased: false };
+	await notifyChange(input.orgId, "session_event");
 
 	const remaining = await peekNextPrompt(input.orgId, input.sessionId);
 	if (remaining) return { finished: [prompt.id], leaseReleased: false };

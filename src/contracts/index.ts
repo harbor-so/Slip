@@ -170,6 +170,14 @@ export const SESSION_EVENT_TYPES = [
 	"sandbox_ready",
 	"sandbox_failed",
 	"sandbox_stopped",
+	/** Filesystem state was captured. Carries the snapshot handle and provider. */
+	"sandbox_snapshotted",
+	/**
+	 * Events were dropped between the sandbox and Harbor — the bridge's buffer
+	 * overflowed during a partition. The hole is in the record, visibly, rather
+	 * than hidden from it. Carries `dropped_events` and the window's bounds.
+	 */
+	"transcript_gap",
 	/** Prose from the agent, streamed. */
 	"agent_message",
 	/** A tool the agent called. `payload` is bounded; this is not a log pipeline. */
