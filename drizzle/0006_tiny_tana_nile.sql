@@ -1,0 +1,1 @@
+CREATE INDEX "artifacts_org_url_idx" ON "artifacts" USING btree ("org_id","url");

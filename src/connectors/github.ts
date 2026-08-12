@@ -9,7 +9,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { tasks } from "../db/schema.js";
 import { createTask } from "../lib/work.js";
-import type { Connector, WebhookResult } from "./types.js";
+import type { Connector, ConnectorContext, WebhookResult } from "./types.js";
 
 interface GitHubItem {
 	number: number;
@@ -64,10 +64,27 @@ export function verifyGitHubWebhook(
 	return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+/**
+ * The installation id, from the verified payload.
+ *
+ * GitHub scopes every App webhook to an installation, and that is exactly the
+ * tenant boundary Harbor needs. Reading `repository.owner.id` instead would look
+ * equivalent and would break the moment one organisation installs the App on two
+ * accounts, because two installations would collapse to one Harbor org.
+ */
+export function resolveGitHubAccount(payload: unknown): string | null {
+	if (!isRecord(payload)) return null;
+	if (isRecord(payload.installation) && payload.installation.id !== undefined) {
+		return String(payload.installation.id);
+	}
+	return null;
+}
+
 export async function handleGitHubWebhook(
 	payload: unknown,
-	orgId: string,
+	ctx: ConnectorContext,
 ): Promise<WebhookResult> {
+	const orgId = ctx.orgId;
 	const parsed = parsePayload(payload);
 	if (!parsed) return { action: "ignored", reason: "Unrecognised GitHub webhook payload." };
 
@@ -121,5 +138,12 @@ export async function handleGitHubWebhook(
 export const githubConnector: Connector = {
 	type: "github",
 	verifyWebhook: verifyGitHubWebhook,
+	resolveAccount: resolveGitHubAccount,
 	handleWebhook: handleGitHubWebhook,
+	// Deliberately empty. Issue and pull-request sync is inbound only; the writes
+	// Harbor makes to GitHub — pushing a branch, opening a pull request — go
+	// through `src/git/`, under the prompting user's own token, and are declared
+	// there rather than here. Listing them in both places would let the two
+	// declarations disagree, and this one is what a security reviewer reads.
+	outboundWrites: [],
 };

@@ -1,91 +1,333 @@
 # Harbor
 
-**Coordination for teams running fleets of coding agents.**
+**Background coding agents your company can actually deploy.**
 
-Five MCP tools that stop parallel agents doing the same work twice — and cost a
-fraction of the context that polling an issue tracker does.
+You @-mention it in Slack, or assign it a Linear issue, or type into a shared
+room. It boots an isolated sandbox, runs the coding agent you already use against
+your repository, streams what it is doing to anyone who opens the link, and opens
+a pull request authored by the person who asked.
 
-[Quick start](#quick-start) · [The five tools](#the-five-tools) ·
-[How it works](#how-the-guarantee-actually-works) · [Connectors](#connectors) ·
-[Non-goals](#non-goals)
+One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
+
+[Quick start](#quick-start) · [Why this exists](#why-this-exists) ·
+[How it works](#how-it-works) · [Deploying](./DEPLOY.md) ·
+[Security](./docs/SECURITY.md) · [Non-goals](#non-goals)
 
 ---
 
-## The problem
+## Why this exists
 
-You have five background agents on one backlog — Claude Code, Codex, Conductor
-worktrees, Cursor background agents. Two things go wrong, and neither is solved
-by git.
+Ramp published [an account][ramp] of the background agent they built internally.
+The thesis is right and worth restating: interactive coding assistants couple the
+work to your presence — you type, it responds, you watch. A background agent
+decouples them. You send a prompt, it runs in the cloud, you check later. Within a
+couple of months roughly 30% of merged pull requests in their frontend and backend
+repos came from it, with no mandate.
 
-**They duplicate work.** Two agents independently decide to fix the same bug.
-Worktrees stop them writing the same file; nothing stops them doing the same
-work, and you find out at review time.
+There is one faithful open reimplementation, [`ColeMurray/background-agents`][oi],
+and it is a good piece of work. Several of its decisions are copied here more or
+less verbatim and credited where they appear. But it is built on Cloudflare
+Workers, Durable Objects, D1, KV, R2 and Queues, provisioned by Terraform, with
+Modal for sandboxes and Vercel for the web tier. You cannot run it on a VM, in
+your VPC, on-premises, or on a laptop. Evaluating it means four vendor accounts
+before the first prompt — which, for a company whose security review is the
+reason they wanted a self-hosted option, is not a deployment story.
 
-**They burn context finding out what's happening.** Every agent that wants the
-current state polls Linear or GitHub through MCP. Linear's own MCP server
-exposes roughly two dozen tools over a full human-shaped object model — issues,
-cycles, projects, labels, comments, states — and the model re-reads all of it on
-every turn, before doing anything useful.
+Harbor is the version any company can adopt.
 
-Harbor is one small coordination layer both agents talk to. Linear and GitHub sync
-*into* it, so they stay optional instead of load-bearing, and agents never have
-to learn anyone's object model.
+| | Open-Inspect | Harbor |
+|---|---|---|
+| Runs on | Cloudflare + Modal + Vercel + Terraform | Node + Postgres |
+| Evaluate it | four vendor accounts | `docker compose up` |
+| Sandbox | Modal (and four other paid providers) | **Docker by default**, Fly and Modal optional |
+| Coding agent | OpenCode only | Claude Code, Codex, OpenCode, Cursor, or your own |
+| Tenancy | single-tenant, one shared App install, no per-user repo check | org-scoped schema, per-user repo access check, tenant resolved from verified webhook payload |
+| Adding a connector | write and deploy another Worker | one file, one registry line |
+| Spend control | none | server-side accounting, atomic daily cap |
+| Timeouts | module constants | every one env-configurable and per-repo overridable, enforced by lint |
+| Duplicate work | nothing | claim-before-spawn: a duplicate never costs a container |
 
-## What it costs
+That last row is the thing Harbor has that nothing else does, and it is worth a
+paragraph. Harbor started as a coordination layer for fleets of agents — a lease
+table with a partial unique index guaranteeing exactly one holder per unit of
+work. The execution plane was built on top of it, which means **the lease is
+acquired before a sandbox is booted.** Two runners that pick up the same task
+produce one container and one token bill, not two, and the loser gets told who
+holds it and why. Every branch is named `harbor/lse_<claim_id>` and every pull
+request body carries the claim's stated intent, so six months later "why was this
+written" is answerable from the PR.
 
-Measured against the seeded demo org on a running server:
+[ramp]: https://builders.ramp.com/post/why-we-built-our-background-agent
+[oi]: https://github.com/ColeMurray/background-agents
 
-| | |
-|---|---|
-| All five tools, full schema | 3,927 chars ≈ **~980 tokens** |
-| `list_work` with 10 tasks across 3 sources | 1,302 chars ≈ **~330 tokens** |
-
-Both use the four-characters-per-token rule of thumb, which is an estimate
-rather than a tokenizer count. The number worth comparing is the *shape*: five
-tools with one-paragraph descriptions versus two dozen over a nested object
-model. `src/mcp/protocol.test.ts` asserts the tool surface stays under budget so
-it cannot quietly grow.
+---
 
 ## Quick start
 
 ```bash
-docker compose up -d          # Postgres on :5433
+docker compose up -d                  # Postgres on :5433
 npm install
-npm run db:migrate
-npm run db:seed               # demo org, 2 projects, 5 tasks — prints an API key
+cp .env.example .env
+openssl rand -base64 32               # → HARBOR_ENCRYPTION_KEY
+openssl rand -base64 32               # → AUTH_SECRET
 
-npm run mcp                   # MCP server on :8788/mcp
-npm run dev                   # dashboard on :3000
+npm run db:migrate
+npm run db:seed                       # demo org — prints an API key, once
+npm run sandbox:build                 # the sandbox image
+
+npm run dev                           # dashboard on :3000
+npm run mcp                           # coordination MCP on :8788/mcp
 ```
 
-The seed prints an API key **once**. Only its SHA-256 is stored, so it can never
-be shown again — mint another from Settings if you lose it.
+Open `http://localhost:3000`, connect a repository, and type into a session. With
+`HARBOR_SANDBOX_PROVIDER=docker` — the default — that is the whole product running
+locally, sandboxes included, with no account anywhere.
 
-`DATABASE_URL` is the only thing that changes to run against hosted Postgres
-(Supabase, Neon). Nothing else in the codebase constructs a client.
-
-### See it work, with no keys at all
+### See it with no keys at all
 
 ```bash
-npm run demo                              # 10 tasks, 4 agents mid-flight, a week of history
+npm run demo                          # 10 tasks, 4 agents mid-flight, a week of history
 export HARBOR_API_KEY=<the key it prints>
-HARBOR_DEMO_MODE=1 npm run mcp              # one terminal
-HARBOR_DEMO_MODE=1 npm run dev              # another
-npm run demo:agents                       # six simulated agents — watch the dashboard
+HARBOR_DEMO_MODE=1 npm run dev
+npm run demo:agents                   # six simulated agents — watch the dashboard
 ```
 
-`demo:agents` does **not** mock the coordination layer — that would prove nothing
-about the only part that matters. Each simulated agent is a real
+`demo:agents` does not mock the coordination layer, because that would prove
+nothing about the only part that matters. Each simulated agent is a real
 `@modelcontextprotocol/sdk` client speaking Streamable HTTP to the real server
 against real Postgres. The only fiction is that a `setTimeout` picks the work
-instead of a model. The claims are real, the collisions come from the real
-database index, the expiries are swept by the real sweeper.
+instead of a model.
 
-## Connecting your agents
+---
 
-**Claude Code** — `.mcp.json` at your repo root. Commit this file.
+## How it works
+
+```
+Clients                Control plane                     Execution
+────────────────       ─────────────────────────────     ─────────────────
+Slack        ─┐        session runner (advisory lock)    sandbox provider
+Linear       ─┤        session_events (monotonic seq)      ├ supervisor
+GitHub       ─┼──────► LISTEN/NOTIFY → SSE fan-out    ◄──► ├ bridge
+Web /s/<key> ─┤        policy + budget gate                └ your coding agent
+cron/webhook ─┘        git credential broker
+```
+
+Three planes, and every Cloudflare primitive the reference design needs has a
+Postgres equivalent that was already here. A Durable Object's single-writer
+property is `pg_try_advisory_lock`. Its WebSocket hub is `LISTEN/NOTIFY` over SSE.
+Its per-session SQLite is a table with an index. See
+[ADR 0001](./docs/adr/0001-postgres-not-durable-objects.md), which answers the
+three real arguments for Durable Objects on their own terms and states what we
+give up.
+
+### Sessions
+
+A session is a room with work in it. Three properties, each a correction of the
+design you would write first:
+
+**No owner.** `sessions` has no owner column. Tie a session to one person and
+"send it to a colleague and let them take it home" stops being retrofittable —
+permission checks, queries and UI all quietly assume one identity. A test asserts
+no owner column exists, because the schema is the cheapest place to catch that.
+
+**Every prompt is attributed.** `author` is NOT NULL, and it comes from the
+signed-in viewer, never from the request body — a client that can name its own
+author can put words in a colleague's mouth.
+
+**Input queues rather than interleaving.** Splicing two people's instructions into
+a running agent mid-turn produces an agent following half of each, and that
+failure is silent and reads as the model being stupid rather than as a race.
+
+```
+#1  @rin    delivered   Start with a failing test that reproduces the drop.
+#2  @maya   queued      Also check the retry cap while you're in there.
+#3  @rin    queued      Don't touch the migration in the same PR.
+```
+
+Sessions live at `/s/<key>` — 110 bits, alphabet without i/l/o/u so a key survives
+being read aloud. Opening the link is joining.
+
+**Human prompts jump the queue.** A one-word correction must not wait behind an
+automation's forty-minute job.
+
+### Reconnecting
+
+The guarantee is **convergence**, not exactly-once delivery, and the distinction
+is the difference between a promise the transport can keep and one it cannot. A
+socket can drop after the server writes an event and before the client applies it;
+without acknowledgements the server cannot tell those apart.
+
+So: a snapshot *replaces* client state and carries `snapshot_through_seq`; live
+events carry stable ids and are applied idempotently by sequence number; compacted
+events are declared no longer individually replayable rather than silently
+missing; truncation is stated in the payload with a pagination endpoint for the
+rest.
+
+The subscriber is registered *before* the snapshot is read, so an event landing
+during the read arrives on the live channel and the sequence number says whether
+the client already had it. Loss is impossible by construction. The alternative
+design — the one the reference implementation uses — depends on there being no
+`await` between the snapshot read and the socket registration, which is a rule a
+future refactor silently breaks.
+
+### Sandboxes
+
+```ts
+type SandboxProvider = EphemeralProvider | SnapshotProvider | PersistentProvider
+```
+
+A discriminated union, not capability booleans. Calling `restoreFromSnapshot` on a
+persistent-resume provider is a **compile error**, not a runtime no-op. Snapshot
+backends restore a *new* box from saved state; persistent backends stop and
+restart *the same* box. Both are correct, they are not the same operation, and a
+lowest-common-denominator interface loses the best property of each.
+
+| Provider | Isolation | Needs |
+|---|---|---|
+| `docker` **(default)** | container | nothing |
+| `fly` | hardware-virtualised VM | a Fly account |
+| `local` | **none** — see below | opt-in flags |
+
+`local` runs the agent as the server user with no isolation. It is off unless
+`HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must
+be a known binary, and the prompt is passed as an argv element rather than through
+a shell. Those guards make it usable on your own machine; they do not make it a
+sandbox. Shipping `spawn()` and calling it a platform is how you ship a remote
+code execution vulnerability with a dashboard on top.
+
+Adding a provider is one file plus a registry line, and there is a **contract test
+suite every provider must pass** — a better guarantee than a checklist document.
+
+### At most one sandbox per lease
+
+Claiming a lease before calling a provider stops ordinary concurrent duplication.
+It does not survive a crash after the claim, a provider response lost in transit,
+a retry before the id was persisted, or a lease expiring under a running holder —
+and the middle two are indistinguishable without asking the provider what it
+actually has. So Harbor promises what is achievable:
+
+> **At most one *active* sandbox per lease, including after ambiguous failures.**
+
+A spawn intent is persisted before the provider call and its `attempt_id` is
+passed as a provider label, so an orphan is discoverable. Reconciliation adopts it
+rather than creating a second. A **fencing token** is validated by every
+privileged side effect, so a box whose lease lapsed cannot push a branch or write
+to the transcript even though it is still running and still believes it holds the
+work.
+
+### Bring your own agent
+
+`AgentAdapter` covers invocation, stream format, stop-versus-cancel, where model
+credentials come from, who is authoritative for token counts, and crash recovery.
+Claude Code, Codex, OpenCode and Cursor ship; `custom` takes an argv template.
+
+`stop` and `cancel` are different verbs because they are different things. `stop`
+asks the agent to wind up and keep its work — the button a human presses on
+realising they asked for the wrong thing. `cancel` kills the process — what a
+timeout uses. Collapse them and either every timeout waits politely for a wedged
+agent, or every human "stop" discards a half-finished edit.
+
+Token counts come from the agent when it reports them and are marked
+`unavailable` when it does not. Harbor never estimates from character counts: a
+number that disagrees with the real invoice is worse than a visible gap, because
+somebody makes a decision from it.
+
+### Pull requests are authored by the human
+
+The sandbox pushes a branch with short-lived brokered credentials and reports the
+name. The control plane opens the pull request **with the prompting user's own
+token**. GitHub does not let an author approve their own PR, so unreviewed agent
+code becomes structurally impossible rather than policy-prohibited.
+
+Author and committer are separate properties from separate mechanisms — the PR
+author comes from the token, the commit author and committer come from git
+metadata — and they are tested separately. Target state is
+`Author: <the human>`, `Committer: Harbor <bot@…>`.
+
+A user with no source-control identity does **not** silently fall back to the bot.
+Harbor pushes the branch, returns a compare URL, and warns at startup and at use
+naming the property that no longer holds. Burying that in documentation is how an
+organisation on non-SCM SSO loses the central guarantee without noticing.
+
+Git identity is never inferred: `agent-only` or `attributed-user`, and a missing
+identity raises.
+
+### Connectors
+
+**Slack, Linear, GitHub** ship. Adding one is a single file implementing one
+interface, plus a line in the registry — not a separately deployed service.
+
+Routing resolves in order: an explicit target in the message → a channel or team
+mapping → operator keyword rules → *optionally* a model → **ask**. Most traffic
+costs no model call, a deployment with no model key still routes, and `unknown` is
+a first-class answer that produces a two-button picker. A classifier's confident
+wrong answer is a stranger's repository with an agent's commits on it; being asked
+is slower exactly once.
+
+Every connector declares `outboundWrites` in code — what it can write externally,
+rendered on `/connectors` and readable by a security reviewer without trusting a
+paragraph somebody remembered to update.
+
+### Cost
+
+Server-side from the first migration, not a later feature. A background agent
+platform has at least four amplification paths — scheduled automations, child
+sessions, connectors turning every issue into a session, retries — and each is a
+loop with no human in it. An uncapped one is a denial-of-wallet vulnerability that
+does not require an attacker.
+
+Spend is attributed to the **lease**, because "this lease cost $4.20" is a
+sentence somebody can act on and "session 8fda cost $4.20" is not. The daily cap
+is enforced **atomically with lease admission** — twenty concurrent claims against
+a cap permitting five admit exactly five. On breach Harbor stops admitting new
+claims and does not kill running work, because killing mid-turn wastes everything
+already spent.
+
+Money is integer micro-USD. Every priced row is stamped with a pricing version,
+and an unknown model is priced at zero and marked unpriced rather than guessed.
+
+### Everything is configurable, and that is enforced
+
+Every timeout, threshold and limit resolves `repo config → environment variable →
+default`, at call time. Each default carries its derivation in prose, visible at
+`GET /api/health/config` on a running deployment. `validateConfig()` fails fast on
+an incoherent combination — a stale-heartbeat threshold below the heartbeat
+interval kills every healthy sandbox and presents as "the product is broken".
+
+`scripts/lint-config.mjs` fails the build on a module-level tunable, and its error
+message is under test, because a rule that fires with "Error: violation" gets
+silenced and one that explains what to do gets obeyed. It found four real
+violations the day it was written.
+
+---
+
+## Coordination: the five MCP tools
+
+Harbor's original half, unchanged. Agents you run yourself — Claude Code in a
+worktree, Codex, Conductor — connect over MCP and coordinate through the same
+tables the background agents use.
+
+`list_work` · `claim` · `release` · `create_task` · `renew_claim`
+
+Five, not six. Every tool is re-read by the model on every turn, so the tool list
+is a cost paid forever; when something new is needed it becomes a parameter on an
+existing tool. The whole surface is ~980 tokens and a test asserts it cannot
+quietly grow. Background-agent capability lives on a **separate** session-scoped
+MCP endpoint injected into sandboxes, so it cannot leak into this budget.
+
+The guarantee is one Postgres partial unique index:
+
+```sql
+create unique index one_active_claim_per_task
+  on claims (task_id) where released_at is null;
+```
+
+Two agents racing both INSERT; Postgres serialises them and exactly one lands. The
+loser is not an error — it is a `claim_conflict` row, and **that number is what
+Harbor is judged by.** Every one is a duplicated day of work that did not happen.
 
 ```jsonc
+// .mcp.json at your repo root. Commit it — committing it is the point.
 {
   "mcpServers": {
     "harbor": {
@@ -97,247 +339,18 @@ database index, the expiries are swept by the real sweeper.
 }
 ```
 
-`${HARBOR_API_KEY}` is expanded from the environment at connect time, so the file
-is safe to commit — which matters, because committing it is the point.
-
-**Codex** — `~/.codex/config.toml`
-
-```toml
-[mcp_servers.harbor]
-url = "http://localhost:8788/mcp"
-bearer_token_env_var = "HARBOR_API_KEY"
-```
-
-**Conductor** — nothing to configure. Conductor defines no MCP format of its
-own; it loads whatever Claude Code and Codex load, and a repo-root `.mcp.json`
-is inherited by every workspace it spawns. Commit the block above once and all
-your parallel worktrees see Harbor — which is exactly the situation Harbor exists
-for.
-
-Then add one line to `CLAUDE.md` / `AGENTS.md`:
-
-> Before starting any task, call `harbor.list_work()` to see what is already
-> claimed, and `harbor.claim(task_id, agent_id)` before beginning work. Release the
-> claim when done, with a summary.
-
-A stdio transport is available for self-hosting: `npm run mcp:stdio` with
-`HARBOR_API_KEY` in the environment. Same tools, same code.
-
-## The five tools
-
-Five, not six. Every tool an MCP server exposes is re-read by the model on every
-turn, so the tool list is a cost paid forever. When something new is needed it
-becomes a parameter on an existing tool.
-
-### `list_work(project?, status?)`
-What exists and who holds it. Two optional filters are the entire filtering
-surface — no search, no labels, no saved views.
-
-```
-[f05b] Virtualise the task table — open — project: frontend — scope: app/components/task-table.tsx
-[8fda] Backfill missing created_at — open — project: backend — linear:ACM-482
-[5b7e] Add rate limiting to /api/search — claimed by claude-code:wt-2 (expires in 20m) — project: backend
-```
-
-### `claim(task_id, agent_id, lease_minutes?)`
-Atomic. Exactly one winner:
-
-```
-ok claimed [b59d] Fix auth token refresh bug — expires in 30m
-```
-
-The loser gets something it can act on, not just a refusal:
-
-```
-no [b59d] Fix auth token refresh bug
-held by claude-code:wt-1 — expires in 30m
-Pick different work with list_work, or retry after the lease expires.
-```
-
-### `release(task_id, agent_id, completion_summary?)`
-With a summary, the task is completed and the summary feeds the weekly digest.
-Without one, the agent is abandoning the work and the task returns to `open`.
-
-### `create_task(title, description?, project?, scope?)`
-For work an agent discovers mid-task. The project is created on demand. `scope`
-is a free-text hint about where the work lives, shown to other agents.
-
-### `renew_claim(task_id, agent_id, lease_minutes?)`
-Extend a lease for long work. Only the holder can renew.
-
-### Intent — the *why*, on every claim
-`claim` takes an `intent` (one sentence) and an optional `intent_ref` (a spec,
-thread or issue). It rides on the same line other agents already read:
-
-```
-[5b7e] Add rate limiting — claimed by codex:wt-2 (expires in 20m) — why: p99 spike from Tuesday's incident
-```
-
-Attached to the *claim* rather than the task, deliberately: one task can be
-claimed three times for three different reasons, and the reason belongs to the
-attempt. The claim history becomes a queryable record of why work happened, not
-just what changed — the question asked six months later by whoever has to decide
-whether something can be reverted.
-
-## How the guarantee actually works
-
-One Postgres partial unique index:
-
-```sql
-create unique index one_active_claim_per_task
-  on claims (task_id) where released_at is null;
-```
-
-Two agents racing both issue an INSERT; Postgres serialises them and exactly one
-lands. The loser isn't an error — it's a `claim_conflict` row, and **that number
-is what Harbor is judged by.** Every one is a duplicated day of work that didn't
-happen.
-
-Three details that took an audit to get right:
-
-- **`ON CONFLICT DO NOTHING`, not try/catch.** A unique violation aborts the
-  entire Postgres transaction, so the obvious "catch it, then read who holds it"
-  is impossible — the read is exactly the statement that cannot run.
-- **Expiry is applied lazily inside `claim()` as well as by a sweeper**, because
-  an index predicate cannot call `now()`. Correctness never depends on the
-  background job being alive; only timeliness does.
-- **`release` and `renew` take a `FOR UPDATE` row lock.** Without it, an agent
-  whose lease lapsed while it was still working could complete a task another
-  agent had legitimately taken — and its summary was recorded as shipped work in
-  the digest. That is an ordinary lapsed lease, not an attack, and it reproduced
-  in 39 of 40 runs before the fix.
-
-## Multiplayer sessions
-
-A session is a room with work in it. Three properties, and each is a correction
-of the design you'd write first.
-
-**No owner.** `sessions` has no owner column — `createdBy` is provenance and
-confers nothing. Tie a session to one person and "send it to a colleague and let
-them take it home" stops being retrofittable: permission checks, queries and UI
-all quietly assume one identity, and undoing that later is a rewrite. A test
-asserts no `owner` column exists, because the cheapest place to catch that
-regression is the schema.
-
-**Every prompt is attributed.** `author` is NOT NULL. A room with three people
-steering has to answer "who asked for this?" months later, and attribution added
-afterwards is missing for everything already said. The author comes from the
-signed-in viewer, never from the request body — a client that can name its own
-author can put words in a colleague's mouth.
-
-**Input queues rather than interleaving.** When two people type at once,
-splicing both into a running agent's context mid-turn produces an agent
-following half of each instruction. That failure is silent and reads as the model
-being stupid rather than as a race. A queue makes ordering explicit, and the
-composer stays enabled during a run so a second thought can arrive while the
-first is still being worked on.
-
-```
-#1  @rin    delivered   Start with a failing test that reproduces the drop.
-#2  @maya   queued      Also check the retry cap while you're in there.
-#3  @rin    queued      Don't touch the migration in the same PR.
-```
-
-Sessions are link-shareable at `/s/<key>` — 110 bits, and the alphabet drops
-i/l/o/u so a key survives being read aloud or typed from a screenshot. Opening
-the link is joining.
-
-> Sequence numbers come from a counter on the session row bumped with
-> `UPDATE ... RETURNING`, not `max(seq) + 1`. The subquery version races: under
-> READ COMMITTED two simultaneous callers can't see each other's uncommitted
-> rows, both read the same maximum, and the unique index drops one person's
-> message — in exactly the situation multiplayer exists to support. The test for
-> this caught the bug in our own first implementation.
-
-## Live presence
-
-The dashboard shows who is working right now, updating in well under a second —
-not a status grid that refreshes on a timer.
-
-**Presence is a byproduct of the five tools, not a sixth one.** Every call an
-agent already makes touches its presence row, so an agent cannot forget to
-report, never opts in, and spends no tokens being visible. A `heartbeat` tool was
-the obvious design and would have made every agent pay, on every turn, for the
-dashboard's benefit. Liveness is computed at read time from `last_seen_at` rather
-than stored as an online flag — a flag needs somebody to clear it, and the agent
-that crashed is exactly the one that will not.
-
-The transport is Postgres `LISTEN/NOTIFY` over Server-Sent Events. Not Supabase
-Realtime, not a socket service: it reuses the one piece of infrastructure Harbor
-already requires, so there is nothing extra to deploy or pay for, and it works
-identically on hosted Postgres.
-
-## Launching agents
-
-Harbor can start an agent, not just wait for one to connect. `/runs` takes a
-prompt, spawns `claude -p` or `codex exec` with Harbor's own MCP endpoint injected,
-and streams the output back — so an agent Harbor launched claims, releases and
-appears in presence like any other.
-
-> **This is not a sandbox, and the boundary is the point.** The child process gets
-> the server's user, filesystem and network. That is reasonable on your own
-> machine against your own repo, and unsafe anywhere multi-tenant. It is off
-> unless you set `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR`, the runtime must
-> be one of two known binaries, and the prompt is passed as an argv element and
-> never through a shell. Real multi-tenant execution needs an isolation boundary
-> bought from Modal or Daytona — shipping `spawn()` and calling it a platform is
-> how you ship an RCE with a dashboard on top.
+---
 
 ## Dashboard
 
-`/` live activity — tasks, holders, lease countdowns, collisions prevented.
-`/sessions` and `/s/<key>` multiplayer rooms. `/runs` launch and watch agents. `/digest` this week and history. `/connectors` what's connected and precisely
-what it may write. `/settings` API keys and ready-to-paste agent config.
+`/` live activity · `/sessions` and `/s/<key>` rooms · `/repos` `/environments`
+`/secrets` · `/automations` · `/connectors` · `/usage` · `/digest` · `/settings`
 
-Sign-in is GitHub OAuth, gated on `HARBOR_ALLOWED_GITHUB_LOGINS`. An empty
-allowlist refuses everybody rather than admitting everybody.
+The headline metric is Ramp's, and it is the right one: **sessions that resulted
+in a merged pull request.** Merged PRs are the only proof the agent produced
+value.
 
-When `GITHUB_CLIENT_ID` is unset **and** `NODE_ENV` is not production, the
-dashboard falls back to the first org and says so in a banner on every page —
-otherwise `docker compose up && npm run dev` would show a login wall before
-there is anything to log into. The bypass refuses to engage in production
-regardless.
-
-## Connectors
-
-**Supported:** GitHub, Linear. **Planned** (interface ready, not built): Jira,
-Asana, Notion, Slack digest delivery.
-
-Inbound sync only. External issues appear as Harbor tasks; agents claim and
-complete them in Harbor. Full two-way state sync is an explicit non-goal.
-
-> **Not yet wired.** `syncOutbound` for Linear — posting a completion comment
-> back — is implemented but nothing calls it, and it would need `sourceRef` to
-> store the issue UUID rather than the `ACM-482` identifier. **Harbor currently
-> writes nothing to any external system.**
-
-See [CONNECTORS.md](./CONNECTORS.md) for exactly what Harbor reads and which scopes
-it requests. It is written for a security reviewer.
-
-## Weekly digest
-
-`POST /api/digest/generate`, or the button on `/digest`. Reads the last seven
-days of `completed` and `claim_conflict` events, sends a compact summary to
-Claude, stores the prose.
-
-Requires `ANTHROPIC_API_KEY`. Without it the endpoint fails with a message
-naming the variable rather than returning a plausible-looking fake — nobody
-re-reads a summary that looks fine. `HARBOR_DEMO_MODE=1` assembles one from the
-event log instead, always prefixed `[mock digest — no model was called]`. An
-empty week short-circuits without calling the model at all.
-
-## Non-goals
-
-No knowledge graph, vector memory, trust ledger, or autonomy promotion. No
-sandboxed multi-tenant execution — see the boundary above.
-
-**No semantic conflict detection**, and that is a decision rather than a backlog
-item. Harbor prevents two agents taking the same *task*; it does not detect two
-agents doing the same *work* under different titles. Benchmarks on adjacent
-problems top out around 55–74% recall, so a naive version would either miss a
-third of real conflicts or spam false positives — and an alert agents learn to
-ignore is worse than no alert. If it lands it will be a non-blocking "possible
-overlap" hint, never a gate. No SSO/SAML/RBAC. No bidirectional sync. No billing.
+---
 
 ## Tests
 
@@ -346,32 +359,35 @@ docker compose up -d
 DATABASE_URL=postgres://harbor:harbor@localhost:5433/harbor npx vitest run
 ```
 
-**72 tests against real Postgres, not mocks.** The guarantee is a database index
-and how the code reacts to it; a mock would happily pass a read-then-write check
-that races.
+**579 tests against real Postgres, not mocks**, because the guarantees are
+database indexes and how code reacts to them — a mock happily passes a
+read-then-write check that races.
 
-- **23 coordination** — ten agents contending for one task, plus 30 interleaved
-  rounds asserting no state exists where one agent holds a task another has
-  marked completed.
-- **14 protocol conformance** — driven by `@modelcontextprotocol/sdk`'s own
-  `Client` over `StreamableHTTPClientTransport`, the client Claude Code and Codex
-  actually use, against a server on an ephemeral port. Hand-written JSON-RPC over
-  curl only proves the server answers the requests you thought to write.
-- **20 session** — no-owner schema assertion, mandatory attribution enforced at
-  the database, twelve clients submitting at once with nothing dropped, and
-  `FOR UPDATE SKIP LOCKED` so two agents on one session never take the same
-  prompt.
-- **9 digest** and **6 connector** — signature verification, replay, tampering.
+Pure modules get zero-mock suites at exact boundary values: 93 tests on sandbox
+decisions alone. Provider tests run against real Docker and **skip loudly** when
+it is absent rather than silently passing.
 
-## Security
+---
 
-Found by a five-agent audit and fixed: lost updates in `release`/`renew_claim`,
-a cross-tenant write through `renew_claim`, an empty `AUTH_SECRET` accepted as
-an HMAC key, unrestricted first-time sign-in, and a missing OAuth `state`.
+## Non-goals
 
-Known and open: webhook org resolution selects a connector row by type alone, so
-Harbor is effectively single-tenant per connector until an external-account column
-lands. Do not run one instance for two orgs sharing a connector type.
+**Not multi-tenant across untrusted organisations.** The trust boundary is the
+org. [docs/SECURITY.md](./docs/SECURITY.md) states the *consequences* rather than
+the property — that anyone who can start a session on a repository can read that
+repository's secrets from the agent's environment, and that `.harbor/setup.sh` is
+arbitrary code execution granted by merge access.
+
+**No bidirectional issue-tracker sync.** Two state machines mean webhook ordering
+decides which system wins.
+
+**No semantic conflict detection as a gate.** Harbor prevents two agents taking
+the same *task*; detecting two agents doing the same *work* under different titles
+tops out at 55–74% recall on adjacent benchmarks, so a naive version either misses
+a third of real conflicts or spams false positives — and an alert agents learn to
+ignore is worse than no alert. Overlap surfaces as a non-blocking hint on push,
+never as a block.
+
+**No SSO/SAML/RBAC. No billing.**
 
 ## Licence
 

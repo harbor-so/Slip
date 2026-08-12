@@ -17,11 +17,27 @@ import {
 	handleLinearWebhook,
 	verifyLinearWebhook,
 } from "./linear.js";
+import type { ConnectorContext } from "./types.js";
 
 let orgId: string;
 
+/**
+ * The context a handler now receives instead of a bare org id.
+ *
+ * Built here rather than inline at each call site so that adding a field to
+ * `ConnectorContext` is one edit in the tests rather than seven — the same
+ * reason the production signature stopped being positional parameters.
+ */
+const ctx = (config: Record<string, unknown> = {}): ConnectorContext => ({
+	orgId,
+	connectorId: "00000000-0000-0000-0000-000000000000",
+	externalAccountId: "test-account",
+	config,
+	traceId: "test-trace",
+});
+
 beforeEach(async () => {
-	await sql`truncate table session_prompts, session_participants, sessions, runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
+	await sql`truncate table cost_events, circuit_breakers, automation_runs, automations, artifacts, session_events, sandboxes, session_repos, secrets, user_scm_tokens, environment_repos, environments, repos, activity, session_prompts, session_participants, sessions, runs, agent_presence, events, claims, tasks, projects, api_keys, digests, connectors, users, orgs cascade`;
 	const [org] = await db.insert(orgs).values({ name: "Connector Test Org" }).returning();
 	if (!org) throw new Error("Test org was not created.");
 	orgId = org.id;
@@ -61,7 +77,7 @@ describe("GitHub webhooks", () => {
 	};
 
 	it("creates one sourced task when an issue is opened", async () => {
-		const result = await handleGitHubWebhook(opened, orgId);
+		const result = await handleGitHubWebhook(opened, ctx());
 		expect(result.action).toBe("created");
 		const rows = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
 		expect(rows).toHaveLength(1);
@@ -73,15 +89,15 @@ describe("GitHub webhooks", () => {
 	});
 
 	it("updates rather than duplicates a redelivered issue", async () => {
-		await handleGitHubWebhook(opened, orgId);
-		const second = await handleGitHubWebhook(opened, orgId);
+		await handleGitHubWebhook(opened, ctx());
+		const second = await handleGitHubWebhook(opened, ctx());
 		expect(second.action).toBe("updated");
 		expect(await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) })).toHaveLength(1);
 	});
 
 	it("marks a closed issue completed", async () => {
-		await handleGitHubWebhook(opened, orgId);
-		await handleGitHubWebhook({ ...opened, action: "closed" }, orgId);
+		await handleGitHubWebhook(opened, ctx());
+		await handleGitHubWebhook({ ...opened, action: "closed" }, ctx());
 		const [task] = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
 		expect(task?.status).toBe("completed");
 	});
@@ -99,7 +115,7 @@ describe("Linear webhooks", () => {
 				state: { type: "started" },
 			},
 		};
-		const created = await handleLinearWebhook(base, orgId);
+		const created = await handleLinearWebhook(base, ctx());
 		if (!created.taskId) throw new Error("Linear task was not created.");
 		await claim(orgId, created.taskId, "codex:connector-test");
 
@@ -107,7 +123,7 @@ describe("Linear webhooks", () => {
 			...base,
 			action: "update",
 			data: { ...base.data, state: { type: "completed" } },
-		}, orgId);
+		}, ctx());
 		const task = await db.query.tasks.findFirst({ where: eq(tasks.id, created.taskId) });
 		expect(task?.status).toBe("claimed");
 	});

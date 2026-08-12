@@ -1,14 +1,30 @@
 /**
- * Registry lookup is nullable because persisted connector rows can outlive an
- * implementation; stale configuration must not turn webhook ingest into a 500.
+ * Adding a connector is one file and one line here.
+ *
+ * That is the entire extensibility story, and it is deliberate. The competing
+ * implementation ships Slack, GitHub and Linear as three separately deployed
+ * Cloudflare Workers, so "we also use Jira" means writing a service, wiring
+ * Terraform for it, and deploying it. Here it means implementing the `Connector`
+ * interface and adding a line below, and the result runs inside the app the
+ * operator already has running.
+ *
+ * Lookup is nullable because persisted connector rows outlive implementations: a
+ * row for a connector that has been removed from a build must not turn webhook
+ * ingest into a 500 for every other connector sharing the route.
  */
 
 import { githubConnector } from "./github.js";
 import { linearConnector } from "./linear.js";
+import { slackConnector } from "./slack.js";
 import type { Connector } from "./types.js";
 
+const CONNECTORS: Connector[] = [githubConnector, linearConnector, slackConnector];
+
 export function connectorFor(type: string): Connector | null {
-	if (type === "github") return githubConnector;
-	if (type === "linear") return linearConnector;
-	return null;
+	return CONNECTORS.find((connector) => connector.type === type) ?? null;
+}
+
+/** Every connector, for the `/connectors` page and for generating CONNECTORS.md. */
+export function allConnectors(): readonly Connector[] {
+	return CONNECTORS;
 }

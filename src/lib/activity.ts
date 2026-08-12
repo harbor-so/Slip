@@ -18,23 +18,22 @@
  */
 
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { activity, claims, tasks } from "../db/schema.js";
 import type { NormalizedActivity } from "../activity/types.js";
 import { notifyChange, touchPresence } from "./work.js";
 
-/**
- * A single row's payload can never grow the table into a log pipeline. Normalizers
- * already clip individual strings; this is the backstop for a pathological payload
- * that is wide rather than deep — many small fields — which no per-field cap sees.
- */
-const MAX_PAYLOAD_CHARS = 16_000;
-
 function boundPayload(payload: Record<string, unknown> | undefined): Record<string, unknown> | null {
 	if (!payload) return null;
+	// A single row's payload can never grow the table into a log pipeline.
+	// Normalizers already clip individual strings; this is the backstop for a
+	// pathological payload that is wide rather than deep — many small fields —
+	// which no per-field cap sees.
+	const cap = setting("maxActivityPayloadChars");
 	const serialized = JSON.stringify(payload);
-	if (serialized.length <= MAX_PAYLOAD_CHARS) return payload;
-	return { truncated: true, preview: `${serialized.slice(0, MAX_PAYLOAD_CHARS)}…` };
+	if (serialized.length <= cap) return payload;
+	return { truncated: true, preview: `${serialized.slice(0, cap)}…` };
 }
 
 /** A short human label for presence, e.g. "tool_call:Bash" or "session_start". */
