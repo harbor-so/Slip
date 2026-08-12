@@ -34,7 +34,7 @@
  *     underneath what the agent said a second ago.
  */
 
-import { and, asc, desc, eq, inArray, lt, sql as raw } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
 import {
 	ARTIFACT_KINDS,
@@ -1024,4 +1024,47 @@ export async function compactSession(orgId: string, sessionId: string): Promise<
 	// herd of snapshot reads.
 	if (result.compacted > 0) await notifyChange(orgId, "session_compacted");
 	return result;
+}
+
+/**
+ * The driver the compaction loop calls: find sessions over the retention count
+ * and compact each.
+ *
+ * The candidate filter is `next_event_seq`, which over-approximates — it counts
+ * events that were themselves already compacted away — but it is one indexed
+ * column on the row the loop was going to read anyway, and `compactSession`
+ * recounts precisely inside its own transaction. An exact candidate query would
+ * be a `count(*)` per session per pass, which is the scan this bound exists to
+ * avoid. A session that slips through does one cheap no-op compaction.
+ *
+ * One session's failure never stops the batch, for the same reason as
+ * `tickSessions`: the alternative symptom is "compaction stopped everywhere"
+ * caused by one wedged room.
+ */
+export async function compactEligibleSessions(now = new Date()): Promise<{
+	examined: number;
+	compacted: number;
+}> {
+	void now;
+	const retention = setting("eventRetentionCount");
+	// harbor-lint-allow-constant: a batch size, not a tunable — same reasoning as
+	// sessionsPerTick in session-tick.ts. The remainder is picked up next pass.
+	const BATCH = 20;
+
+	const candidates = await db
+		.select({ id: sessions.id, orgId: sessions.orgId })
+		.from(sessions)
+		.where(gt(sessions.nextEventSeq, retention + 1))
+		.limit(BATCH);
+
+	let compacted = 0;
+	for (const candidate of candidates) {
+		try {
+			const result = await compactSession(candidate.orgId, candidate.id);
+			compacted += result.compacted;
+		} catch (error) {
+			console.error(`[compaction] session ${candidate.id} failed:`, error);
+		}
+	}
+	return { examined: candidates.length, compacted };
 }
