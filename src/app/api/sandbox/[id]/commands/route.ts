@@ -1,0 +1,264 @@
+import { and, asc, eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import postgres from "postgres";
+import { setting } from "../../../../../config.js";
+import type { BridgeCommand } from "../../../../../contracts/index.js";
+import { db } from "../../../../../db/index.js";
+import { sandboxes, sessionPrompts, sessions } from "../../../../../db/schema.js";
+import { isReconnectBlockedStatus } from "../../../../../sandbox/decisions.js";
+import { validateFence } from "../../../../../sandbox/manager.js";
+import {
+	authenticateSandbox,
+	describeFenceRefusal,
+	fencingTokenFrom,
+} from "../../../../../lib/session-runner.js";
+
+/**
+ * The downlink: four verbs, delivered to one sandbox over Server-Sent Events.
+ *
+ * The asymmetry with the uplink is the point. Thousands of events go up and a
+ * handful of commands come down, so a duplex channel would buy a protocol upgrade
+ * — the thing proxies mangle — in exchange for traffic that fits comfortably in
+ * one direction of SSE. This is the same reasoning as `src/app/api/stream/route.ts`
+ * and it reuses the same mechanism: Postgres LISTEN/NOTIFY on a dedicated
+ * connection, because it is infrastructure Harbor already requires.
+ *
+ * **Commands are derived from persisted state, never from an in-memory queue.**
+ * There is no `bridge_commands` table and there deliberately is not one yet: a
+ * command queue that lives in a process dies with that process, and a bridge that
+ * reconnects to a different replica would silently never receive the prompt that
+ * was handed to it. Instead the runner marks a prompt `delivered` in Postgres and
+ * every replica derives the same command from the same row. The cost is that a
+ * reconnecting bridge may be sent a prompt it already has, which is why
+ * `BridgeCommand.prompt.id` exists: **the bridge deduplicates by prompt id**, and
+ * a redelivered command is a no-op rather than a second turn.
+ *
+ * Fenced like the uplink. A superseded box must not be handed a prompt: it would
+ * work on it in good faith, push a branch, and produce exactly the two-writer
+ * outcome the fence exists to prevent.
+ */
+export const dynamic = "force-dynamic";
+
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
+	const { id } = await params;
+
+	const auth = await authenticateSandbox(id, request.headers);
+	if (!auth.ok) {
+		return NextResponse.json({ error: auth.message, reason: auth.reason }, { status: 401 });
+	}
+
+	const header = fencingTokenFrom(request.headers);
+	if (!header.ok) {
+		return NextResponse.json({ error: header.message, reason: header.reason }, { status: 409 });
+	}
+	const fence = await validateFence(auth.sandbox.id, header.token);
+	if (!fence.valid) {
+		return NextResponse.json(
+			{ error: describeFenceRefusal(fence), reason: fence.reason },
+			{ status: 409 },
+		);
+	}
+
+	const { orgId, sessionId } = auth.sandbox;
+	const sandboxId = auth.sandbox.id;
+
+	const url = process.env.DATABASE_URL ?? "postgres://harbor:harbor@localhost:5433/harbor";
+	// A dedicated connection, because LISTEN occupies one for as long as it is
+	// listening; taking one from the request pool would starve it one sandbox at a
+	// time until the whole control plane stopped answering.
+	const listener = postgres(url, { max: 1 });
+	const encoder = new TextEncoder();
+
+	const stream = new ReadableStream({
+		async start(controller) {
+			let closed = false;
+
+			const send = (event: string, data: unknown) => {
+				if (closed) return;
+				try {
+					controller.enqueue(
+						encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+					);
+				} catch {
+					// The bridge went away between the notify and the write.
+				}
+			};
+
+			/** Prompt ids already sent on THIS connection. Redelivery across a reconnect
+			 * is expected and handled by the bridge's own dedupe; resending on the same
+			 * open socket every time anything in the org changes is just noise. */
+			const sent = new Set<string>();
+			let shutdownSent = false;
+			let pauseSent: string | null = null;
+
+			const finish = () => {
+				if (closed) return;
+				closed = true;
+				try {
+					controller.close();
+				} catch {
+					/* already closed */
+				}
+			};
+
+			/**
+			 * Read the world and emit whatever it implies.
+			 *
+			 * Serialised behind `draining`/`dirty` rather than run concurrently. Two
+			 * overlapping drains both read the same `delivered` prompt before either
+			 * records it in `sent`, and the bridge receives the same command twice on
+			 * one socket — harmless, since it dedupes, but it makes the stream's own
+			 * logs a poor witness to what was actually sent.
+			 */
+			let draining = false;
+			let dirty = false;
+
+			const drain = async () => {
+				if (closed) return;
+				if (draining) {
+					dirty = true;
+					return;
+				}
+				draining = true;
+				try {
+					do {
+						dirty = false;
+
+						const [box] = await db
+							.select({ status: sandboxes.status })
+							.from(sandboxes)
+							.where(eq(sandboxes.id, sandboxId))
+							.limit(1);
+
+						// LIFECYCLE STATE IS AUTHORITATIVE OVER TRANSPORT. A box Harbor has
+						// already reaped is told to shut down even though its socket is
+						// perfectly healthy — the open socket is precisely what makes a
+						// zombie dangerous, so it cannot also be the thing that proves it
+						// is alive. A vanished row is treated the same way: we cannot
+						// establish that this box is still authorised, and authority fails
+						// closed.
+						if (!box || isReconnectBlockedStatus(box.status)) {
+							if (!shutdownSent) {
+								shutdownSent = true;
+								const command: BridgeCommand = { type: "shutdown", session_id: sessionId };
+								send("command", command);
+							}
+							finish();
+							return;
+						}
+
+						const [session] = await db
+							.select({ pausedReason: sessions.pausedReason })
+							.from(sessions)
+							.where(and(eq(sessions.id, sessionId), eq(sessions.orgId, orgId)))
+							.limit(1);
+
+						// `stop` interrupts the turn and leaves the box up, which is what a
+						// budget pause wants: killing the container throws away a warm
+						// workspace the moment the cap resets. `shutdown` above is the one
+						// that ends the box.
+						if (session?.pausedReason && pauseSent !== session.pausedReason) {
+							pauseSent = session.pausedReason;
+							const command: BridgeCommand = { type: "stop", session_id: sessionId };
+							send("command", command);
+						}
+						if (!session?.pausedReason) pauseSent = null;
+
+						const delivered = await db
+							.select()
+							.from(sessionPrompts)
+							.where(
+								and(
+									eq(sessionPrompts.sessionId, sessionId),
+									eq(sessionPrompts.orgId, orgId),
+									eq(sessionPrompts.status, "delivered"),
+								),
+							)
+							.orderBy(asc(sessionPrompts.deliveredAt), asc(sessionPrompts.seq))
+							.limit(setting("maxQueueDepth"));
+
+						for (const prompt of delivered) {
+							if (sent.has(prompt.id)) continue;
+							sent.add(prompt.id);
+							const command: BridgeCommand = {
+								type: "prompt",
+								session_id: sessionId,
+								prompt: {
+									id: prompt.id,
+									seq: prompt.seq,
+									body: prompt.body,
+									// Carried all the way down so the bridge can set `git config
+									// user.*` before the turn and the commit is authored by the
+									// person who asked, not by a bot. A multiplayer session
+									// otherwise produces a wall of identical bot commits and the
+									// history stops answering "who wanted this".
+									author: prompt.author,
+									// There is no `author_email` column on `session_prompts`, so
+									// this is honestly null rather than guessed. See the report:
+									// adding it is the one-column change that makes attribution
+									// complete.
+									author_email: null,
+								},
+							};
+							send("command", command);
+						}
+					} while (dirty && !closed);
+				} catch (error) {
+					// A failed read is not a reason to drop the bridge's only downlink. The
+					// next NOTIFY re-runs this, and the keep-alive holds the socket open in
+					// the meantime.
+					console.error("[commands] drain failed:", error);
+				} finally {
+					draining = false;
+				}
+			};
+
+			// Subscribe BEFORE the first read, the same ordering the client stream
+			// argues for at length: a command that becomes true between the read and
+			// the subscription would otherwise wait for the next unrelated NOTIFY,
+			// which on a quiet session is indefinitely.
+			const subscription = await listener.listen("harbor_changes", (payload) => {
+				try {
+					const change = JSON.parse(payload) as { orgId?: string };
+					if (change.orgId === orgId) void drain();
+				} catch {
+					// A malformed payload is not worth killing the stream over.
+				}
+			});
+
+			send("ready", { sandbox_id: sandboxId, session_id: sessionId, fencing_token: fence.token });
+			await drain();
+
+			// Proxies and load balancers close a silent connection. The interval is the
+			// bridge's own heartbeat period rather than an invented number, so the box
+			// judges this socket dead on exactly the clock it already runs — and
+			// `sandboxStaleHeartbeatMs`, validated at startup to be at least twice this,
+			// is the threshold on both ends.
+			const keepAlive = setInterval(() => {
+				if (closed) return;
+				try {
+					controller.enqueue(encoder.encode(": keep-alive\n\n"));
+				} catch {
+					/* closed */
+				}
+			}, setting("sandboxHeartbeatIntervalMs"));
+
+			request.signal.addEventListener("abort", () => {
+				clearInterval(keepAlive);
+				void subscription.unlisten().catch(() => {});
+				void listener.end({ timeout: 1 }).catch(() => {});
+				finish();
+			});
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			"content-type": "text/event-stream",
+			"cache-control": "no-cache, no-transform",
+			connection: "keep-alive",
+			// Nginx buffers SSE into uselessness without this.
+			"x-accel-buffering": "no",
+		},
+	});
+}
