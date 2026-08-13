@@ -140,6 +140,15 @@ Authorization: Bearer \${HARBOR_API_KEY}
 					Codex under the hood. Commit that tool&rsquo;s config above and every Conductor workspace
 					inherits it; the <code>conductor</code> runtime endpoint parses either dialect.
 				</p>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>Devin:</strong> a cloud agent with no hooks to fire, so it is <em>pulled</em>, not
+					pushed. Drop a token — a <code>devin</code> connector with <code>config.apiToken</code>, or{" "}
+					<code>DEVIN_API_TOKEN</code> — then register a session with{" "}
+					<code>POST {appUrl}/api/devin/sessions</code> (same <code>Bearer</code> key), passing{" "}
+					<code>{`{ devinSessionId }`}</code> to observe an existing session or{" "}
+					<code>{`{ prompt }`}</code> to start and track a new one. A background loop then polls it
+					and its activity — and any pull request it opens — shows up like every other runtime.
+				</p>
 			</section>
 
 		</div>
