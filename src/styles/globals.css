@@ -144,26 +144,24 @@
 	--color-border: var(--border);
 	--color-ring: var(--ring);
 
-	/* -- tandem-native token names ---------------------------------------
-	   The ported component set (web/ui/*) is tandem's markup verbatim, which
-	   references its own token vocabulary. These map those names onto Harbor's
-	   orange-on-black palette, so tandem's HTML renders in Harbor's colours.
-	   `accent` is Harbor's warm orange (its `primary`); `hold` stays the one
-	   reserved alarm. */
-	--color-bg: var(--background);
-	--color-surface: var(--card);
-	--color-raised: var(--hover-muted);
-	--color-line: var(--border);
-	--color-line-strong: oklch(1 0 0 / 0.22);
-	--color-text: var(--foreground);
-	--color-muted: var(--muted-foreground);
-	--color-faint: oklch(0.6 0.02 265);
-	--color-accent: var(--primary);
-	--color-accent-quiet: oklch(0.34 0.06 40);
-	--color-good: var(--success);
-	--color-bad: var(--destructive);
-	--color-hold: oklch(0.78 0.15 62);
-	--color-hold-quiet: oklch(0.34 0.07 62);
+	/* -- tandem-native palette (verbatim from the tandem shell) -----------
+	   The ported component set (web/ui/*) and the /demo screen use tandem's
+	   own token vocabulary. These carry tandem's exact blue-on-near-black
+	   values so those surfaces read as tandem, one-for-one. */
+	--color-bg: oklch(17% 0.012 265);
+	--color-surface: oklch(21% 0.014 265);
+	--color-raised: oklch(25% 0.016 265);
+	--color-line: oklch(31% 0.016 265);
+	--color-line-strong: oklch(40% 0.02 265);
+	--color-text: oklch(96% 0.006 265);
+	--color-muted: oklch(72% 0.014 265);
+	--color-faint: oklch(56% 0.016 265);
+	--color-accent: oklch(72% 0.15 255);
+	--color-accent-quiet: oklch(30% 0.06 255);
+	--color-good: oklch(74% 0.15 152);
+	--color-bad: oklch(69% 0.19 22);
+	--color-hold: oklch(75% 0.16 62);
+	--color-hold-quiet: oklch(30% 0.07 62);
 	--radius-panel: 0.75rem;
 
 	--radius-lg: var(--radius);
@@ -173,18 +171,49 @@
 }
 
 @layer base {
+	:root {
+		color-scheme: dark;
+	}
 	* {
-		border-color: var(--border);
+		border-color: var(--color-line);
 	}
 	body {
-		background-color: var(--background);
-		color: var(--foreground);
+		background-color: var(--color-bg);
+		color: var(--color-text);
 		font-family: var(--font-sans);
 		-webkit-font-smoothing: antialiased;
+		text-rendering: optimizeLegibility;
 	}
+	/* The transcript scrolls for hours; a scrollbar that only appears on hover
+	   makes people lose their place, so it is always drawn, just quietly. */
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-line-strong) transparent;
+	}
+	:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+}
+
+@layer utilities {
 	/* Agent ids, task ids and countdowns are all read down a column; tabular
 	   figures stop them jittering as they tick. */
 	.nums {
 		font-variant-numeric: tabular-nums;
+	}
+	/* The subtle fade tandem uses for transcript rows and cards as they land. */
+	@keyframes tandem-fade-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+	.animate-in {
+		animation: tandem-fade-in 0.16s ease-out both;
 	}
 }

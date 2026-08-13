@@ -32,7 +32,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
 	return (
 		<html className="dark" lang="en" suppressHydrationWarning>
-			<body className="h-dvh bg-background text-foreground">
+			<body className="h-dvh bg-bg text-text">
 				<div className="flex h-dvh">
 					<Sidebar
 						orgName={session ? session.orgName : null}

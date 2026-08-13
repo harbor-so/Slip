@@ -268,7 +268,7 @@ function TranscriptRow({ row }: { row: Row }) {
 
 function Line({ at, children }: { at: string; children: React.ReactNode }) {
 	return (
-		<div className="flex gap-3 px-1 py-1">
+		<div className="animate-in flex gap-3 px-1 py-1">
 			<span className="nums w-14 shrink-0 pt-0.5 text-right text-[10px] text-faint/70">{at}</span>
 			<div className="min-w-0 flex-1">{children}</div>
 		</div>
