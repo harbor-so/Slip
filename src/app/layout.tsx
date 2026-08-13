@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { currentSession } from "../lib/session.js";
 import { listConnectors } from "../lib/dashboard.js";
 import { Sidebar, type ConnectorStatus } from "@web/shell/Sidebar.js";
+import { GradientMesh } from "@web/shell/GradientMesh.js";
 import "../styles/globals.css";
 
 export const metadata: Metadata = {
@@ -33,7 +34,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 	return (
 		<html className="dark" lang="en" suppressHydrationWarning>
 			<body className="h-dvh bg-bg text-text">
-				<div className="flex h-dvh">
+				<GradientMesh />
+				<div className="relative z-10 flex h-dvh">
 					<Sidebar
 						orgName={session ? session.orgName : null}
 						devMode={Boolean(session?.unauthenticated)}

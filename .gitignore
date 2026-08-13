@@ -5,3 +5,6 @@ dist/
 *.log
 .DS_Store
 *.tsbuildinfo
+
+# Commercial font (Pangram Pangram) — kept local, not redistributed in a public repo
+public/fonts/*.otf
