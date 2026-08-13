@@ -157,15 +157,16 @@ export function Sidebar({
 			</div>
 
 			<div className="border-t border-line p-3">
-				<div className="flex items-center gap-2">
-					<span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent/15 text-[11px] font-semibold text-accent">
-						{(orgName ?? "?").slice(0, 1).toUpperCase()}
+				<div className="flex items-center gap-2 rounded-xl px-1 py-1">
+					<span
+						className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-medium text-white"
+						style={{ backgroundColor: "#8b5cf6" }}
+					>
+						PS
 					</span>
 					<div className="min-w-0">
-						<p className="truncate text-xs text-text">{orgName ?? "no org"}</p>
-						<p className="truncate text-[10px] text-faint">
-							{devMode ? "dev mode — no sign-in" : "signed in"}
-						</p>
+						<p className="truncate text-sm font-medium text-text">Priya Shah</p>
+						<p className="truncate text-xs text-muted">Account Executive</p>
 					</div>
 				</div>
 			</div>
