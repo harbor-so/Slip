@@ -140,6 +140,55 @@ export function startBackgroundLoops(
 	};
 }
 
+/** What one loop did on one tick. `error` is a message, never an Error — this crosses HTTP. */
+export interface LoopTickResult {
+	name: LoopName;
+	ok: boolean;
+	result?: unknown;
+	error?: string;
+}
+
+/**
+ * Run every registered loop exactly once, for a deployment that cannot hold a timer.
+ *
+ * `startBackgroundLoops` assumes a process that stays up. The Next.js dashboard is
+ * serverless-shaped and deliberately starts nothing, so on a dashboard-only
+ * deployment no sweep has ever run: no inactivity reaping, no deadline
+ * enforcement, no compaction, and — the one that breaks the product's central
+ * promise — no expired leases. `claim` and `listWork` now sweep their own org in
+ * the request path, which covers the org somebody is actively using; this covers
+ * the rest, driven by whatever cron the platform already has.
+ *
+ * Reads the same registry as the timer path, so a loop cannot be scheduled in one
+ * and forgotten in the other — which is the failure `loops.ts` exists to prevent,
+ * and it would be a poor joke to reintroduce it here.
+ *
+ * Every loop runs even if an earlier one throws, and failures come back per loop
+ * rather than as one 500. A compaction bug must not stop leases being swept, and
+ * an operator staring at a cron log needs to know *which* sweep is failing.
+ */
+export async function runLoopsOnce(now: Date = new Date()): Promise<LoopTickResult[]> {
+	const specs = backgroundLoops();
+	const results: LoopTickResult[] = [];
+
+	// Sequential, not `Promise.all`. These share one Postgres pool and several take
+	// advisory locks; running six at once on a small deployment turns a maintenance
+	// tick into a connection-pool spike in the middle of the request path.
+	for (const spec of specs) {
+		try {
+			results.push({ name: spec.name, ok: true, result: await spec.run(now) });
+		} catch (error) {
+			results.push({
+				name: spec.name,
+				ok: false,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	return results;
+}
+
 /**
  * Everything a serving process must do once at boot, before taking traffic.
  *

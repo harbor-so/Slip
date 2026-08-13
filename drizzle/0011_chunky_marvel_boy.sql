@@ -1,0 +1,1 @@
+ALTER TABLE "artifacts" ADD COLUMN "merged_at" timestamp with time zone;

@@ -241,6 +241,110 @@ describe("sweepExpiredClaims", () => {
 	});
 });
 
+/**
+ * The deployment that runs no loops.
+ *
+ * `startBackgroundLoops` belongs to the MCP server process; the Next.js app
+ * deliberately starts nothing, because it is serverless-shaped and a timer there
+ * is a promise the runtime cannot keep. So on a dashboard-only deployment the
+ * periodic sweep never runs at all, and before these paths swept for themselves a
+ * crashed agent held its scope until somebody happened to contend for that exact
+ * task. That is the lease primitive not working, and it presents to a human as
+ * "why is this ticket still claimed by an agent that died on Tuesday".
+ *
+ * Every test here calls the read paths WITHOUT ever calling `sweepExpiredClaims`,
+ * because that is the deployment being modelled. A test that swept first would
+ * pass against the bug.
+ */
+describe("lapsed leases converge with no background loop running", () => {
+	async function lapse(agentId: string, task = taskId) {
+		await claimT(orgId, task, agentId, 1);
+		await db
+			.update(claims)
+			.set({ expiresAt: new Date(Date.now() - 60_000) })
+			.where(and(eq(claims.taskId, task), isNull(claims.releasedAt)));
+	}
+
+	it("does not report a lapsed lease as held", async () => {
+		await lapse("dead-agent");
+
+		const [row] = await listWork(orgId);
+		expect(row!.claim).toBeNull();
+	});
+
+	it("releases the row and reopens the task, so every other reader converges too", async () => {
+		await lapse("dead-agent");
+
+		await listWork(orgId);
+
+		// The point of sweeping rather than only filtering the read: the dashboard,
+		// the timeline and the next `claim` all see it, not just this caller.
+		const active = await db.query.claims.findMany({
+			where: and(eq(claims.taskId, taskId), isNull(claims.releasedAt)),
+		});
+		expect(active).toHaveLength(0);
+		expect((await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))!.status).toBe("open");
+	});
+
+	it("writes exactly one claim_expired event however many times it is read", async () => {
+		await lapse("dead-agent");
+
+		await Promise.all([listWork(orgId), listWork(orgId), listWork(orgId)]);
+
+		// Three concurrent readers, one release. The UPDATE's own predicate is the
+		// compare-and-set: whichever transaction lands first flips `released_at`, and
+		// the others match zero rows and write nothing. A second event here would
+		// mean the timeline gains a duplicate every time anyone opens the dashboard.
+		const expired = await db.query.events.findMany({
+			where: and(eq(events.orgId, orgId), eq(events.type, "claim_expired")),
+		});
+		expect(expired).toHaveLength(1);
+	});
+
+	it("frees the scope for the next agent without a sweep in between", async () => {
+		await lapse("dead-agent");
+
+		const taken = await claimT(orgId, taskId, "live-agent");
+		expect(taken.ok).toBe(true);
+	});
+
+	it("distinguishes a lease released on contention from one merely swept", async () => {
+		await lapse("dead-agent");
+
+		await claimT(orgId, taskId, "live-agent");
+
+		const [expired] = await db.query.events.findMany({
+			where: and(eq(events.orgId, orgId), eq(events.type, "claim_expired")),
+		});
+		// Somebody was waiting for this one. "Swept" would say nobody was, which is
+		// the difference between a lease that was too short and an agent that died.
+		expect((expired!.payload as { reason: string }).reason).toContain("contention");
+	});
+
+	it("does not touch another org's lapsed leases on a read", async () => {
+		const [other] = await db.insert(orgs).values({ name: "Other Org" }).returning();
+		const [otherTask] = await db
+			.insert(tasks)
+			.values({ orgId: other!.id, title: "Their work", status: "open" })
+			.returning();
+		await claimT(other!.id, otherTask!.id, "their-agent", 1);
+		await db
+			.update(claims)
+			.set({ expiresAt: new Date(Date.now() - 60_000) })
+			.where(and(eq(claims.taskId, otherTask!.id), isNull(claims.releasedAt)));
+
+		await listWork(orgId);
+
+		// Unbounded work on behalf of a tenant who did not ask, and one org's traffic
+		// becoming another org's lock contention. The global loop does this; a read
+		// serving one tenant must not.
+		const theirs = await db.query.claims.findMany({
+			where: and(eq(claims.taskId, otherTask!.id), isNull(claims.releasedAt)),
+		});
+		expect(theirs).toHaveLength(1);
+	});
+});
+
 describe("listWork and createTask", () => {
 	it("creates a project on demand rather than needing a sixth tool to ask", async () => {
 		const created = await createTask(orgId, { title: "New work", project: "platform" });

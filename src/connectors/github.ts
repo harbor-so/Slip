@@ -8,6 +8,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { tasks } from "../db/schema.js";
+import { markPullRequestMerged } from "../lib/artifacts.js";
 import { createTask } from "../lib/work.js";
 import type { Connector, ConnectorContext, WebhookResult } from "./types.js";
 
@@ -17,6 +18,10 @@ interface GitHubItem {
 	body?: string | null;
 	merged?: boolean;
 	state?: string;
+	/** The canonical URL. What a `pull_request` artifact stores, and the join key. */
+	html_url?: string;
+	/** ISO 8601, present on a merged pull request. */
+	merged_at?: string;
 }
 
 interface GitHubPayload {
@@ -39,7 +44,31 @@ function parseItem(value: unknown): GitHubItem | null {
 		body: typeof value.body === "string" || value.body === null ? value.body : undefined,
 		merged: typeof value.merged === "boolean" ? value.merged : undefined,
 		state: typeof value.state === "string" ? value.state : undefined,
+		html_url: typeof value.html_url === "string" ? value.html_url : undefined,
+		merged_at: typeof value.merged_at === "string" ? value.merged_at : undefined,
 	};
+}
+
+/**
+ * When this pull request merged, or null if it did not.
+ *
+ * GitHub does not send `action: "merged"` — a merge arrives as `action: "closed"`
+ * with `pull_request.merged: true`, and a PR closed without merging arrives as
+ * the same action with `merged: false`. Treating "closed" as merged would count
+ * every abandoned pull request as a delivered one, which on the headline metric
+ * is the difference between a real number and a flattering one.
+ *
+ * `merged_at` is preferred over the receipt time because a redelivered webhook
+ * hours later must record when the merge happened, not when Harbor heard about
+ * it. It falls back to `now` only when the payload omits it while still claiming
+ * `merged: true` — a shape the API does not currently produce, and one where
+ * refusing to record the merge at all would be the worse answer.
+ */
+function mergedAtOf(item: GitHubItem, now: Date): Date | null {
+	if (item.merged !== true) return null;
+	if (!item.merged_at) return now;
+	const parsed = new Date(item.merged_at);
+	return Number.isNaN(parsed.getTime()) ? now : parsed;
 }
 
 function parsePayload(payload: unknown): GitHubPayload | null {
@@ -99,6 +128,18 @@ export async function handleGitHubWebhook(
 			action: "ignored",
 			reason: `GitHub ${isIssue ? "issue" : "pull request"} action ${parsed.action} is not synced.`,
 		};
+	}
+
+	// Before the task bookkeeping, and independent of it. A pull request Harbor
+	// opened frequently has no task behind it — a session started from Slack or the
+	// dashboard produces one — and the merged-PR metric must count it either way.
+	// Reading it off the task's status instead would only ever measure the subset
+	// of work that arrived as a GitHub issue.
+	if (parsed.pull_request && item.html_url) {
+		const mergedAt = mergedAtOf(item, new Date());
+		if (mergedAt) {
+			await markPullRequestMerged({ orgId, url: item.html_url, mergedAt });
+		}
 	}
 
 	const sourceRef = String(item.number);

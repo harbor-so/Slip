@@ -90,6 +90,21 @@ export interface SupervisorConfig {
 	workspaceRoot: string;
 	repos: RepoSpec[];
 	requestedBootMode: string | null;
+	/**
+	 * Base URL of the MCP server that serves `harbor-agent`, if this deployment
+	 * runs one.
+	 *
+	 * Optional, and absent means the agent simply gets no Harbor tools. That is the
+	 * honest failure: a deployment that runs only the dashboard has no MCP server
+	 * to point at, and injecting an unreachable URL would cost every turn a
+	 * connection timeout and fill the transcript with errors about a server the
+	 * operator never deployed.
+	 *
+	 * A base rather than the full endpoint, because the session path is derived
+	 * from `sandboxId`, which the supervisor already holds — one variable that
+	 * cannot disagree with itself.
+	 */
+	agentMcpUrl?: string;
 }
 
 export type ConfigResolution =
@@ -168,6 +183,8 @@ export function readSupervisorConfig(env: NodeJS.ProcessEnv): ConfigResolution {
 	if (env.HARBOR_TRACE_ID !== undefined && env.HARBOR_TRACE_ID !== "") {
 		config.traceId = env.HARBOR_TRACE_ID;
 	}
+	const agentMcpUrl = (env.HARBOR_AGENT_MCP_URL ?? "").trim().replace(/\/+$/, "");
+	if (agentMcpUrl !== "") config.agentMcpUrl = agentMcpUrl;
 	return { kind: "ok", config };
 }
 
@@ -710,6 +727,24 @@ export function createTurnRunner(
 				workspace,
 				timeout_ms: invocation.timeoutMs,
 			};
+			if (config.agentMcpUrl) {
+				// Built per turn, not once at boot, and both credentials travel as
+				// headers. The fence is what lets the control plane refuse a box whose
+				// lease lapsed mid-turn, so it has to be presented on the MCP calls
+				// exactly as it is on the event uplink — a tool call that could write an
+				// artifact without one would be the hole the fencing design closes
+				// everywhere else.
+				request.mcp_servers = {
+					"harbor-agent": {
+						type: "http",
+						url: `${config.agentMcpUrl}/agent/${config.sandboxId}/mcp`,
+						headers: {
+							Authorization: `Bearer ${config.token}`,
+							"x-harbor-fencing-token": String(config.fencingToken),
+						},
+					},
+				};
+			}
 			const plan = adapter.command(request);
 			const child = spawn(plan.bin, plan.args, {
 				cwd: workspace,

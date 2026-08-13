@@ -820,6 +820,21 @@ export const artifacts = pgTable(
 		title: text("title").notNull(),
 		url: text("url"),
 		payload: jsonb("payload"),
+		/**
+		 * When a `pull_request` artifact was merged. Null for everything else.
+		 *
+		 * A timestamp rather than a boolean because "was it merged" and "when" are
+		 * the same question asked at two resolutions, and the headline metric —
+		 * sessions that resulted in a *merged* pull request — needs a window as much
+		 * as a count. A boolean would have to be widened the first time anybody asks
+		 * for last month's number.
+		 *
+		 * Set only from a verified source-control webhook, never by an agent.
+		 * `record_artifact`'s `kind` enum deliberately excludes `pull_request` for
+		 * the same reason: an agent asserting its own work merged is a metric that
+		 * measures the agent's optimism.
+		 */
+		mergedAt: timestamp("merged_at", { withTimezone: true }),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => [

@@ -7,7 +7,8 @@ import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { db, sql } from "../db/index.js";
-import { orgs, tasks } from "../db/schema.js";
+import { artifacts, orgs, tasks } from "../db/schema.js";
+import { createSession } from "../lib/sessions.js";
 import { claim } from "../lib/work.js";
 import {
 	handleGitHubWebhook,
@@ -113,6 +114,132 @@ describe("GitHub webhooks", () => {
 		await handleGitHubWebhook({ ...opened, action: "closed" }, ctx());
 		const [task] = await db.query.tasks.findMany({ where: eq(tasks.orgId, orgId) });
 		expect(task?.status).toBe("completed");
+	});
+});
+
+/**
+ * The merged-PR metric's only writer.
+ *
+ * `/usage` reports *sessions that resulted in a merged pull request* — Ramp's
+ * metric, and the one the README leads with. It was computed from
+ * `kind = 'pull_request'`, which counts pull requests **opened**, so an agent that
+ * opened forty nobody merged scored forty. `merged_at` is what makes the number
+ * mean what the label says, and this webhook is the only thing that writes it.
+ */
+describe("pull request merges", () => {
+	const PR_URL = "https://github.com/acme/web/pull/7";
+
+	async function seedPullRequestArtifact(url = PR_URL) {
+		const session = await createSession({ orgId, title: "Raise the retry cap", createdBy: "rin" });
+		const [row] = await db
+			.insert(artifacts)
+			.values({
+				orgId,
+				sessionId: session.id,
+				kind: "pull_request",
+				title: "Raise the retry cap to five",
+				url,
+			})
+			.returning();
+		return row!;
+	}
+
+	/** A merge, in the shape GitHub actually sends it: `closed` plus `merged: true`. */
+	const mergedPayload = (overrides: Record<string, unknown> = {}) => ({
+		action: "closed",
+		pull_request: {
+			number: 7,
+			title: "Raise the retry cap to five",
+			merged: true,
+			merged_at: "2026-08-12T10:00:00.000Z",
+			html_url: PR_URL,
+			...overrides,
+		},
+	});
+
+	it("stamps merged_at when a pull request Harbor opened is merged", async () => {
+		const artifact = await seedPullRequestArtifact();
+
+		await handleGitHubWebhook(mergedPayload(), ctx());
+
+		const [row] = await db.query.artifacts.findMany({ where: eq(artifacts.id, artifact.id) });
+		expect(row!.mergedAt).toEqual(new Date("2026-08-12T10:00:00.000Z"));
+	});
+
+	it("does NOT stamp a pull request that was closed without merging", async () => {
+		const artifact = await seedPullRequestArtifact();
+
+		// GitHub sends the same `action: "closed"` either way; only `merged`
+		// distinguishes them. Treating the action alone as a merge would count every
+		// abandoned pull request as a delivered one.
+		await handleGitHubWebhook(mergedPayload({ merged: false, merged_at: undefined }), ctx());
+
+		const [row] = await db.query.artifacts.findMany({ where: eq(artifacts.id, artifact.id) });
+		expect(row!.mergedAt).toBeNull();
+	});
+
+	it("keeps the first merge time when the webhook is redelivered", async () => {
+		const artifact = await seedPullRequestArtifact();
+
+		await handleGitHubWebhook(mergedPayload(), ctx());
+		await handleGitHubWebhook(mergedPayload({ merged_at: "2026-08-12T18:00:00.000Z" }), ctx());
+
+		// GitHub redelivers routinely. The second value would move the row out of
+		// whatever reporting window somebody was looking at, for a merge that
+		// happened once.
+		const [row] = await db.query.artifacts.findMany({ where: eq(artifacts.id, artifact.id) });
+		expect(row!.mergedAt).toEqual(new Date("2026-08-12T10:00:00.000Z"));
+	});
+
+	it("ignores a merge of a pull request Harbor did not open", async () => {
+		await seedPullRequestArtifact("https://github.com/acme/web/pull/999");
+
+		// The common case on any repository where humans also work. Not an error,
+		// and it must not stamp somebody else's row.
+		await handleGitHubWebhook(mergedPayload(), ctx());
+
+		const rows = await db.query.artifacts.findMany({ where: eq(artifacts.orgId, orgId) });
+		expect(rows.every((row) => row.mergedAt === null)).toBe(true);
+	});
+
+	it("does not stamp an artifact belonging to another org", async () => {
+		const [other] = await db.insert(orgs).values({ name: "Other Org" }).returning();
+		const session = await createSession({
+			orgId: other!.id,
+			title: "Their work",
+			createdBy: "maya",
+		});
+		const [theirs] = await db
+			.insert(artifacts)
+			.values({
+				orgId: other!.id,
+				sessionId: session.id,
+				kind: "pull_request",
+				title: "Their PR",
+				url: PR_URL,
+			})
+			.returning();
+
+		await handleGitHubWebhook(mergedPayload(), ctx());
+
+		// The org is established by webhook verification. A connector one org
+		// configured must not reach across into another's rows, even on a URL that
+		// is globally unique.
+		const [row] = await db.query.artifacts.findMany({ where: eq(artifacts.id, theirs!.id) });
+		expect(row!.mergedAt).toBeNull();
+	});
+
+	it("leaves a non-pull-request artifact on the same URL alone", async () => {
+		const session = await createSession({ orgId, title: "Session", createdBy: "rin" });
+		const [log] = await db
+			.insert(artifacts)
+			.values({ orgId, sessionId: session.id, kind: "log", title: "build log", url: PR_URL })
+			.returning();
+
+		await handleGitHubWebhook(mergedPayload(), ctx());
+
+		const [row] = await db.query.artifacts.findMany({ where: eq(artifacts.id, log!.id) });
+		expect(row!.mergedAt).toBeNull();
 	});
 });
 

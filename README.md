@@ -4,8 +4,11 @@
 
 You @-mention it in Slack, or assign it a Linear issue, or type into a shared
 room. It boots an isolated sandbox, runs the coding agent you already use against
-your repository, streams what it is doing to anyone who opens the link, and opens
-a pull request authored by the person who asked.
+your repository, and streams what it is doing to anyone who opens the link.
+
+(Opening the pull request is the one advertised step that is not wired up yet —
+the attribution machinery is written and tested, nothing calls it. See
+[Pull requests](#pull-requests-are-authored-by-the-human).)
 
 One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
 
@@ -196,7 +199,14 @@ lowest-common-denominator interface loses the best property of each.
 | Provider | Isolation | Needs |
 |---|---|---|
 | `docker` **(default)** | container | nothing |
+| `fly` | hardware VM | a Fly account, `FLY_API_TOKEN` |
 | `local` | **none** — see below | opt-in flags |
+
+`fly` is the remote option, for a deployment that has outgrown one host. It is
+`ephemeral` by choice rather than by limitation: a Machine can be stopped and
+started, but a persistent resume with no Machine left to resume has nowhere to
+fall back to, and the rule is to advertise the capability you can honour on a bad
+day.
 
 `local` runs the agent as the server user with no isolation. It is off unless
 `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must
@@ -244,6 +254,12 @@ somebody makes a decision from it.
 
 ### Pull requests are authored by the human
 
+> **Not wired up yet.** Everything in this section is implemented in
+> `src/git/provider.ts` and covered by `src/git/attribution.test.ts`, and none of
+> it has a production caller: the sandbox does not report its push, so
+> `openPullRequest` is never invoked. The design below is what the code does when
+> something calls it, not what a deployment does today.
+
 The sandbox pushes a branch with short-lived brokered credentials and reports the
 name. The control plane opens the pull request **with the prompting user's own
 token**. GitHub does not let an author approve their own PR, so unreviewed agent
@@ -264,8 +280,15 @@ identity raises.
 
 ### Connectors
 
-**Slack, Linear, GitHub** ship. Adding one is a single file implementing one
-interface, plus a line in the registry — not a separately deployed service.
+**Slack, Linear, GitHub, GitLab** ship. Adding one is a single file implementing
+one interface, plus a line in the registry — not a separately deployed service.
+
+GitLab is inbound-only — an issue or merge request becomes a task and nothing is
+written back, so its token stays read-only. It is also the one connector that does
+not HMAC: GitLab sends the configured secret verbatim in `X-Gitlab-Token`, so
+verification is a constant-time comparison rather than a signature over the bytes.
+Running an agent *against* a GitLab repository is not supported; the credential
+broker is GitHub-only and refuses anything else by name.
 
 Routing resolves in order: an explicit target in the message → a channel or team
 mapping → operator keyword rules → *optionally* a model → **ask**. Most traffic
@@ -325,6 +348,22 @@ existing tool. The whole surface is ~980 tokens and a test asserts it cannot
 quietly grow. Background-agent capability lives on a **separate** session-scoped
 MCP endpoint injected into sandboxes, so it cannot leak into this budget.
 
+That second surface is `harbor-agent` — `report_progress`, `record_artifact`,
+`spawn_child`, `get_session_context` — served at `/agent/<sandbox_id>/mcp` on the
+same MCP server, with its own budget test. It authenticates the sandbox's own
+token **and** validates its fencing token on every request, so a box whose lease
+lapsed mid-turn stops being able to write at that moment rather than whenever it
+next disconnects. Set `HARBOR_AGENT_MCP_URL` to enable it; leave it unset and
+agents simply run without Harbor tools rather than timing out against a server
+you never deployed.
+
+Injection is per-adapter, because there is no common mechanism. Claude Code takes
+`--mcp-config` plus `--strict-mcp-config`; opencode has no flag at all and reads
+`OPENCODE_CONFIG_CONTENT`, with a different schema (`mcp`/`remote`, not
+`mcpServers`/`http`) and no strict mode, so a repository's own servers still
+merge underneath. **Codex and `custom` are not wired yet** — they run, they just
+get no Harbor tools.
+
 The guarantee is one Postgres partial unique index:
 
 ```sql
@@ -353,12 +392,24 @@ Harbor is judged by.** Every one is a duplicated day of work that did not happen
 
 ## Dashboard
 
-`/` live activity · `/sessions` and `/s/<key>` rooms · `/repos` `/environments`
-`/secrets` · `/automations` · `/connectors` · `/usage` · `/digest` · `/settings`
+`/` live activity · `/channels` and `/c/<key>` chat · `/sessions` and `/s/<key>`
+rooms · `/automations` · `/connectors` · `/usage` · `/digest` · `/settings`
+
+Repositories, environments and secrets are schema and API only — the tables and
+endpoints are there, the pages are not written yet. They are configured through
+`npm run db:seed` and the API until they are.
 
 The headline metric is Ramp's, and it is the right one: **sessions that resulted
 in a merged pull request.** Merged PRs are the only proof the agent produced
-value.
+value — an agent that opens forty pull requests nobody merges has produced none,
+which is why the number counts merges and not openings. `artifacts.merged_at` is
+written only from a verified source-control webhook; no agent can move it.
+
+**Known gap:** nothing opens the pull request yet. `openPullRequest` and the
+attribution rules above are implemented and tested, but no production caller
+reaches them — the sandbox never reports a push, so no `pull_request` artifact is
+created and this metric reads `0/n` on every deployment. The plumbing behind it
+is real; the trigger is not written.
 
 ---
 

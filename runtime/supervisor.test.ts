@@ -186,6 +186,30 @@ describe("readSupervisorConfig", () => {
 		if (result.kind !== "invalid") return;
 		expect(result.problems.some((problem) => problem.startsWith("HARBOR_REPOS:"))).toBe(true);
 	});
+
+	it("treats HARBOR_AGENT_MCP_URL as optional, and strips its trailing slashes", () => {
+		// Optional on purpose. A deployment that runs only the dashboard has no MCP
+		// server to point at, and failing the boot over it would make the agent tools
+		// a hard dependency of running a sandbox at all. Absent simply means the agent
+		// gets no Harbor tools.
+		const without = readSupervisorConfig(validEnv());
+		expect(without.kind).toBe("ok");
+		if (without.kind === "ok") expect("agentMcpUrl" in without.config).toBe(false);
+
+		// Empty is the same as absent: an operator who sets the variable to "" in a
+		// compose file has not configured it, and a bare "" base would build the URL
+		// `/agent/<id>/mcp`, which the agent would resolve against nothing.
+		const blank = readSupervisorConfig({ ...validEnv(), HARBOR_AGENT_MCP_URL: "  " });
+		expect(blank.kind).toBe("ok");
+		if (blank.kind === "ok") expect("agentMcpUrl" in blank.config).toBe(false);
+
+		const set = readSupervisorConfig({
+			...validEnv(),
+			HARBOR_AGENT_MCP_URL: "http://mcp.test:8788//",
+		});
+		expect(set.kind).toBe("ok");
+		if (set.kind === "ok") expect(set.config.agentMcpUrl).toBe("http://mcp.test:8788");
+	});
 });
 
 // ---------------------------------------------------------------------------

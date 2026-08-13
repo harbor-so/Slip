@@ -98,15 +98,26 @@ export default async function UsagePage() {
 	const total = (totals as unknown as Array<{ tokens: string; spawns: number; micro: string }>)[0];
 	const peak = Math.max(1, ...days.map((d) => Number(d.micro)));
 
-	/** How many sessions produced a merged pull request — Ramp's metric, and the right one. */
+	/**
+	 * How many sessions produced a MERGED pull request — Ramp's metric, and the right one.
+	 *
+	 * The filter is `merged_at is not null`, not `kind = 'pull_request'`. Counting
+	 * opened pull requests under a "merged" label is the flattering version of this
+	 * number and it measures the wrong thing: an agent that opens forty pull
+	 * requests nobody merges is not producing value, and the whole reason to prefer
+	 * this metric over sessions-run or tokens-spent is that it cannot be moved by
+	 * activity alone. `merged_at` is only ever written from a verified webhook.
+	 */
 	const [merged] = (await db.execute(raw`
 		select
-			count(distinct s.id) filter (where a.kind = 'pull_request')::int as with_pr,
+			count(distinct s.id) filter (
+				where a.kind = 'pull_request' and a.merged_at is not null
+			)::int as with_merged_pr,
 			count(distinct s.id)::int as total
 		from sessions s
 		left join artifacts a on a.session_id = s.id
 		where s.org_id = ${orgId} and s.created_at > now() - interval '30 days'
-	`)) as unknown as Array<{ with_pr: number; total: number }>;
+	`)) as unknown as Array<{ with_merged_pr: number; total: number }>;
 
 	return (
 		<div className="space-y-8">
@@ -154,8 +165,8 @@ export default async function UsagePage() {
 					label="tokens, agent-reported"
 				/>
 				<Stat
-					value={`${merged?.with_pr ?? 0}/${merged?.total ?? 0}`}
-					label="sessions that produced a PR"
+					value={`${merged?.with_merged_pr ?? 0}/${merged?.total ?? 0}`}
+					label="sessions with a merged PR"
 				/>
 			</div>
 
