@@ -40,6 +40,7 @@ import { relTime } from "~/lib/format.js";
  */
 const NAV: Array<{ href: string; label: string; icon: LucideIcon }> = [
 	{ href: "/", label: "Activity", icon: Activity },
+	{ href: "/demo", label: "Demo chat", icon: MessagesSquare },
 	{ href: "/channels", label: "Channels", icon: MessagesSquare },
 	{ href: "/sessions", label: "Sessions", icon: Users },
 	{ href: "/runs", label: "Runs", icon: Terminal },
