@@ -19,6 +19,7 @@
    (serif, for display) from Google Fonts. This is most of what made the app read
    differently from the reference — the reference is set in Neue Montreal. */
 @import "./font-faces.css";
+@import "./font-utilities.css";
 @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap");
 
 /* The polished frontend lives in a root-level `web/` folder rather than under
