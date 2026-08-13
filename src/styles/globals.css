@@ -135,11 +135,7 @@
 	--color-popover-foreground: var(--popover-foreground);
 	--color-primary: var(--primary);
 	--color-primary-foreground: var(--primary-foreground);
-	--color-muted: var(--muted);
 	--color-muted-foreground: var(--muted-foreground);
-	/* The new frontend's sidebar/components use `raised` for active and hover
-	   surfaces; map it onto Harbor's hover-muted lift so it reads on near-black. */
-	--color-raised: var(--hover-muted);
 	--color-accent: var(--accent);
 	--color-success: var(--success);
 	--color-success-foreground: var(--success-foreground);
@@ -147,6 +143,29 @@
 	--color-destructive-foreground: var(--destructive-foreground);
 	--color-border: var(--border);
 	--color-ring: var(--ring);
+
+	/* -- tandem-native token names ---------------------------------------
+	   The ported component set (web/ui/*) is tandem's markup verbatim, which
+	   references its own token vocabulary. These map those names onto Harbor's
+	   orange-on-black palette, so tandem's HTML renders in Harbor's colours.
+	   `accent` is Harbor's warm orange (its `primary`); `hold` stays the one
+	   reserved alarm. */
+	--color-bg: var(--background);
+	--color-surface: var(--card);
+	--color-raised: var(--hover-muted);
+	--color-line: var(--border);
+	--color-line-strong: oklch(1 0 0 / 0.22);
+	--color-text: var(--foreground);
+	--color-muted: var(--muted-foreground);
+	--color-faint: oklch(0.6 0.02 265);
+	--color-accent: var(--primary);
+	--color-accent-quiet: oklch(0.34 0.06 40);
+	--color-good: var(--success);
+	--color-bad: var(--destructive);
+	--color-hold: oklch(0.78 0.15 62);
+	--color-hold-quiet: oklch(0.34 0.07 62);
+	--radius-panel: 0.75rem;
+
 	--radius-lg: var(--radius);
 	--radius-md: calc(var(--radius) - 2px);
 	--font-sans: var(--font-sans);

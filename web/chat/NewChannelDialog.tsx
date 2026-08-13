@@ -12,9 +12,11 @@
  * so it is made from a member picker elsewhere, not this open-to-anyone form.)
  */
 
+import { Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Dialog } from "@web/design/index.js";
+import { Button } from "@web/ui/index.js";
 import { ChatClient } from "~/lib/chat-client.js";
 import { ensureIdentity } from "~/lib/identity-browser.js";
 
@@ -49,13 +51,10 @@ export function NewChannelDialog({ viewerName }: { viewerName: string }) {
 
 	return (
 		<>
-			<button
-				className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
-				onClick={() => setOpen(true)}
-				type="button"
-			>
+			<Button variant="primary" size="sm" onClick={() => setOpen(true)}>
+				<Plus className="size-3.5" />
 				New channel
-			</button>
+			</Button>
 
 			<Dialog open={open} onClose={() => setOpen(false)} title="New channel">
 				<div className="space-y-4">
@@ -95,15 +94,14 @@ export function NewChannelDialog({ viewerName }: { viewerName: string }) {
 					</div>
 
 					<div className="flex items-center gap-3">
-						<button
-							className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+						<Button
+							variant="primary"
 							disabled={busy || title.trim().length === 0}
 							onClick={create}
-							type="button"
 						>
 							{busy ? "Creating…" : "Create"}
-						</button>
-						{error ? <span className="text-xs text-destructive">{error}</span> : null}
+						</Button>
+						{error ? <span className="text-xs text-bad">{error}</span> : null}
 					</div>
 				</div>
 			</Dialog>
