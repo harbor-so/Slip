@@ -22,10 +22,42 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { type Request, type Response } from "express";
 import { orgIdForKey } from "../lib/auth.js";
 import { runStartupChecks, startBackgroundLoops } from "../lib/loops.js";
+import {
+	authenticateSandbox,
+	describeFenceRefusal,
+	fencingTokenFrom,
+} from "../lib/session-runner.js";
+import { validateFence } from "../sandbox/manager.js";
+import { buildAgentServer } from "./agent-build.js";
 import { buildServer } from "./build.js";
 import { tools } from "./tools.js";
 
 export { buildServer };
+
+/**
+ * Express headers as a `Headers`.
+ *
+ * The auth helpers take `Headers` because they were written for the Next.js
+ * routes, and reusing them is the point — a second implementation of "which
+ * sandbox is this" that drifted from the first would be a security bug rather
+ * than duplication. Express lower-cases incoming header names, and `Headers`
+ * lookup is case-insensitive, so a repeated header arriving as an array is the
+ * only shape needing care: it is joined rather than dropped, so a caller cannot
+ * hide a value by sending the header twice.
+ */
+function headersFrom(req: Request): Headers {
+	const headers = new Headers();
+	for (const [name, value] of Object.entries(req.headers)) {
+		if (value === undefined) continue;
+		headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+	}
+	return headers;
+}
+
+/** A JSON-RPC-shaped refusal, so a client sees a protocol error rather than HTML. */
+function rpcError(res: Response, status: number, code: number, message: string): void {
+	res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
+}
 
 /**
  * The port every doc, the Settings page and scripts/agents.ts already name.
@@ -75,6 +107,81 @@ app.all("/mcp", async (req: Request, res: Response) => {
 
 	// Both ends are per-request, so the sockets must be closed with the request or
 	// a long-running server leaks a transport per call.
+	res.on("close", () => {
+		void transport.close();
+		void server.close();
+	});
+
+	await server.connect(transport);
+	await transport.handleRequest(req, res, req.body);
+});
+
+/**
+ * The second surface: the tools a background agent gets, scoped to one session.
+ *
+ * Mounted here rather than in the Next.js app because the SDK's transport writes
+ * to a raw Node `ServerResponse`, which the App Router does not expose — and
+ * because this is the process a sandbox already talks to. It was written, tested
+ * and never mounted, so `record_artifact` and `report_progress` were unreachable
+ * from inside the box they exist for.
+ *
+ * Three checks, in the order the sandbox event route established, because each
+ * one may only use facts the previous one settled:
+ *
+ *  1. **Authentication**, against the sandbox's own token digest. Proves which
+ *     box is calling.
+ *  2. **The fencing token.** Authentication is not enough and cannot be: a box
+ *     whose lease lapsed still holds a genuine credential. Only the fence
+ *     separates the current box from an honest zombie that is still running and
+ *     still believes it holds the work.
+ *  3. **The path id must be the authenticated box.** The id is in the URL and the
+ *     token is in a header, so without this a sandbox with a valid token could
+ *     name a different sandbox's id and write into its session.
+ *
+ * Re-checked on every request, never cached for the life of a connection. A lease
+ * that lapses halfway through a long turn has to stop the writes at that moment,
+ * and a capability resolved at connect time would let the box keep writing until
+ * it happened to disconnect — precisely the window in which a second agent has
+ * legitimately taken the work.
+ */
+app.all("/agent/:sandboxId/mcp", async (req: Request, res: Response) => {
+	// Express types a route param as `string | string[]`. An array can only arise
+	// from a repeated capture, which this pattern cannot produce — but taking the
+	// first element rather than casting means a future pattern change degrades to
+	// "wrong sandbox id, refused by `authenticateSandbox`" instead of a crash.
+	const raw = req.params.sandboxId;
+	const sandboxId = (Array.isArray(raw) ? raw[0] : raw) ?? "";
+	const headers = headersFrom(req);
+
+	const auth = await authenticateSandbox(sandboxId, headers);
+	if (!auth.ok) {
+		rpcError(res, 401, -32001, auth.message);
+		return;
+	}
+
+	const presented = fencingTokenFrom(headers);
+	if (!presented.ok) {
+		rpcError(res, 409, -32002, presented.message);
+		return;
+	}
+
+	const verdict = await validateFence(sandboxId, presented.token);
+	if (!verdict.valid) {
+		rpcError(res, 409, -32002, describeFenceRefusal(verdict));
+		return;
+	}
+
+	const transport = new StreamableHTTPServerTransport({
+		sessionIdGenerator: undefined,
+		enableJsonResponse: true,
+	});
+	const server = buildAgentServer({
+		orgId: auth.sandbox.orgId,
+		sessionId: auth.sandbox.sessionId,
+		sandboxId: auth.sandbox.id,
+		fencingToken: verdict.token,
+	});
+
 	res.on("close", () => {
 		void transport.close();
 		void server.close();

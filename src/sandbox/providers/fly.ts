@@ -366,6 +366,43 @@ export class FlySandboxProvider implements EphemeralProvider {
 		throw this.fail(status, "stop", json);
 	}
 
+	/**
+	 * Every live Harbor-managed Machine in the app.
+	 *
+	 * Filtered on `harbor_managed` rather than listing the whole app, because a
+	 * self-hoster's Fly app may legitimately run things Harbor did not create and
+	 * every entry returned here is a stop candidate for the orphan sweep. Docker
+	 * makes the same choice with `label=harbor.managed=1`.
+	 *
+	 * Fails CLOSED, per the authority note on the interface: a non-200 throws
+	 * rather than returning `[]`. An empty list from an unreachable API reads as
+	 * "no orphans anywhere", which is exactly the conclusion that lets a stranded
+	 * Machine bill until somebody notices the invoice.
+	 *
+	 * Live boxes only. A `stopped` or `destroyed` Machine is already reclaimed —
+	 * this provider is ephemeral, so `stop` destroys — and re-reporting one would
+	 * have the sweep issue a delete for a box that no longer exists.
+	 */
+	async listManaged(): Promise<SandboxInspection[]> {
+		const { status, json } = await this.request(
+			"GET",
+			`/machines?metadata.${META.managed}=1`,
+			"list_managed",
+		);
+		if (status !== 200) throw this.fail(status, "list_managed", json);
+
+		const machines = Array.isArray(json) ? (json as FlyMachine[]) : [];
+		return machines
+			// Defensive client-side filter for the same reason as `findByAttemptId`:
+			// the server-side metadata filter is honoured today, and this costs nothing
+			// if a future API version quietly stops honouring it.
+			.filter((machine) => machine.config?.metadata?.[META.managed] === "1")
+			.map((machine) => this.toInspection(machine))
+			.filter(
+				(inspection) => inspection.state === "running" || inspection.state === "starting",
+			);
+	}
+
 	private toInspection(machine: FlyMachine): SandboxInspection {
 		const metadata = machine.config?.metadata ?? {};
 		const raw = machine.state ?? "unknown";

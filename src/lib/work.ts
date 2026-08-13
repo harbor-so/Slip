@@ -16,7 +16,7 @@
  * the expected path, not an exception to log and swallow.
  */
 
-import { and, desc, eq, gte, inArray, isNull, lt, ne, sql as raw } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { agentPresence, claims, events, projects, sessions, tasks } from "../db/schema.js";
@@ -245,21 +245,96 @@ async function lockActiveClaim(tx: Executor, orgId: string, taskId: string) {
 	return row;
 }
 
-async function expireStaleClaims(
+/**
+ * Release every lapsed lease in scope, return its task to the pool, and say so.
+ *
+ * The one place a lease dies of old age. `claim` calls it on contention, the read
+ * paths call it opportunistically, and the background loop calls it on a timer —
+ * three callers, one set of writes, so a lease released by any of them leaves the
+ * same evidence. Before this was shared, `claim` released the row without
+ * reopening the task and without an event, which is how a task could sit
+ * `claimed` and held by nobody.
+ *
+ * All three writes are one fact and commit together: a claim released with its
+ * task still `claimed` and no `claim_expired` event reads in the dashboard as a
+ * task open to nobody, which is worse than the stale lease it replaced.
+ *
+ * `orgId` bounds it because two of the three callers are reads. A `list_work` for
+ * one tenant must not write rows belonging to another — the work is unbounded, it
+ * is not that caller's to do, and it turns one org's traffic into another org's
+ * lock contention. The loop passes no org and sweeps everything, which is what a
+ * backstop is for.
+ *
+ * `contendedTaskId` only changes the recorded reason. "Released on contention"
+ * and "swept" are the same release, but the first says somebody was waiting and
+ * the second says nobody was, and that is the difference between a lease that was
+ * too short and an agent that died.
+ */
+async function sweepLapsedLeases(
 	tx: Executor,
 	now: Date,
-	taskId?: string,
-): Promise<Array<{ id: string; taskId: string | null; agentId: string }>> {
+	opts: { orgId?: string; contendedTaskId?: string } = {},
+): Promise<number> {
 	const conditions = [isNull(claims.releasedAt), lt(claims.expiresAt, now)];
-	if (taskId) conditions.push(eq(claims.taskId, taskId));
+	if (opts.orgId) conditions.push(eq(claims.orgId, opts.orgId));
 
-	return tx
+	const expired = await tx
 		.update(claims)
 		.set({ releasedAt: now })
 		.where(and(...conditions))
-		.returning({ id: claims.id, taskId: claims.taskId, agentId: claims.agentId });
+		.returning({
+			orgId: claims.orgId,
+			taskId: claims.taskId,
+			agentId: claims.agentId,
+			scope: claims.scope,
+		});
+
+	for (const row of expired) {
+		// The org comes off the claim itself, not a task join — a lease can be over a
+		// scope with no task row, and those must still be swept and logged.
+		if (row.taskId) {
+			await tx
+				.update(tasks)
+				.set({ status: "open", updatedAt: now })
+				.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
+		}
+		const contended = opts.contendedTaskId !== undefined && row.taskId === opts.contendedTaskId;
+		await tx.insert(events).values({
+			orgId: row.orgId,
+			taskId: row.taskId,
+			agentId: row.agentId,
+			type: "claim_expired",
+			payload: {
+				reason: contended ? "lease elapsed, released on contention" : "lease elapsed, swept",
+				scope: row.scope,
+			},
+		});
+	}
+
+	return expired.length;
 }
 
+/**
+ * The backlog, and who holds what — self-healing on read.
+ *
+ * Two independent defences against a lapsed lease reading as held, because they
+ * fail differently and the failure is the one thing the lease exists to prevent.
+ *
+ * **The sweep** releases the rows, so the dashboard, the timeline and every other
+ * reader converge too — not just this caller. It runs here because the deployment
+ * that most needs it is the one that cannot run a loop: the Next.js app is
+ * serverless-shaped and starts none, so on a dashboard-only deployment this and
+ * `claim` are the *only* things that ever expire a lease. Without it a crashed
+ * agent holds its scope until somebody happens to contend for that exact task,
+ * which is indistinguishable from the lease model not working.
+ *
+ * **The join predicate** is the one that does not depend on a write succeeding.
+ * The sweep is a write inside what a caller reasonably expects to be a read; it
+ * can be rolled back, refused on a read-only replica, or lost to a serialisation
+ * failure. `gt(claims.expiresAt, now)` costs nothing and means the answer is
+ * right even when the write did not happen. A read that lies about who holds a
+ * lease is how two agents end up on one task.
+ */
 export async function listWork(
 	orgId: string,
 	filter: { project?: string; status?: string } = {},
@@ -272,25 +347,35 @@ export async function listWork(
 		conditions.push(raw`lower(${projects.name}) = ${filter.project.toLowerCase()}`);
 	}
 
-	const rows = await db
-		.select({
-			id: tasks.id,
-			title: tasks.title,
-			status: tasks.status,
-			scope: tasks.scope,
-			source: tasks.source,
-			sourceRef: tasks.sourceRef,
-			project: projects.name,
-			claimAgent: claims.agentId,
-			claimExpires: claims.expiresAt,
-			claimIntent: claims.intent,
-		})
-		.from(tasks)
-		.leftJoin(projects, eq(tasks.projectId, projects.id))
-		.leftJoin(claims, and(eq(claims.taskId, tasks.id), isNull(claims.releasedAt)))
-		.where(and(...conditions))
-		.orderBy(desc(tasks.updatedAt))
-		.limit(200);
+	// One transaction, so the rows read are the rows the sweep just settled. Split
+	// across two, a lease expiring in between reads as held by an agent this very
+	// call released.
+	const rows = await db.transaction(async (tx) => {
+		await sweepLapsedLeases(tx, now, { orgId });
+
+		return tx
+			.select({
+				id: tasks.id,
+				title: tasks.title,
+				status: tasks.status,
+				scope: tasks.scope,
+				source: tasks.source,
+				sourceRef: tasks.sourceRef,
+				project: projects.name,
+				claimAgent: claims.agentId,
+				claimExpires: claims.expiresAt,
+				claimIntent: claims.intent,
+			})
+			.from(tasks)
+			.leftJoin(projects, eq(tasks.projectId, projects.id))
+			.leftJoin(
+				claims,
+				and(eq(claims.taskId, tasks.id), isNull(claims.releasedAt), gt(claims.expiresAt, now)),
+			)
+			.where(and(...conditions))
+			.orderBy(desc(tasks.updatedAt))
+			.limit(200);
+	});
 
 	return rows.map((row) => ({
 		id: row.id,
@@ -405,16 +490,12 @@ export async function claim(
 
 		const scope = scopeForTask(task);
 
-		const expired = await expireStaleClaims(tx, now, taskId);
-		for (const row of expired) {
-			await tx.insert(events).values({
-				orgId,
-				taskId: row.taskId,
-				agentId: row.agentId,
-				type: "claim_expired",
-				payload: { reason: "lease elapsed, released on contention" },
-			});
-		}
+		// Org-scoped rather than just this task. Expiring the contended lease is what
+		// makes the insert below succeed; expiring the rest is nearly free once the
+		// transaction is open, and it means a deployment with no background loop
+		// converges on every claim instead of one task at a time. `contendedTaskId`
+		// keeps this task's event saying somebody was waiting for it.
+		await sweepLapsedLeases(tx, now, { orgId, contendedTaskId: taskId });
 
 		const expiresAt = leaseExpiry(leaseMinutes, now);
 
@@ -759,51 +840,18 @@ export async function createTask(
 }
 
 /**
- * Release every lapsed lease and return the tasks to the pool.
+ * Release every lapsed lease across every org, on a timer.
  *
- * Runs on an interval and is a backstop, not the mechanism — `claim` already
- * expires a stale holder before it inserts. What this adds is timeliness: a
- * task whose agent died should read as `open` in the dashboard within a minute,
- * not the next time somebody happens to contend for it.
+ * A backstop and not the mechanism — `claim` and `listWork` both sweep their own
+ * org in the request path, so a lease normally dies the next time anyone reads or
+ * contends. This exists for the org nobody is looking at, and for the deployment
+ * that runs the MCP server: a task whose agent died should read as `open` within
+ * a minute, not whenever somebody next opens the dashboard.
+ *
+ * Unscoped on purpose. It is the one caller that is not serving a tenant, so it
+ * is the one caller allowed to do unbounded work.
  */
 export async function sweepExpiredClaims(): Promise<number> {
 	const now = new Date();
-	// One transaction for the release, the task updates and the events. The old
-	// shape ran the bulk UPDATE first and the per-row bookkeeping after it, with
-	// no transaction around any of it — a crash mid-loop left claims released
-	// with their tasks still `claimed` and no `claim_expired` event saying why,
-	// which reads in the dashboard as a task that is held by nobody and open to
-	// nobody. All three writes are one fact and now commit as one.
-	return db.transaction(async (tx) => {
-		const expired = await tx
-			.update(claims)
-			.set({ releasedAt: now })
-			.where(and(isNull(claims.releasedAt), lt(claims.expiresAt, now)))
-			.returning({
-				orgId: claims.orgId,
-				taskId: claims.taskId,
-				agentId: claims.agentId,
-				scope: claims.scope,
-			});
-
-		for (const row of expired) {
-			// The org comes off the claim itself now, not a task join — a lease can be
-			// over a scope with no task row, and those must still be swept and logged.
-			if (row.taskId) {
-				await tx
-					.update(tasks)
-					.set({ status: "open", updatedAt: now })
-					.where(and(eq(tasks.id, row.taskId), eq(tasks.status, "claimed")));
-			}
-			await tx.insert(events).values({
-				orgId: row.orgId,
-				taskId: row.taskId,
-				agentId: row.agentId,
-				type: "claim_expired",
-				payload: { reason: "lease elapsed, swept", scope: row.scope },
-			});
-		}
-
-		return expired.length;
-	});
+	return db.transaction((tx) => sweepLapsedLeases(tx, now));
 }

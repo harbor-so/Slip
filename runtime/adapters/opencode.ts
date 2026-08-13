@@ -177,6 +177,56 @@ function jsonEvents(record: Record<string, unknown>): AgentStreamEvent[] {
 	}
 }
 
+/**
+ * MCP servers for opencode, as inline config in the environment.
+ *
+ * opencode has no CLI flag for this — configuration is files and environment
+ * only, with `OPENCODE_CONFIG_CONTENT` sitting near the top of the precedence
+ * chain (above the project's own `opencode.json`). That makes it the analogue of
+ * Claude Code's `--mcp-config`, and it is chosen for the same reason: the
+ * alternative is writing a file, and that file would contain brokered
+ * credentials and would outlive the turn on the sandbox's disk.
+ *
+ * Two differences from Claude Code that must not be papered over:
+ *
+ *  - **The shape is not the same.** Harbor's `McpServerSpec` says `"http"`;
+ *    opencode wants `"remote"` under an `mcp` key rather than `mcpServers`.
+ *    Passing Harbor's shape through unchanged yields a config opencode parses
+ *    and silently ignores.
+ *  - **There is no `--strict-mcp-config` equivalent.** Claude Code can be told
+ *    that the resolved set is the complete set; opencode merges the global and
+ *    project configs underneath this one. So a repository that ships its own
+ *    `mcp` block still contributes servers the control plane never authorised.
+ *    `OPENCODE_CONFIG_CONTENT` wins on a key collision, which is enough to stop
+ *    `harbor-agent` itself being shadowed, but it is not isolation and should not
+ *    be described as such.
+ */
+function mcpEnv(request: AgentTurnRequest): Record<string, string> {
+	const servers = request.mcp_servers;
+	if (!servers || Object.keys(servers).length === 0) return {};
+
+	const mcp: Record<string, unknown> = {};
+	for (const [name, spec] of Object.entries(servers)) {
+		if (spec.type === "http") {
+			mcp[name] = {
+				type: "remote",
+				url: spec.url,
+				enabled: true,
+				...(spec.headers ? { headers: spec.headers } : {}),
+			};
+			continue;
+		}
+		mcp[name] = {
+			type: "local",
+			// opencode takes one argv array, not a command plus args.
+			command: [spec.command ?? "", ...(spec.args ?? [])].filter(Boolean),
+			enabled: true,
+		};
+	}
+
+	return { OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp }) };
+}
+
 export const opencodeAdapter: AgentAdapter = {
 	runtime: "opencode",
 
@@ -213,7 +263,7 @@ export const opencodeAdapter: AgentAdapter = {
 		// hyphen turns attacker-influenced text into flags.
 		args.push("--", request.body);
 
-		return { bin: "opencode", args, env: baseEnv(request) };
+		return { bin: "opencode", args, env: { ...baseEnv(request), ...mcpEnv(request) } };
 	},
 
 	parseLine(line: string): AgentStreamEvent[] {

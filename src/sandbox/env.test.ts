@@ -53,7 +53,7 @@ describe("buildSandboxEnv", () => {
 		const { session } = await seedSession("codex");
 		const env = await buildSandboxEnv(session);
 
-		const specs = JSON.parse(env.HARBOR_REPOS) as { name: string; url: string; branch?: string }[];
+		const specs = JSON.parse(env.HARBOR_REPOS!) as { name: string; url: string; branch?: string }[];
 		expect(specs).toEqual([
 			{ name: "web", url: "https://github.com/acme/web.git", branch: "harbor/lse_1" },
 			{ name: "api", url: "https://gitlab.com/acme/api.git", branch: "trunk" },
@@ -77,6 +77,6 @@ describe("buildSandboxEnv", () => {
 		]);
 		const env = await buildSandboxEnv(session);
 		expect(env.DATABASE_URL).toBe("postgres://x");
-		expect(JSON.parse(env.HARBOR_REPOS)).toHaveLength(2); // the real list, not the secret's "[]"
+		expect(JSON.parse(env.HARBOR_REPOS!)).toHaveLength(2); // the real list, not the secret's "[]"
 	});
 });

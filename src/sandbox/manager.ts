@@ -151,6 +151,24 @@ function controlPlaneUrl(): string {
 	return url.replace(/\/+$/, "");
 }
 
+/**
+ * Where the `harbor-agent` MCP surface is reachable from inside a sandbox.
+ *
+ * Separate from `controlPlaneUrl()` because they are genuinely different
+ * processes on different ports — the dashboard is Next.js, `harbor-agent` is the
+ * Express MCP server — and a deployment may run one without the other.
+ *
+ * Unset returns null rather than throwing, unlike `controlPlaneUrl`. A sandbox
+ * with no control-plane address cannot report anything and is a deployment fault;
+ * a sandbox with no MCP address simply has no Harbor tools, which is a smaller
+ * product with no broken part in it. Read at call time, not at import, for the
+ * reason given in src/config.ts.
+ */
+function agentMcpUrl(): string | null {
+	const url = process.env.HARBOR_AGENT_MCP_URL?.trim();
+	return url ? url.replace(/\/+$/, "") : null;
+}
+
 type SandboxRow = typeof sandboxes.$inferSelect;
 
 // ---------------------------------------------------------------------------
@@ -974,6 +992,17 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 				// Inside the Harbor-controlled spread, so a repo secret named
 				// HARBOR_TRACE_ID cannot shadow the correlation chain.
 				...(ctx.traceId ? { HARBOR_TRACE_ID: ctx.traceId } : {}),
+				// Where `harbor-agent` is served, if this deployment serves it. Also
+				// inside the spread, and for a sharper reason than the others: the
+				// sandbox sends its token and its fence to this URL on every tool call,
+				// so a repository secret able to set it would be a credential
+				// exfiltration primitive granted by merge access.
+				//
+				// Omitted rather than defaulted when unset. A deployment that runs only
+				// the dashboard has no MCP server, and a guessed URL would cost every
+				// turn a connection timeout while the transcript fills with errors about
+				// a server nobody deployed.
+				...(agentMcpUrl() ? { HARBOR_AGENT_MCP_URL: agentMcpUrl()! } : {}),
 			},
 			timeoutMs: setting("sandboxBootTimeoutMs", ctx.overrides),
 			features: ctx.features ?? {},
