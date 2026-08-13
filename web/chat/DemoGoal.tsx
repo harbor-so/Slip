@@ -9,6 +9,7 @@
 
 import { ArrowRight, FileAudio, Link2, Paperclip, Users } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 const PRODUCT = "Harbor";
@@ -22,6 +23,7 @@ const PEOPLE = [
 ];
 
 export function DemoGoal() {
+	const router = useRouter();
 	const [value, setValue] = useState("");
 	const [started, setStarted] = useState(false);
 
@@ -154,7 +156,7 @@ export function DemoGoal() {
 								<div className="flex justify-end border-t border-border px-5 py-3">
 									<button
 										className="inline-flex h-8 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-										onClick={() => setStarted(false)}
+										onClick={() => router.push("/demo/session")}
 										type="button"
 									>
 										Open session
