@@ -475,6 +475,30 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	devinPollIntervalMs: {
+		env: "HARBOR_DEVIN_POLL_INTERVAL_MS",
+		fallback: 30_000,
+		derivation:
+			"How often tracked Devin sessions are polled for progress. Devin is a cloud "
+			+ "agent with no hooks, so a pull is the only way to learn what it did, and "
+			+ "its work is coarse and long-running — minutes to hours — so thirty seconds "
+			+ "is timely without hammering a rate-limited third-party API. What actually "
+			+ "bounds the API calls is not this interval but the per-tick batch cap and "
+			+ "the `updated_at` short-circuit that skips a session nothing changed on.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	devinPollMaxPerTick: {
+		env: "HARBOR_DEVIN_POLL_MAX_PER_TICK",
+		fallback: 100,
+		derivation:
+			"How many Devin sessions a single poll tick will fetch. A cap on the calls "
+			+ "one tick makes to Devin's API, mirroring the `.limit(100)` the automations "
+			+ "tick uses on its due set. Rows are polled oldest-first, so a backlog larger "
+			+ "than this drains over successive ticks rather than being dropped.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Coordination --------------------------------------------------------
 
 	minIntentChars: {

@@ -848,6 +848,63 @@ export const artifacts = pgTable(
 	],
 );
 
+/**
+ * The Devin sessions Harbor is tracking, and the cursor it polls them with.
+ *
+ * Devin is a cloud agent with no hooks and no outbound webhooks — the only way to
+ * learn what one did is to GET its session. This table is what makes that pull
+ * idempotent and attributable: it stores where the last poll left off
+ * (`lastUpdatedAt` / `lastMessageCount` / `lastStatus`) so a tick only emits the
+ * activity that is new, and it maps each Devin session to a minted Harbor
+ * `sessions` row so the PR it produces has a home — `artifacts.session_id` is
+ * NOT NULL, and a Devin PR has to live under a session like every other artifact.
+ *
+ * A row leaves the poll set by its `status`: the terminal values Devin reports
+ * (`finished`, `suspended`) and the `expired` we set after the session stops
+ * being reachable drop it from `devin_sessions_poll_idx`. The row is kept for
+ * provenance — it owns the PR artifact link — rather than deleted.
+ */
+export const devinSessions = pgTable(
+	"devin_sessions",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** Devin's own session id, e.g. devin-xxxx — the join key to its API. */
+		devinSessionId: text("devin_session_id").notNull(),
+		/** The Harbor session minted to host this Devin session's artifacts. */
+		sessionId: uuid("session_id").references(() => sessions.id),
+		/**
+		 * Mirrors Devin's `status_enum`. The terminal set (`finished`, `suspended`)
+		 * plus `expired` is what the poll query excludes, so this column is both the
+		 * live state and the de-registration switch.
+		 */
+		status: text("status").notNull().default("working"),
+		/** The previous `status_enum`, so a tick can emit only the transition. */
+		lastStatus: text("last_status"),
+		/** How many messages had been seen — `messages.slice(this)` is the new tail. */
+		lastMessageCount: integer("last_message_count").notNull().default(0),
+		/**
+		 * Devin's `updated_at` at the last poll. The short-circuit cursor: an
+		 * unchanged value means nothing happened and the tick does no work beyond
+		 * bumping `lastPolledAt`, which is what keeps an idle long-running session
+		 * from generating repeat writes every interval.
+		 */
+		lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }),
+		lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+		prUrl: text("pr_url"),
+		prArtifactId: uuid("pr_artifact_id").references(() => artifacts.id),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// One Devin session is tracked once per org; re-registration is a no-op.
+		uniqueIndex("devin_sessions_org_session_idx").on(table.orgId, table.devinSessionId),
+		// The poll query: non-terminal rows, oldest-polled first.
+		index("devin_sessions_poll_idx").on(table.status, table.lastPolledAt),
+	],
+);
+
 // ---------------------------------------------------------------------------
 // Secrets and credentials
 // ---------------------------------------------------------------------------
@@ -1175,6 +1232,11 @@ export const ACTIVITY_RUNTIMES = [
 	"opencode",
 	"cursor",
 	"conductor",
+	// A cloud agent with no hooks: its activity is pulled by the devin poll loop
+	// (src/devin/poll.ts) and fed through the same `recordActivity` path, not
+	// pushed by a host. The generic `/api/hooks/devin` route also accepts it for
+	// manual replay, but the poller is authoritative.
+	"devin",
 ] as const;
 export type ActivityRuntime = (typeof ACTIVITY_RUNTIMES)[number];
 

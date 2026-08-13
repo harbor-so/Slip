@@ -14,6 +14,7 @@
 import { claudeCodeNormalizer } from "./claude-code.js";
 import { codexNormalizer } from "./codex.js";
 import { cursorNormalizer } from "./cursor.js";
+import { devinNormalizer } from "./devin.js";
 import { opencodeNormalizer } from "./opencode.js";
 import type { ActivityNormalizer } from "./types.js";
 
@@ -28,6 +29,8 @@ export function normalizerFor(runtime: string): ActivityNormalizer | null {
 			return cursorNormalizer;
 		case "opencode":
 			return opencodeNormalizer;
+		case "devin":
+			return devinNormalizer;
 		default:
 			return null;
 	}

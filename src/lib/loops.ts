@@ -25,6 +25,7 @@
  */
 
 import { type SettingKey, setting, validateConfig } from "../config.js";
+import { tickDevinPoll } from "../devin/poll.js";
 import { warnScmAttributionAtStartup } from "../git/credentials.js";
 import { sweepProviderOrphans } from "../sandbox/orphans.js";
 import { sweepDeadlines } from "../sandbox/manager.js";
@@ -45,6 +46,7 @@ export const LOOP_NAMES = [
 	"sessions",
 	"compaction",
 	"orphans",
+	"devin",
 ] as const;
 export type LoopName = (typeof LOOP_NAMES)[number];
 
@@ -106,6 +108,14 @@ export function backgroundLoops(): LoopSpec[] {
 			name: "orphans",
 			intervalSetting: "orphanSweepIntervalMs",
 			run: (now) => sweepProviderOrphans(now),
+		},
+		{
+			// Devin is a cloud agent with no hooks, so its activity is pulled, not
+			// pushed. This polls each tracked Devin session and feeds what changed
+			// through the same activity path every other runtime pushes to.
+			name: "devin",
+			intervalSetting: "devinPollIntervalMs",
+			run: (now) => tickDevinPoll(now),
 		},
 	];
 }
