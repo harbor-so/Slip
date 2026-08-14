@@ -33,6 +33,7 @@ import {
 	sessions,
 	tasks,
 } from "../db/schema.js";
+import { snapshotSessionRepos } from "./repos.js";
 import { HarborError, notifyChange } from "./work.js";
 
 /**
@@ -55,6 +56,18 @@ export interface CreateSessionInput {
 	title: string;
 	createdBy: string;
 	taskId?: string;
+	/**
+	 * The repositories this session works in, primary first. Optional, because a
+	 * session is a room and a room with no repository is a legitimate thing —
+	 * somebody opening one to talk before there is anything to check out.
+	 *
+	 * Access is **not** checked here. It is checked at the door, against the
+	 * requesting user's own token, before this is called: `createSession` has no
+	 * token and no viewer, and giving it an optional one is how an access check
+	 * ends up skipped on the path that did not pass it.
+	 */
+	repoIds?: string[];
+	baseBranch?: string | null;
 }
 
 export async function createSession(input: CreateSessionInput) {
@@ -66,8 +79,21 @@ export async function createSession(input: CreateSessionInput) {
 			title: input.title,
 			createdBy: input.createdBy,
 			taskId: input.taskId ?? null,
+			// The primary repository, denormalised onto the session for the places
+			// that want one repo without joining. `session_repos` stays the truth.
+			repoId: input.repoIds?.[0] ?? null,
+			baseBranch: input.baseBranch ?? null,
 		})
 		.returning();
+
+	if (input.repoIds && input.repoIds.length > 0) {
+		await snapshotSessionRepos({
+			orgId: input.orgId,
+			sessionId: session!.id,
+			repoIds: input.repoIds,
+			baseBranch: input.baseBranch ?? null,
+		});
+	}
 
 	// The creator is a participant like anybody else — not an owner, just the
 	// first person through the door.
