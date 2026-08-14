@@ -43,6 +43,16 @@ import type {
 import { classifyDockerFailure, dockerProvider, volumeName } from "./docker.js";
 import { flyProvider } from "./fly.js";
 import { localProvider } from "./local.js";
+import { blaxelProvider } from "./blaxel.js";
+import { cloudflareProvider } from "./cloudflare.js";
+import { codesandboxProvider } from "./codesandbox.js";
+import { daytonaProvider } from "./daytona.js";
+import { e2bProvider } from "./e2b.js";
+import { modalProvider } from "./modal.js";
+import { morphProvider } from "./morph.js";
+import { northflankProvider } from "./northflank.js";
+import { runloopProvider } from "./runloop.js";
+import { vercelProvider } from "./vercel.js";
 import { providerFor } from "../registry.js";
 
 // ---------------------------------------------------------------------------
@@ -295,7 +305,10 @@ describe("provider decisions", () => {
 		expect(providerFor("docker").name).toBe("docker");
 		expect(providerFor("local").name).toBe("local");
 		try {
-			providerFor("kubernetes");
+			// A name that is not in the union. Every provider that IS in the union has
+			// a real implementation behind it (that is the no-stubs rule), so the name
+			// exercised here must be one nobody has built.
+			providerFor("nonexistent-backend");
 			throw new Error("expected providerFor to refuse an unimplemented provider");
 		} catch (error) {
 			expect(error).toBeInstanceOf(SandboxProviderError);
@@ -791,4 +804,155 @@ if (!flyReady) {
 			if (found) await provider.stop(found.externalId).catch(() => {});
 		},
 	});
+}
+
+// ---------------------------------------------------------------------------
+// The remote providers added alongside Fly — E2B, Daytona, Modal, Runloop, Morph,
+// Blaxel, CodeSandbox, Vercel, Cloudflare, Northflank.
+//
+// Every one of them is fully covered at the unit level against an injected
+// transport in its own `<name>.test.ts` — that is where state mapping, HTTP/SDK
+// error classification, fail-closed reconciliation and idempotent stop are
+// proven, with no account required and no network touched. THIS block is the
+// live-infra half: it costs a real vendor account plus a bootable image/template,
+// so each provider is opt-in behind its own credentials and, crucially, SKIPS
+// LOUD when they are absent. A green run that silently tested nothing is worse
+// than a red one, so the skip names exactly which variables to set.
+// ---------------------------------------------------------------------------
+
+interface RemoteContractSpec {
+	label: string;
+	/** Env vars that must all be present for the live suite to run. */
+	requiredEnv: string[];
+	/** The env var holding a bootable image/template ref for this backend. */
+	imageEnv: string;
+	/** A ref that cannot possibly boot, to prove `not_found`/`invalid_config`. */
+	brokenImage: string;
+	build(): SandboxProvider;
+}
+
+function describeRemoteProvider(spec: RemoteContractSpec): void {
+	const missing = spec.requiredEnv.filter((name) => !process.env[name]);
+	if (missing.length > 0) {
+		console.warn(
+			`[provider-contract] SKIPPING the ${spec.label} provider suite: set `
+				+ `${spec.requiredEnv.join(", ")} to exercise it against real ${spec.label}. `
+				+ `Missing: ${missing.join(", ")}. Its logic is still covered by `
+				+ `${spec.label}.test.ts against an injected transport.`,
+		);
+		describe.skip(`${spec.label} provider contract (skipped)`, () => {
+			test.skip(`${spec.label} credentials were not provided`, () => {});
+		});
+		return;
+	}
+
+	const provider = spec.build();
+	const config = (overrides: Partial<CreateSandboxConfig> = {}): CreateSandboxConfig => ({
+		sessionId: randomUUID(),
+		sandboxId: randomUUID(),
+		attemptId: randomUUID(),
+		image: process.env[spec.imageEnv]!,
+		workspace: "/workspace",
+		env: {},
+		timeoutMs: 120_000,
+		features: {},
+		...overrides,
+	});
+
+	describeProviderContract({
+		label: spec.label,
+		provider,
+		config: () => config(),
+		brokenImageConfig: () => config({ image: spec.brokenImage }),
+		// Reconciliation is the one primitive every provider must have, so cleanup
+		// leans on it rather than on a backend-specific teardown: find the box this
+		// attempt produced and stop it. Tolerates a box that never existed.
+		cleanup: async (created) => {
+			const found = await provider.findByAttemptId(created.attemptId).catch(() => null);
+			if (found) await provider.stop(found.externalId).catch(() => {});
+		},
+	});
+}
+
+const REMOTE_CONTRACTS: RemoteContractSpec[] = [
+	{
+		label: "e2b",
+		requiredEnv: ["E2B_API_KEY", "E2B_TEST_TEMPLATE"],
+		imageEnv: "E2B_TEST_TEMPLATE",
+		brokenImage: "harbor-template-does-not-exist",
+		build: () => e2bProvider(),
+	},
+	{
+		label: "daytona",
+		requiredEnv: ["DAYTONA_API_KEY", "DAYTONA_TEST_SNAPSHOT"],
+		imageEnv: "DAYTONA_TEST_SNAPSHOT",
+		brokenImage: "harbor-snapshot-does-not-exist",
+		build: () => daytonaProvider(),
+	},
+	{
+		label: "modal",
+		requiredEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "MODAL_TEST_IMAGE"],
+		imageEnv: "MODAL_TEST_IMAGE",
+		brokenImage: "registry.invalid/harbor-does-not-exist:nope",
+		build: () => modalProvider(),
+	},
+	{
+		label: "runloop",
+		requiredEnv: ["RUNLOOP_API_KEY", "RUNLOOP_TEST_BLUEPRINT"],
+		imageEnv: "RUNLOOP_TEST_BLUEPRINT",
+		brokenImage: "blueprint-does-not-exist",
+		build: () => runloopProvider(),
+	},
+	{
+		label: "morph",
+		requiredEnv: ["MORPH_API_KEY", "MORPH_TEST_SNAPSHOT"],
+		imageEnv: "MORPH_TEST_SNAPSHOT",
+		brokenImage: "snapshot-does-not-exist",
+		build: () => morphProvider(),
+	},
+	{
+		label: "blaxel",
+		requiredEnv: ["BL_API_KEY", "BL_WORKSPACE", "BLAXEL_TEST_IMAGE"],
+		imageEnv: "BLAXEL_TEST_IMAGE",
+		brokenImage: "registry.invalid/harbor-does-not-exist:nope",
+		build: () => blaxelProvider(),
+	},
+	{
+		label: "codesandbox",
+		requiredEnv: ["CSB_API_KEY", "CSB_TEST_TEMPLATE"],
+		imageEnv: "CSB_TEST_TEMPLATE",
+		brokenImage: "template-does-not-exist",
+		build: () => codesandboxProvider(),
+	},
+	{
+		label: "vercel",
+		requiredEnv: ["VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_TEST_IMAGE"],
+		imageEnv: "VERCEL_TEST_IMAGE",
+		brokenImage: "registry.invalid/harbor-does-not-exist:nope",
+		build: () => vercelProvider(),
+	},
+	{
+		label: "cloudflare",
+		requiredEnv: [
+			"CLOUDFLARE_SANDBOX_WORKER_URL",
+			"CLOUDFLARE_SANDBOX_WORKER_TOKEN",
+			"CLOUDFLARE_TEST_IMAGE",
+		],
+		imageEnv: "CLOUDFLARE_TEST_IMAGE",
+		// The shim fixes the image at deploy time, so `image` is informational and a
+		// broken value cannot fail create; this ref only satisfies the config shape.
+		brokenImage: "harbor-sandbox:does-not-exist",
+		build: () => cloudflareProvider(),
+	},
+	{
+		label: "northflank",
+		requiredEnv: ["NORTHFLANK_API_TOKEN", "NORTHFLANK_PROJECT_ID", "NORTHFLANK_TEST_IMAGE"],
+		imageEnv: "NORTHFLANK_TEST_IMAGE",
+		brokenImage: "registry.invalid/harbor-does-not-exist:nope",
+		build: () => northflankProvider(),
+	},
+];
+
+for (const contract of REMOTE_CONTRACTS) {
+	describeRemoteProvider(contract);
 }

@@ -48,6 +48,14 @@ function lockContract(name: string, backend: LockBackend): void {
 		 * the second caller waits. It must not wait — a blocked runner is a held
 		 * connection, and a queue of them is an outage that presents as the product
 		 * being slow rather than as a lock problem.
+		 *
+		 * "Does not block" is asserted as an *ordering* — the second call settles
+		 * while the first is still inside its body — rather than as a wall-clock
+		 * ceiling. An earlier version measured elapsed milliseconds and was flaky for
+		 * a reason worth recording: the elapsed time includes `sql.reserve()` waiting
+		 * for a free pool connection, which on a loaded database is seconds and has
+		 * nothing to do with the lock. The ordering version cannot confuse the two,
+		 * because the first body does not finish until `release()` is called.
 		 */
 		it("refuses a second holder while the first is inside the body, without blocking", async () => {
 			const key = sessionLock(uniqueSessionId());
@@ -56,21 +64,26 @@ function lockContract(name: string, backend: LockBackend): void {
 				release = resolve;
 			});
 
-			const first = backend.withLock(key, async () => {
-				await held;
-				return "first";
-			});
+			let firstSettled = false;
+			const first = backend
+				.withLock(key, async () => {
+					await held;
+					return "first";
+				})
+				.then((outcome) => {
+					firstSettled = true;
+					return outcome;
+				});
 
 			// Give the first call time to actually take the lock.
 			await settle();
 
-			const started = Date.now();
 			const second = await backend.withLock(key, async () => "second");
-			const elapsed = Date.now() - started;
 
 			expect(second.acquired).toBe(false);
-			// Returned promptly rather than after the first body finished.
-			expect(elapsed).toBeLessThan(1_000);
+			// The refusal came back while the first holder was still inside its body,
+			// which is the whole claim: it did not wait for the lock to free.
+			expect(firstSettled).toBe(false);
 
 			release();
 			const firstOutcome = await first;

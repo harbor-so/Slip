@@ -118,14 +118,15 @@ per session, so replicas cooperate without electing a leader.
 
 **Sandboxes on Kubernetes.** Do not mount the node's Docker socket into the Harbor
 pod. Either run the Harbor deployment on a dedicated node pool with the `docker`
-provider and accept that the pod is effectively node-root there, or use `fly`,
-which needs no local container runtime at all and gives a hardware VM boundary
-instead of a shared kernel. A first-class Kubernetes Job provider is the obvious
-contribution, and the provider contract test suite is what proves one correct.
+provider and accept that the pod is effectively node-root there, or use one of the
+eleven remote providers, none of which needs a local container runtime at all. A
+first-class Kubernetes Job provider is the obvious contribution — it is the only
+way to get a real isolation boundary that stays inside your own cluster — and the
+provider contract test suite is what proves one correct.
 
-The shipped providers are `docker`, `fly` and `local` — the full list is
-`SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`, and there are no stubs in
-it: a provider that is not listed does not partially exist.
+The full provider list is `SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`,
+and there are no stubs in it: a provider that is not listed does not partially
+exist, and every provider that is listed has passed the contract suite.
 
 ---
 

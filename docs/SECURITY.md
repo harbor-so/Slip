@@ -191,21 +191,32 @@ cannot be resolved is refused rather than guessed at.
 Harbor's provider abstraction spans a real range of isolation, and the range is
 wide enough that it must be stated rather than implied.
 
-| Provider | Boundary | Safe for |
+The thirteen providers fall into three groups, and the group is what matters for
+a security review — not the vendor's name.
+
+| Provider | Boundary | Runs on |
 |---|---|---|
-| `local` | **None.** The agent runs as the server user, on the server's filesystem and network. | Your own laptop, your own repo. Nothing else. |
-| `docker` | Container. Kernel shared with the host. | A single-tenant deployment on a dedicated host. |
-| `fly` | Hardware virtualisation. A Fly Machine per sandbox, in Fly's datacentre. | A deployment that needs a VM boundary, and can accept that the code leaves your infrastructure. |
+| `local` | **None.** The agent runs as the server user, on the server's filesystem and network. | Your host |
+| `docker` | Container. Kernel shared with the host. | Your host |
+| `e2b`, `daytona`, `modal`, `runloop`, `northflank`, `cloudflare` | Container, in the vendor's cloud. | The vendor's infrastructure |
+| `fly`, `morph`, `blaxel`, `codesandbox`, `vercel` | Hardware virtualisation — a VM or microVM per sandbox. | The vendor's infrastructure |
 
-These three are the shipped providers; the authoritative list is
-`SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`, which contains no stubs.
+The authoritative list is `SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`,
+which contains no stubs.
 
-`fly` is the only one of the three with a hardware virtualisation boundary, and
-it buys that by running the sandbox on someone else's hardware — which is the
-opposite trade from the one a self-hosted deployment is usually making. Choose it
-deliberately, not by default. A provider that gives a VM boundary *inside* your
-own infrastructure does not exist yet; the contract test suite in
-`src/sandbox/providers/provider-contract.test.ts` is what would prove one correct.
+Two things follow, and they are in tension. Every provider with a hardware
+virtualisation boundary buys it by running your source code on somebody else's
+hardware — which is the opposite of the trade a self-hosted deployment is usually
+making. **A provider that gives a VM boundary inside your own infrastructure does
+not exist yet.** If that is your requirement, the honest answer today is `docker`
+on a dedicated host, and the contract test suite in
+`src/sandbox/providers/provider-contract.test.ts` is what would prove a
+contributed Kubernetes or Firecracker backend correct.
+
+Choosing a remote provider is a decision about where your code and your
+credentials go, so make it deliberately rather than by copying a config. Each one
+also brings a vendor's own tenancy model, which Harbor does not audit and cannot
+compensate for.
 
 `local` is off unless `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are
 both set, the runtime must be one of a known set of binaries, and the prompt is

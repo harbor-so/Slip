@@ -37,7 +37,8 @@ source-control credentials, model keys and a shell on a checkout of your
 repository. The teams who most want one are the teams for whom that sentence
 triggers a security review. Harbor is a Node process and a Postgres database. It
 runs on a VM, in your VPC, on-premises, or on a laptop, and `docker compose up` is
-the entire evaluation.
+the entire evaluation. Eleven remote sandbox backends are supported when you want
+one, and none of them is a prerequisite for anything.
 
 **It must not do the same work twice.** Harbor started as a coordination layer for
 fleets of agents — a lease table with a partial unique index guaranteeing exactly
@@ -189,15 +190,32 @@ lowest-common-denominator interface loses the best property of each.
 
 | Provider | Isolation | Needs |
 |---|---|---|
-| `docker` **(default)** | container | nothing |
-| `fly` | hardware VM | a Fly account, `FLY_API_TOKEN` |
+| `docker` **(default)** | container, kernel shared with the host | nothing |
+| `fly` | hardware VM | `FLY_API_TOKEN`, `FLY_APP_NAME` |
+| `e2b` | container | `E2B_API_KEY` |
+| `daytona` | container | `DAYTONA_API_KEY` |
+| `modal` | container | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` |
+| `runloop` | container | `RUNLOOP_API_KEY` |
+| `morph` | microVM | `MORPH_API_KEY` |
+| `blaxel` | microVM | `BL_API_KEY`, `BL_WORKSPACE` |
+| `codesandbox` | microVM | `CSB_API_KEY` |
+| `vercel` | microVM, ~45-minute ceiling | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` |
+| `cloudflare` | container, via a Worker shim you deploy | `CLOUDFLARE_SANDBOX_WORKER_URL`, `…_TOKEN` |
+| `northflank` | container | `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID` |
 | `local` | **none** — see below | opt-in flags |
 
-`fly` is the remote option, for a deployment that has outgrown one host. It is
-`ephemeral` by choice rather than by limitation: a Machine can be stopped and
-started, but a persistent resume with no Machine left to resume has nowhere to
-fall back to, and the rule is to advertise the capability you can honour on a bad
-day.
+`docker` is the default because it is the one that lets somebody evaluate the
+whole product without a vendor relationship. Everything between it and `local` is
+a remote backend: pick the vendor you already have a contract with, set
+`HARBOR_SANDBOX_PROVIDER`, and fill in that vendor's credentials. **Every remote
+provider is an upgrade, never a prerequisite** — none of them is required for
+anything, and the full list is `SANDBOX_PROVIDER_NAMES` in
+`src/sandbox/registry.ts`, which contains no stubs.
+
+Every one of them is `ephemeral` by choice rather than by limitation. Several
+could technically stop and restart the same box — but a persistent resume with no
+box left to resume has nowhere to fall back to, and the rule is to advertise the
+capability you can honour on a bad day.
 
 `local` runs the agent as the server user with no isolation. It is off unless
 `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must
