@@ -24,6 +24,7 @@ import { eq, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
 import { db } from "../db/index.js";
 import { runs } from "../db/schema.js";
+import { mcpUrl } from "./urls.js";
 import { notifyChange, touchPresence } from "./work.js";
 
 /** Only these two. An arbitrary command from a request body is a shell. */
@@ -121,7 +122,7 @@ export async function launchRun(input: LaunchInput): Promise<{ runId: string }> 
 		mcpServers: {
 			harbor: {
 				type: "http",
-				url: process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp",
+				url: mcpUrl(),
 				headers: { Authorization: `Bearer ${input.apiKey}` },
 			},
 		},

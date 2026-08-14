@@ -161,3 +161,65 @@ describe("e2b.listManaged — fails closed", () => {
 		await expect(throwing.listManaged()).rejects.toMatchObject({ errorType: "transient" });
 	});
 });
+
+/**
+ * The reconciliation query must not narrow to running boxes.
+ *
+ * `findByAttemptId` used to ask E2B for `?state=running`, which meant a box still
+ * booting — the single most likely state for a box whose create response we lost —
+ * came back as "no such sandbox". The caller reads that as permission to spawn,
+ * and the result is two agents on one branch: the exact duplicate the whole
+ * spawn saga exists to prevent.
+ *
+ * These assert the *query string*, because the bug lived there and nothing else
+ * in the suite looks at it.
+ */
+describe("e2b reconciliation does not narrow server-side", () => {
+	/**
+	 * A stand-in that APPLIES `?state=` the way E2B would, instead of ignoring it.
+	 *
+	 * A handler that returns a canned list regardless of the query passes whether
+	 * or not the provider narrows, which is why the original bug survived a suite
+	 * that already had `findByAttemptId` coverage. Honouring the filter is what
+	 * makes the behavioural test below able to fail.
+	 */
+	function filteringProvider(boxes: Array<Record<string, unknown>>) {
+		return provider((url) => {
+			const query = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+			const wanted = query.get("state");
+			return {
+				status: 200,
+				body: wanted ? boxes.filter((b) => b.state === wanted) : boxes,
+			};
+		});
+	}
+
+	it("finds a box that is still STARTING", async () => {
+		const { e2b } = filteringProvider([
+			{ sandboxID: "sbx-booting", state: "starting", metadata: { harbor_attempt: "att-1" } },
+		]);
+		const found = await e2b.findByAttemptId("att-1");
+		expect(found?.externalId).toBe("sbx-booting");
+		expect(found?.state).toBe("starting");
+	});
+
+	it("does not send state=running when reconciling", async () => {
+		const { e2b, calls } = provider(() => ({ status: 200, body: [] }));
+		await e2b.findByAttemptId("att-1");
+		expect(calls[0]!.url).not.toContain("state=running");
+		expect(calls[0]!.url).toContain("harbor_attempt");
+	});
+
+	it("does not send state=running when listing managed boxes", async () => {
+		const { e2b, calls } = provider(() => ({ status: 200, body: [] }));
+		await e2b.listManaged();
+		expect(calls[0]!.url).not.toContain("state=running");
+	});
+
+	it("still reports a wedged STARTING box to the orphan sweep", async () => {
+		const { e2b } = filteringProvider([
+			{ sandboxID: "sbx-wedged", state: "starting", metadata: { harbor_managed: "true" } },
+		]);
+		expect((await e2b.listManaged()).map((i) => i.externalId)).toEqual(["sbx-wedged"]);
+	});
+});

@@ -12,6 +12,11 @@ the attribution machinery is written and tested, nothing calls it. See
 
 One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
 
+And when you outgrow one host, the cloud path is additive rather than a rewrite:
+a container image for the control plane, committed manifests for Fly, Render and
+Kubernetes, and twelve remote sandbox backends — none of which the laptop story
+depends on. See [Deploying](./DEPLOY.md).
+
 [Quick start](#quick-start) · [Why this exists](#why-this-exists) ·
 [How it works](#how-it-works) · [Deploying](./DEPLOY.md) ·
 [Security](./docs/SECURITY.md) · [Non-goals](#non-goals)
@@ -199,14 +204,25 @@ lowest-common-denominator interface loses the best property of each.
 | Provider | Isolation | Needs |
 |---|---|---|
 | `docker` **(default)** | container | nothing |
-| `fly` | hardware VM | a Fly account, `FLY_API_TOKEN` |
+| `fly`, `e2b`, `modal`, `daytona`, `morph`, `runloop`, `blaxel`, `vercel` | hardware VM / microVM | that vendor's account and key |
+| `cloudflare`, `northflank`, `codesandbox` | container, in the vendor's cloud | that vendor's account and key |
 | `local` | **none** — see below | opt-in flags |
 
-`fly` is the remote option, for a deployment that has outgrown one host. It is
-`ephemeral` by choice rather than by limitation: a Machine can be stopped and
-started, but a persistent resume with no Machine left to resume has nowhere to
+Twelve remote backends, and `docker` still needs nothing. The remote ones are
+`ephemeral` by choice rather than by limitation: several of them can stop and
+start a box, but a persistent resume with no box left to resume has nowhere to
 fall back to, and the rule is to advertise the capability you can honour on a bad
 day.
+
+Picking a remote provider is not purely an upgrade. The sandbox environment
+carries your repository secrets **decrypted** — that is the only way an agent can
+use them — so a remote box moves them across a vendor boundary Harbor can repeat
+claims about but not verify. `docker` on a dedicated host is the weaker isolation
+tier and the smaller trust surface; [docs/SECURITY.md](./docs/SECURITY.md) states
+the trade rather than implying one answer.
+
+Getting the image to a vendor is its own step, and only half a step for half of
+them: [docs/sandbox-images.md](./docs/sandbox-images.md).
 
 `local` runs the agent as the server user with no isolation. It is off unless
 `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must

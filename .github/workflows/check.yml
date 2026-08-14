@@ -1,0 +1,83 @@
+# The gate a contribution must pass, run on every push and pull request.
+#
+# `npm run check` was the documented gate and nothing ran it — there was no
+# `.github/` directory at all, so the only enforcement was somebody remembering.
+#
+# This workflow needs NO secrets, and that is a property worth keeping rather
+# than an accident. It was verified rather than assumed: the tests that need
+# `HARBOR_ENCRYPTION_KEY` set it themselves at module scope, `AUTH_SECRET` is only
+# fatal under `NODE_ENV=production`, and no sandbox provider reads a credential at
+# construction time — every vendor client is built on first call. So a fork's pull
+# request runs the full suite with no configuration, which is exactly what an
+# open-source contribution needs.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: harbor
+          POSTGRES_PASSWORD: harbor
+          POSTGRES_DB: harbor
+        # Published on 5433, not 5432, and that is what makes this job
+        # zero-configuration: `src/db/index.ts` and `vitest.config.ts` both
+        # default to postgres://harbor:harbor@localhost:5433/harbor, so no
+        # DATABASE_URL needs to be set anywhere in this file.
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U harbor -d harbor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # Mandatory and easy to miss: `vitest.setup.ts` takes the advisory lock and
+      # truncates between cases, but nothing in the suite applies migrations.
+      # Without this step every database-backed test fails on a missing table.
+      - name: Apply migrations
+        run: npm run db:migrate
+
+      # lint:config (no hardcoded tunables) + tsc + the full suite.
+      - name: Check
+        run: npm run check
+
+      # Not part of `check`, and needs to be here: `next build` is the only thing
+      # that exercises webpack over the provider registry, which statically
+      # imports thirteen providers including two vendor SDKs that resolve modules
+      # by computed expression. A tree can typecheck and test green and still
+      # fail to build.
+      - name: Build
+        run: npm run build
+
+      # Proves the image is assembled correctly — that `npm ci --omit=dev` did not
+      # prune something the runtime needs and that every provider module loads.
+      # No credentials, no network, no database.
+      - name: Doctor
+        run: npx tsx scripts/doctor.ts
+        env:
+          HARBOR_PUBLIC_URL: https://harbor.invalid

@@ -275,9 +275,15 @@ export class E2BSandboxProvider implements EphemeralProvider {
 	 * box on the same branch.
 	 */
 	async findByAttemptId(attemptId: string): Promise<SandboxInspection | null> {
+		// Deliberately NOT narrowed with `state=running`. It was, and that made a
+		// still-booting box read as absent — so a retry after a lost create response
+		// started a SECOND box on the same branch, which is the exact duplicate this
+		// method exists to prevent. `runloop.ts` argues the same point in its own
+		// header. The client-side selection below already prefers a live box, so
+		// asking for everything and choosing here is both safer and no more work.
 		const { status, json } = await this.request(
 			"GET",
-			`/sandboxes?state=running&metadata=${encodeURIComponent(`${META.attempt}:${attemptId}`)}`,
+			`/sandboxes?metadata=${encodeURIComponent(`${META.attempt}:${attemptId}`)}`,
 			"find_by_attempt",
 		);
 		if (status !== 200) throw this.fail(status, "find_by_attempt", json);
@@ -326,9 +332,14 @@ export class E2BSandboxProvider implements EphemeralProvider {
 	 * conclusion that lets a stranded box bill until someone notices the invoice.
 	 */
 	async listManaged(): Promise<SandboxInspection[]> {
+		// Same reasoning as `findByAttemptId`: no `state=running` in the query. The
+		// client-side filter below already restricts to live boxes, and narrowing
+		// server-side additionally hid a box wedged in `starting` from the orphan
+		// sweep — which is precisely the box most worth reaping, because nothing
+		// else will ever clean it up.
 		const { status, json } = await this.request(
 			"GET",
-			`/sandboxes?state=running&metadata=${encodeURIComponent(`${META.managed}:true`)}`,
+			`/sandboxes?metadata=${encodeURIComponent(`${META.managed}:true`)}`,
 			"list_managed",
 		);
 		if (status !== 200) throw this.fail(status, "list_managed", json);

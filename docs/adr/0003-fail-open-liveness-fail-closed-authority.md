@@ -81,3 +81,35 @@ separate members, and both are separate from `policy_denied`.
   and it is also friction.
 - The asymmetry must be re-explained to every new reader, which is why it is
   commented at both sites rather than only here.
+
+---
+
+## Corollary (added later): an answer we cannot prove complete is not an answer
+
+The rule above was written about *errors* — a call that threw, a status nobody
+recognised. It turns out there is a quieter way to fail open, and three providers
+shipped with it: a **successful** list call that returned one page.
+
+`findByAttemptId` and `listManaged` both ask an existential question. Answering
+"no such box" from page one of an unknown number of pages is not a smaller answer
+than the truth — it is the wrong one, and it is wrong in the fail-open direction
+that this ADR exists to forbid. A caller reading `null` starts a second agent on
+the same branch. A sweep reading `[]` leaves a box billing until someone reads the
+invoice. Neither can tell a genuinely empty result from a truncated one, and the
+HTTP status is 200 in both cases, so nothing upstream can either.
+
+So the rule extends:
+
+> **A list-backed authority answer must be provably complete, or it must throw.**
+
+In practice:
+
+- Where the vendor exposes a cursor, follow it. `runloop.ts` declared `has_more`
+  on its response type and read it nowhere, which is how this was found.
+- Where following a cursor is not something we can verify against the real API,
+  throw `transient` when the page is saturated and name the variable that widens
+  it. A loud retry is strictly better than a confident wrong answer, and much
+  better than a guessed pagination parameter that silently pages wrong.
+
+This does not apply to `inspect`. That is a liveness question about a box we
+already have an id for, and liveness fails open — unchanged.

@@ -1,0 +1,65 @@
+# ONLY for a deployment that runs deployment-web.yaml WITHOUT deployment-mcp.yaml.
+#
+# Commented out of kustomization.yaml for that reason. With the worker running,
+# the loops are already running in-process and this CronJob would just wake up
+# every five minutes to be turned away by an advisory lock — harmless, but it
+# makes the deployment look like it needs something it does not.
+#
+# The web tier deliberately starts no timers: it is serverless-shaped and may have
+# zero warm instances, so a `setInterval` there is a promise the runtime cannot
+# keep. `POST /api/loops/tick` is the escape hatch, and this is how you drive it.
+#
+# HARBOR_MAINTENANCE_TOKEN is NOT an org API key on purpose: the sweeps are
+# global, so a tenant credential here would let any one org trigger work across
+# every other. Generate it with `openssl rand -base64 32` and put it in
+# harbor-secrets; the endpoint returns 503 while it is unset, so this CronJob will
+# fail loudly rather than silently doing nothing.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: harbor-loops-tick
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          containers:
+            - name: tick
+              image: ghcr.io/harbor-so/harbor:latest
+              # `-f` so an HTTP error is a non-zero exit and the Job fails
+              # visibly. Without it curl reports success on a 503 and the CronJob
+              # goes green while nothing sweeps — the exact silent failure this
+              # file exists to prevent.
+              args:
+                - node
+                - -e
+                - |
+                  const token = process.env.HARBOR_MAINTENANCE_TOKEN;
+                  if (!token) { console.error("HARBOR_MAINTENANCE_TOKEN is unset"); process.exit(1); }
+                  fetch("http://harbor:3000/api/loops/tick", {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${token}` },
+                  }).then(async (r) => {
+                    console.log(r.status, await r.text());
+                    process.exit(r.ok ? 0 : 1);
+                  }).catch((e) => { console.error(e); process.exit(1); });
+              envFrom:
+                - secretRef:
+                    name: harbor-secrets
+              resources:
+                requests: { cpu: "50m", memory: "128Mi" }
+                limits: { memory: "256Mi" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]

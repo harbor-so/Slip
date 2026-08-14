@@ -1,0 +1,174 @@
+# Build and publish both images to GHCR.
+#
+# Two images, and conflating them is the mistake this file exists to prevent:
+#
+#   harbor           the control plane — the dashboard and the worker
+#   harbor-sandbox   the box an AGENT runs in
+#
+# Publishing `harbor-sandbox` is what unblocks the remote sandbox providers. Every
+# one of them boots an image the VENDOR pulls, and until this workflow existed
+# `npm run sandbox:build` only ever tagged it on the machine that ran it. See
+# docs/sandbox-images.md — a registry push is sufficient for five of the eleven
+# remote providers and only a prerequisite for the rest.
+#
+# ---------------------------------------------------------------------------
+# No secret needs configuring
+# ---------------------------------------------------------------------------
+#
+# `GITHUB_TOKEN` is issued automatically to every run; `packages: write` is what
+# lets it push to GHCR. That is deliberate — a Docker Hub target would need a
+# secret a fork cannot have, which would make this workflow fail on every
+# outside contribution.
+#
+# BUT: GHCR packages are created PRIVATE by default. A private `harbor-sandbox`
+# fails every remote provider's first pull with an authentication error Harbor
+# cannot diagnose for you, because Harbor has no per-provider registry credential
+# to offer. After the first successful publish, make the package public.
+
+name: images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      multiarch:
+        description: "Also build linux/arm64 (slow — QEMU emulation)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: harbor
+            dockerfile: Dockerfile
+          - name: harbor-sandbox
+            dockerfile: sandbox/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only needed when actually building arm64. Emulating arm64 for a tree with
+      # esbuild, @next/swc and native postinstalls turns a four-minute build into
+      # thirty-plus, so it is off on the ordinary path and on for releases, where
+      # it matters: several sandbox vendors run arm, and an amd64-only image fails
+      # at boot with an exec-format error that reads like a Harbor bug.
+      - name: Set up QEMU
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.multiarch
+        uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests, where there is nothing to push and a fork's
+      # token has no package write anyway.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # On a pull request this builds and throws away the result. That is the
+      # point: it proves both Dockerfiles still assemble, on every PR, with no
+      # registry write and no secret.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.multiarch) && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # The control-plane image gets an actual functional check, not just "it built".
+  # `doctor` constructs all thirteen sandbox providers, so this catches a
+  # dependency pruned by `npm ci --omit=dev` — the mistake a Dockerfile makes that
+  # no unit test can see. Single-platform and loaded locally, never pushed.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the control-plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: harbor:ci
+          cache-from: type=gha,scope=harbor
+
+      - name: doctor — every provider must construct with no credentials
+        run: docker run --rm -e HARBOR_PUBLIC_URL=https://harbor.invalid harbor:ci doctor
+
+  # The Cloudflare provider drives a Worker shim that must be built before it can
+  # boot anything, and `/harbor/boot` — the path the Worker execs — only exists if
+  # that shim image was built correctly. Proving it here needs no Cloudflare
+  # account, no wrangler login and no deploy.
+  #
+  # The sandbox image is built locally first and passed in by ref, rather than
+  # pulled from GHCR. That keeps this job honest on a pull request from a fork
+  # (which cannot read a private package) and, more importantly, tests the shim
+  # against the sandbox image *in this commit* rather than whatever was last
+  # published.
+  cloudflare-shim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Plain `docker build` rather than buildx via build-push-action, and that is
+      # the point of this job rather than an oversight. The shim's first stage is
+      # `FROM ${HARBOR_SANDBOX_IMAGE_REF}`, and the default buildx builder runs in
+      # its own container with its own image store — it cannot see an image
+      # `load`ed into the host daemon, so it tries to PULL `harbor-sandbox:ci`
+      # from Docker Hub and fails with `pull access denied`. The host daemon
+      # resolves local tags, which is what makes chaining these two builds work.
+      - name: Build the sandbox image locally
+        run: docker build -f sandbox/Dockerfile -t harbor-sandbox:ci .
+
+      - name: Build the Cloudflare shim on top of it
+        run: |
+          docker build \
+            --build-arg HARBOR_SANDBOX_IMAGE_REF=harbor-sandbox:ci \
+            -t harbor-cloudflare-sandbox:ci \
+            integrations/cloudflare-sandbox-worker
+
+      # The Dockerfile asserts node and the supervisor at build time; this asserts
+      # the one thing it cannot — that the path the Worker execs is executable.
+      - name: /harbor/boot must exist and be executable
+        run: docker run --rm --entrypoint sh harbor-cloudflare-sandbox:ci -c 'test -x /harbor/boot'

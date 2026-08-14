@@ -216,3 +216,50 @@ describe("runloop.listManaged — fails closed", () => {
 		await expect(throwing.listManaged()).rejects.toMatchObject({ errorType: "transient" });
 	});
 });
+
+/**
+ * A page that does not contain the whole fleet must not be reported as one.
+ *
+ * `has_more` was on the response type from the start and read nowhere, so both
+ * reconciliation reads treated page one as the complete answer. That is authority
+ * failing OPEN wearing a disguise: `findByAttemptId` returning `null` because the
+ * box was on page two starts a second agent on the same branch, and `listManaged`
+ * missing it leaves a Devbox running until somebody reads the invoice.
+ */
+describe("runloop pagination — a truncated list is not an answer", () => {
+	const truncated = () => ({
+		status: 200,
+		body: { devboxes: [{ id: "dbx-1", status: "running", metadata: {} }], has_more: true },
+	});
+
+	it("THROWS rather than reporting absent when the page is truncated", async () => {
+		await expect(provider(truncated).runloop.findByAttemptId("att-1")).rejects.toMatchObject({
+			errorType: "transient",
+		});
+	});
+
+	it("THROWS rather than reporting no orphans when the page is truncated", async () => {
+		await expect(provider(truncated).runloop.listManaged()).rejects.toMatchObject({
+			errorType: "transient",
+		});
+	});
+
+	it("names the variable that fixes it", async () => {
+		await expect(provider(truncated).runloop.listManaged()).rejects.toThrow(
+			/RUNLOOP_LIST_LIMIT/,
+		);
+	});
+
+	it("treats has_more:false as a complete answer", async () => {
+		const { runloop } = provider(() => ({
+			status: 200,
+			body: { devboxes: [], has_more: false },
+		}));
+		expect(await runloop.findByAttemptId("att-1")).toBeNull();
+	});
+
+	it("treats a bare array as complete — no envelope means no pagination", async () => {
+		const { runloop } = provider(() => ({ status: 200, body: [] }));
+		expect(await runloop.listManaged()).toEqual([]);
+	});
+});

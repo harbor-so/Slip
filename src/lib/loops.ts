@@ -25,6 +25,8 @@
  */
 
 import { type SettingKey, setting, validateConfig } from "../config.js";
+import { databaseUrl } from "../db/index.js";
+import { describeDatabaseTls } from "../db/tls.js";
 import { tickDevinPoll } from "../devin/poll.js";
 import { warnScmAttributionAtStartup } from "../git/credentials.js";
 import { sweepProviderOrphans } from "../sandbox/orphans.js";
@@ -32,6 +34,7 @@ import { sweepDeadlines } from "../sandbox/manager.js";
 import { tickAutomations } from "../triggers/automations.js";
 import { compactEligibleSessions } from "./session-events.js";
 import { tickSessions } from "./session-tick.js";
+import { warnAboutAddressing } from "./urls.js";
 import { sweepExpiredClaims } from "./work.js";
 
 /**
@@ -210,7 +213,18 @@ export async function runLoopsOnce(now: Date = new Date()): Promise<LoopTickResu
  * later. It was dead code until this call existed — the function, its test and
  * the ADR all asserted a warning nothing ever emitted.
  */
-export function runStartupChecks(): { attributionWarning: string | null } {
+export function runStartupChecks(): {
+	attributionWarning: string | null;
+	warnings: string[];
+} {
 	validateConfig();
-	return { attributionWarning: warnScmAttributionAtStartup() };
+	// Addressing and database TLS join the same boot check for the same reason the
+	// attribution warning is here: all three are misconfigurations that produce a
+	// working-looking deployment. An unset HARBOR_PUBLIC_URL refuses every spawn, a
+	// transaction-pooled DSN freezes the dashboard, and `sslmode=require` silently
+	// skips certificate verification. None of them logs anything on its own.
+	return {
+		attributionWarning: warnScmAttributionAtStartup(),
+		warnings: [...warnAboutAddressing(), ...describeDatabaseTls(databaseUrl()).warnings],
+	};
 }

@@ -9,6 +9,7 @@
 
 import { listApiKeys } from "../../lib/dashboard.js";
 import { currentSession } from "../../lib/session.js";
+import { dashboardUrl, mcpUrl } from "../../lib/urls.js";
 import { Badge, Card, Empty, SectionLabel } from "../../components/ui.js";
 import { CreateKeyPanel } from "./create-key.js";
 
@@ -19,8 +20,8 @@ export default async function SettingsPage() {
 	if (!session) return <Empty title="No organisation yet" hint="Run npm run db:seed." />;
 
 	const keys = await listApiKeys(session.orgId);
-	const mcpUrl = process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp";
-	const appUrl = process.env.HARBOR_URL ?? "http://localhost:3000";
+	const mcpEndpoint = mcpUrl();
+	const appUrl = dashboardUrl();
 
 	return (
 		<div className="space-y-8">
@@ -60,7 +61,7 @@ export default async function SettingsPage() {
   "mcpServers": {
     "harbor": {
       "type": "http",
-      "url": "${mcpUrl}",
+      "url": "${mcpEndpoint}",
       "headers": { "Authorization": "Bearer \${HARBOR_API_KEY}" }
     }
   }
@@ -84,7 +85,7 @@ export default async function SettingsPage() {
 				<Card>
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
 {`[mcp_servers.harbor]
-url = "${mcpUrl}"
+url = "${mcpEndpoint}"
 bearer_token_env_var = "HARBOR_API_KEY"`}
 					</pre>
 				</Card>
