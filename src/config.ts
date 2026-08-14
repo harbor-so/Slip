@@ -488,6 +488,30 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	gitPushCheckTimeoutMs: {
+		env: "HARBOR_GIT_PUSH_CHECK_TIMEOUT_MS",
+		fallback: 20_000,
+		derivation:
+			"Ceiling on the plumbing commands that ask git whether the agent pushed, run "
+			+ "after every turn. One of them (`ls-remote`) talks to the source-control "
+			+ "host, so this is a network timeout, not a local one. Short on purpose: "
+			+ "missing a push costs a pull request that opens one turn later, while "
+			+ "hanging here holds the turn queue behind a host that is not answering.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	maxPullRequestTitleChars: {
+		env: "HARBOR_MAX_PULL_REQUEST_TITLE_CHARS",
+		fallback: 120,
+		derivation:
+			"A pull request's title is the lease's intent, first line, truncated to this. "
+			+ "GitHub accepts far longer, so this is a readability bound rather than a "
+			+ "protocol one: a title is read in a list of thirty, and an intent written as "
+			+ "a paragraph makes that list unreadable. The body carries the intent in full "
+			+ "and verbatim, so nothing is lost by trimming here.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	suggestedAlternativesCount: {
 		env: "HARBOR_SUGGESTED_ALTERNATIVES_COUNT",
 		fallback: 3,

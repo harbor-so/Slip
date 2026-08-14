@@ -690,3 +690,54 @@ export function reconnectDelayMs(input: {
 	const random = Number.isFinite(input.random) ? Math.min(Math.max(input.random, 0), 1) : 0;
 	return Math.max(1, Math.round(window / 2 + (window / 2) * random));
 }
+
+// ---------------------------------------------------------------------------
+// Push reporting
+// ---------------------------------------------------------------------------
+
+export type PushVerdict =
+	| { kind: "report"; branch: string; sha: string }
+	/** Nothing to say: no push, or the same push we already reported. */
+	| { kind: "silent"; reason: "not_pushed" | "already_reported" | "detached" | "unreadable" };
+
+/**
+ * Did the agent push this repository's branch, and is it news?
+ *
+ * Pure, because the interesting cases are the ones that are tedious to stage
+ * against a real remote: a detached HEAD after the agent checked out a commit, a
+ * local branch that was committed but never pushed, a remote whose branch has
+ * moved on without us, and the ordinary re-run where nothing changed.
+ *
+ * "Pushed" means the remote's tip for this branch equals the local tip. Anything
+ * else is deliberately silent rather than optimistic: reporting a push that did
+ * not happen makes Harbor open a pull request for a branch the host does not
+ * have, and the failure surfaces minutes later as a confusing 422 rather than as
+ * the missing push it actually is.
+ *
+ * `lastReported` is what stops a five-turn session opening the same pull request
+ * five times. It is compared on the sha, not the branch, so a second push to the
+ * same branch is news again — which is what makes the "adopted" path in
+ * `createPullRequest` reachable and correct rather than dead code.
+ */
+export function pushVerdict(input: {
+	/** `git rev-parse --abbrev-ref HEAD`, or null if it could not be read. */
+	localBranch: string | null;
+	/** `git rev-parse HEAD`, or null. */
+	localSha: string | null;
+	/** The remote's tip for that branch, or null when the remote has no such branch. */
+	remoteSha: string | null;
+	/** The sha last reported for this repository in this sandbox, if any. */
+	lastReported: string | null;
+}): PushVerdict {
+	const branch = input.localBranch?.trim();
+	const local = input.localSha?.trim();
+	if (!branch || !local) return { kind: "silent", reason: "unreadable" };
+	// Detached HEAD reports the sha, or literally "HEAD", as the branch name.
+	// There is nothing to open a pull request from, so say nothing.
+	if (branch === "HEAD" || branch === local) return { kind: "silent", reason: "detached" };
+	if (!input.remoteSha || input.remoteSha.trim() !== local) {
+		return { kind: "silent", reason: "not_pushed" };
+	}
+	if (input.lastReported?.trim() === local) return { kind: "silent", reason: "already_reported" };
+	return { kind: "report", branch, sha: local };
+}

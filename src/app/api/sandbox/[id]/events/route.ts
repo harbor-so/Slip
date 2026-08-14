@@ -4,7 +4,8 @@ import { setting } from "../../../../../config.js";
 import type { SandboxEvent, SandboxEventType, SessionEventType } from "../../../../../contracts/index.js";
 import { SANDBOX_EVENT_TYPES } from "../../../../../contracts/index.js";
 import { db } from "../../../../../db/index.js";
-import { claims, sandboxes, sessions } from "../../../../../db/schema.js";
+import { claims, repos, sandboxes, sessionRepos, sessions } from "../../../../../db/schema.js";
+import { openPullRequestForPush } from "../../../../../lib/pull-requests.js";
 import { assertNever } from "../../../../../sandbox/decisions.js";
 import { markSandboxReady, validateFence } from "../../../../../sandbox/manager.js";
 import { recordAgentUsage } from "../../../../../lib/cost.js";
@@ -264,6 +265,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 	}> = [];
 	let ignored = 0;
 	const finishes: Array<{ outcome: "completed" | "failed"; payload: Record<string, unknown> }> = [];
+	const pushes: Array<{ repo: string; branch: string }> = [];
 	let readyReport: { bootMode: string | null } | null = null;
 
 	for (const event of events) {
@@ -337,6 +339,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 				outcome: event.type === "agent_finished" ? "completed" : "failed",
 				payload,
 			});
+		}
+
+		// The sandbox says it pushed a branch. This is the event the whole tracking
+		// loop hangs off: it is what turns a pushed branch into a pull request and,
+		// eventually, into the merged-PR number.
+		//
+		// The repository is NOT trusted from the payload — it is matched against the
+		// session's own `session_repos` rows below. A box that could name any
+		// repository could have Harbor open a pull request against one it was never
+		// given, which is the same class of hole as a box naming its own session.
+		if (event.type === "branch_pushed") {
+			const repo = (event.payload as { repo?: unknown } | undefined)?.repo;
+			const branch = (event.payload as { branch?: unknown } | undefined)?.branch;
+			if (typeof repo === "string" && typeof branch === "string") {
+				pushes.push({ repo, branch });
+			}
 		}
 	}
 
@@ -419,11 +437,74 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		}
 	}
 
+	// Pushes are handled after the transcript is safely on the timeline, and every
+	// failure here is logged rather than returned. Opening a pull request calls
+	// GitHub twice; letting that fail the ingest would mean a source-control
+	// outage costs the session its transcript, and the bridge would retry the
+	// whole batch to no purpose. The push is recoverable — the branch exists and
+	// the next batch reports it again — the transcript is not.
+	for (const push of pushes) {
+		try {
+			await handleBranchPushed({
+				orgId: auth.sandbox.orgId,
+				sessionId: auth.sandbox.sessionId,
+				repoName: push.repo,
+				branch: push.branch,
+			});
+		} catch (error) {
+			console.error(`[ingest] branch_pushed for ${push.repo}#${push.branch} failed:`, error);
+		}
+	}
+
 	return NextResponse.json({
 		ok: true,
 		appended: appended.length,
 		ignored,
 		through_seq: appended.length > 0 ? appended[appended.length - 1]!.seq : null,
+	});
+}
+
+/**
+ * Record the working branch and open the pull request for it.
+ *
+ * The repository name is resolved against the session's own repos, so an
+ * unrecognised name is dropped rather than acted on. `workingBranch` is written
+ * first and unconditionally: it is what `buildSandboxEnv` reads to check the
+ * right branch back out on the next boot, and it must be true even if opening
+ * the pull request fails.
+ */
+async function handleBranchPushed(input: {
+	orgId: string;
+	sessionId: string;
+	repoName: string;
+	branch: string;
+}): Promise<void> {
+	const [match] = await db
+		.select({ repoId: repos.id, baseBranch: sessionRepos.baseBranch })
+		.from(sessionRepos)
+		.innerJoin(repos, eq(sessionRepos.repoId, repos.id))
+		.where(and(eq(sessionRepos.sessionId, input.sessionId), eq(repos.name, input.repoName)))
+		.limit(1);
+	if (!match) {
+		console.warn(
+			`[ingest] sandbox reported a push for "${input.repoName}", which is not one of this `
+				+ "session's repositories. Ignored.",
+		);
+		return;
+	}
+
+	await db
+		.update(sessionRepos)
+		.set({ workingBranch: input.branch })
+		.where(
+			and(eq(sessionRepos.sessionId, input.sessionId), eq(sessionRepos.repoId, match.repoId)),
+		);
+
+	await openPullRequestForPush({
+		sessionId: input.sessionId,
+		repoId: match.repoId,
+		branch: input.branch,
+		baseBranch: match.baseBranch,
 	});
 }
 

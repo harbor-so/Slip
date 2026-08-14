@@ -48,6 +48,7 @@ import {
 	TUNNEL_ENV_PATH,
 	assertNever,
 	hookPolicy,
+	pushVerdict,
 	resolveBootMode,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
@@ -698,6 +699,70 @@ export function createResumeTokenAccumulator(
  * that answers "is this usage record a running total or an increment", a question
  * whose wrong answer is an invoice nobody notices for a month.
  */
+/**
+ * Ask git what the agent actually did, and tell the control plane if it pushed.
+ *
+ * Harbor does not run the push — the agent does, whenever it decides to, using
+ * the brokered credential. So there is no call to hook; the only way to know is
+ * to look. Three cheap plumbing commands per repository after each turn: what
+ * branch are we on, what is its tip, and does the remote agree.
+ *
+ * Every failure here is silent by construction. `pushVerdict` returns `silent`
+ * for anything it cannot read, and a git invocation that fails yields nulls
+ * rather than throwing, because this runs after a completed turn: a broken
+ * `ls-remote` must not turn a successful piece of work into a failed one. The
+ * cost of missing a push is a pull request that opens on the next turn or not at
+ * all; the cost of failing the turn is the work itself.
+ */
+async function reportPushedBranches(
+	config: SupervisorConfig,
+	bridge: BridgeSink,
+	env: NodeJS.ProcessEnv,
+	reported: Map<string, string>,
+): Promise<void> {
+	for (const repo of config.repos) {
+		const cwd = join(config.workspaceRoot, repo.name);
+		const git = async (args: string[]): Promise<string | null> => {
+			const result = await runCommand("git", args, {
+				cwd,
+				// A read, so the broker mints a read-only credential. `ls-remote` is
+				// the only one of the three that talks to the host at all.
+				env: { ...env, HARBOR_GIT_OPERATION: "fetch" },
+				timeoutMs: setting("gitPushCheckTimeoutMs"),
+			});
+			if (result.code !== 0) return null;
+			return result.output.trim().split("\n")[0]?.trim() ?? null;
+		};
+
+		const localBranch = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+		const localSha = await git(["rev-parse", "HEAD"]);
+		// `ls-remote` prints `<sha>\t<ref>`; the sha is the first field.
+		const remoteLine = localBranch
+			? await git(["ls-remote", "--heads", "origin", localBranch])
+			: null;
+		const remoteSha = remoteLine?.split(/\s+/)[0] ?? null;
+
+		const verdict = pushVerdict({
+			localBranch,
+			localSha,
+			remoteSha,
+			lastReported: reported.get(repo.name) ?? null,
+		});
+		if (verdict.kind !== "report") continue;
+
+		reported.set(repo.name, verdict.sha);
+		bridge.emit({
+			type: "branch_pushed",
+			payload: {
+				repo: repo.name,
+				branch: verdict.branch,
+				head_sha: verdict.sha,
+				...(repo.ref !== undefined ? { base: repo.ref } : {}),
+			},
+		});
+	}
+}
+
 export function createTurnRunner(
 	adapter: AgentAdapter,
 	config: SupervisorConfig,
@@ -882,9 +947,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 	}
 
 	let runner: { interrupt: (kind: AgentInterrupt) => void } | null = null;
+	// Last sha reported per repository, so a five-turn session does not open the
+	// same pull request five times. In memory because it is per-box state and the
+	// box is the thing that pushed; a restart re-reports, which the control plane
+	// absorbs by adopting the existing pull request.
+	const reportedPushes = new Map<string, string>();
 	const handlers: BridgeHandlers = {
 		runTurn: async (invocation) => {
 			await turnRunner.run(invocation);
+			// After the turn, not during: the agent pushes whenever it likes, and the
+			// only moment we know it has finished doing so is when it stops.
+			await reportPushedBranches(config, bridge, env, reportedPushes);
 		},
 		interrupt: (kind) => runner?.interrupt(kind),
 		quiesceForSnapshot: async () => {},
