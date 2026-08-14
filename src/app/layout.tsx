@@ -34,8 +34,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 				<GradientMesh />
 				<div className="relative z-10 flex h-dvh flex-col">
 					<TopHeader
-						orgName={session ? session.orgName : "Acme Corp"}
-						viewer={{ name: "Priya Shah", initials: "PS", color: "#8b5cf6" }}
+						orgName={session ? session.orgName : "Harbor"}
+						userName={session?.userName ?? session?.orgName ?? "you"}
 					/>
 					<div className="flex min-h-0 flex-1">
 						<Sidebar

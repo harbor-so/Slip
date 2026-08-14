@@ -3,28 +3,23 @@
 /**
  * The shell's sidebar.
  *
- * A fixed left rail and one scrolling column, following the dashboard shape the
- * product design calls for: the places Harbor goes, then beneath them the
- * connected tools as a live list with real status rather than a link buried in
- * settings. That placement is an argument — a background agent's usefulness is
- * bounded by what it can see, so "is GitHub still connected?" should be visible
- * from every screen, not four clicks into an admin page.
+ * A fixed left rail: the places Harbor actually goes, then the connected tools
+ * as a live list with real status. Every row here is a real page backed by the
+ * database — the nav is the product's surface area, not a demo script. The
+ * connected-tools list is read from the org's `connectors` rows, so "is GitHub
+ * still connected?" is answerable from every screen.
  *
- * This is a client component because the active-route highlight needs the
- * pathname; the connector list and org identity are handed down from the server
- * layout, which already has them, so nothing here re-queries.
+ * Client component because the active-route highlight needs the pathname; the
+ * connector list and org identity come from the server layout.
  */
 
 import {
 	Activity,
 	Anchor,
-	CreditCard,
 	FileText,
 	Gauge,
-	Layers,
 	MessagesSquare,
 	Plug,
-	Rocket,
 	Settings,
 	Terminal,
 	Users,
@@ -43,7 +38,6 @@ import { relTime } from "~/lib/format.js";
  */
 const NAV: Array<{ href: string; label: string; icon: LucideIcon }> = [
 	{ href: "/", label: "Activity", icon: Activity },
-	{ href: "/demo", label: "Demo chat", icon: MessagesSquare },
 	{ href: "/channels", label: "Channels", icon: MessagesSquare },
 	{ href: "/sessions", label: "Sessions", icon: Users },
 	{ href: "/runs", label: "Runs", icon: Terminal },
@@ -52,12 +46,6 @@ const NAV: Array<{ href: string; label: string; icon: LucideIcon }> = [
 	{ href: "/digest", label: "Digest", icon: FileText },
 	{ href: "/connectors", label: "Connectors", icon: Plug },
 	{ href: "/settings", label: "Settings", icon: Settings },
-];
-
-const TEAMS: Array<{ name: string; icon: LucideIcon; color: string }> = [
-	{ name: "Boards", icon: CreditCard, color: "#e8825a" },
-	{ name: "Platform", icon: Layers, color: "#6366f1" },
-	{ name: "Growth", icon: Rocket, color: "#10b981" },
 ];
 
 const CONNECTOR_LABEL: Record<string, string> = {
@@ -93,8 +81,8 @@ export function Sidebar({
 
 			<ul className="space-y-0.5 px-2">
 				{NAV.map((item) => {
-					// startsWith so a room (/c/…) does not, but a section's own children do,
-					// keep the row lit; "/" only matches exactly or nothing would ever unlight.
+					// startsWith so a room (/c/…) keeps its section lit; "/" only matches
+					// exactly or nothing would ever unlight.
 					const active =
 						item.href === "/"
 							? pathname === "/"
@@ -118,25 +106,6 @@ export function Sidebar({
 					);
 				})}
 			</ul>
-
-			<div className="mt-6 px-2">
-				<p className="px-2.5 pb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">
-					Teams ({TEAMS.length})
-				</p>
-				<ul className="space-y-0.5">
-					{TEAMS.map((team) => {
-						const Icon = team.icon;
-						return (
-							<li key={team.name}>
-								<span className="flex cursor-default items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-raised/60 hover:text-text">
-									<Icon className="size-4" style={{ color: team.color }} />
-									{team.name}
-								</span>
-							</li>
-						);
-					})}
-				</ul>
-			</div>
 
 			<div className="mt-6 flex min-h-0 flex-1 flex-col px-2">
 				<p className="px-2.5 pb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">
@@ -186,15 +155,14 @@ export function Sidebar({
 
 			<div className="border-t border-line p-3">
 				<div className="flex items-center gap-2 rounded-xl px-1 py-1">
-					<span
-						className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-medium text-white"
-						style={{ backgroundColor: "#8b5cf6" }}
-					>
-						PS
+					<span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-[11px] font-semibold text-primary-foreground">
+						{(orgName ?? "?").slice(0, 1).toUpperCase()}
 					</span>
 					<div className="min-w-0">
-						<p className="truncate text-sm font-medium text-text">Priya Shah</p>
-						<p className="truncate text-xs text-muted">Account Executive</p>
+						<p className="truncate text-sm font-medium text-text">{orgName ?? "No org"}</p>
+						<p className="truncate text-xs text-muted">
+							{devMode ? "dev mode — no sign-in" : "signed in"}
+						</p>
 					</div>
 				</div>
 			</div>
