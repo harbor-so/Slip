@@ -75,7 +75,13 @@ export type BootModeReason =
 	/** Restore was asked for but the disk is empty — the snapshot was empty or expired. */
 	| "restore_yielded_empty_workspace"
 	/** Restore was asked for, this box has snapshots off, and there is nothing to lose. */
-	| "snapshots_disabled_workspace_empty";
+	| "snapshots_disabled_workspace_empty"
+	/** This box is building an image: clone the pinned SHA and run setup.sh fatally. */
+	| "build_provisioning"
+	/** A prebuilt repo image was requested and its baked checkout is on disk. */
+	| "image_workspace_present"
+	/** A repo image was requested but the disk is empty — the image baked no checkout. */
+	| "image_yielded_empty_workspace";
 
 export type BootModeRefusal =
 	/** A string that is not a `BootMode` at all. */
@@ -107,21 +113,33 @@ export interface BootModeInput {
 	snapshotsEnabled: boolean;
 	/** Does the workspace root already contain a checkout? See `resolveBootMode`. */
 	workspacePopulated: boolean;
+	/**
+	 * Does the baked staging path contain a checkout? The `repo_image` analogue of
+	 * `workspacePopulated`: a `repo_image` boot copies from the baked path rather than
+	 * the workspace (which is empty until the copy), so its "did the image actually
+	 * carry a checkout" question is about the staging path, not the workspace.
+	 */
+	bakedWorkspacePopulated: boolean;
 }
 
 /**
  * The modes this version of the in-sandbox runtime can honour.
  *
- * `build` and `repo_image` are in the contract because they are real strategies
- * and the control plane may grow them, but they are refused here rather than
- * quietly treated as `fresh`. The reason is the hook table below: in `repo_image`,
- * `setup.sh` must *not* run because it already ran at image build time, and
- * treating an unimplemented mode as `fresh` runs it again — reinstalling
- * dependencies over a warm image, which is both the slow path and, for a
- * `setup.sh` that is not idempotent, the broken one. Refusing names the problem;
- * guessing produces a boot that is merely strange.
+ * All four `BOOT_MODES` are now implemented. `build` is what the per-repo image
+ * pipeline boots the base image in — clone the pinned SHA, run `setup.sh` fatally,
+ * no agent — and `repo_image` is what a session boots in once that pipeline has
+ * published an image: the checkout and its dependencies are baked in, so `setup.sh`
+ * must *not* run again (see the hook table below), and the workspace is not cloned
+ * over. Each mode implies a different answer to "has setup.sh already run", which is
+ * why the resolver returns exactly one mode at one site and refuses a string it does
+ * not recognise rather than guessing.
  */
-const SUPPORTED_BOOT_MODES: readonly BootMode[] = ["fresh", "snapshot_restore"];
+const SUPPORTED_BOOT_MODES: readonly BootMode[] = [
+	"fresh",
+	"snapshot_restore",
+	"build",
+	"repo_image",
+];
 
 /**
  * Decide how this box came up. Exactly one mode, resolved once, at one site.
@@ -246,15 +264,44 @@ export function resolveBootMode(input: BootModeInput): BootModeResolution {
 		}
 
 		case "build":
-		case "repo_image":
-			// Unreachable: filtered by SUPPORTED_BOOT_MODES above. Listed anyway so that
-			// implementing one of them is a compile error here rather than a silent
-			// fall-through to the refusal.
+			// The image pipeline boots the base here. The workspace starts empty and is
+			// cloned into; `setup.sh` runs fatally (a broken setup must fail the build,
+			// not bake a broken image); `start.sh` is skipped — there is no agent yet.
 			return {
-				kind: "refused",
-				reason: "unsupported_in_this_version",
-				requested,
-				message: `Boot mode '${requested}' is not implemented by this runtime.`,
+				kind: "resolved",
+				mode: "build",
+				reason: "build_provisioning",
+				degradedFrom: null,
+				warning: null,
+			};
+
+		case "repo_image":
+			if (input.bakedWorkspacePopulated) {
+				return {
+					kind: "resolved",
+					mode: "repo_image",
+					reason: "image_workspace_present",
+					degradedFrom: null,
+					warning: null,
+				};
+			}
+			// A prebuilt image should carry its own checkout. An empty workspace means the
+			// image baked none, or a volume was mounted over it. Degrade to a fresh clone
+			// plus setup rather than skip setup on a tree that has never had it run —
+			// the same fail-safe the snapshot-empty case takes, and for the same reason.
+			return {
+				kind: "resolved",
+				mode: "fresh",
+				reason: "image_yielded_empty_workspace",
+				degradedFrom: "repo_image",
+				warning: {
+					code: "boot.repo_image_empty",
+					message:
+						"A prebuilt repo image was requested but the workspace is empty, so the image "
+						+ "carried no checkout. Booting fresh instead: this turn pays a cold start and "
+						+ "re-runs setup.sh, which is correct. Repeated occurrences mean the image build "
+						+ "is not baking the workspace.",
+				},
 			};
 	}
 	return assertNever(requested, "BootMode in resolveBootMode");
@@ -363,6 +410,28 @@ export function hookPolicy(hook: HookName, mode: BootMode): HookPolicy {
 			return assertNever(mode, "BootMode in hookPolicy(start)");
 	}
 	return assertNever(hook, "HookName in hookPolicy");
+}
+
+/**
+ * Does this boot populate the workspace by cloning, or is it already populated?
+ *
+ * `fresh` and `build` start from an empty tree and clone into it. `snapshot_restore`
+ * and `repo_image` boot from an image or snapshot that already carries the checkout,
+ * and cloning over it would either wipe baked state or fail on a non-empty target.
+ * This is the workspace analogue of `hookPolicy`'s setup decision, kept here and pure
+ * for the same reason: one answer, one site, testable at its boundary. No `default`
+ * arm, so a fifth boot mode is a compile error here rather than a silent clone.
+ */
+export function shouldClone(mode: BootMode): boolean {
+	switch (mode) {
+		case "fresh":
+		case "build":
+			return true;
+		case "repo_image":
+		case "snapshot_restore":
+			return false;
+	}
+	return assertNever(mode, "BootMode in shouldClone");
 }
 
 // ---------------------------------------------------------------------------

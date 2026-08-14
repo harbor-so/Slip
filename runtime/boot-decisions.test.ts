@@ -25,6 +25,7 @@ import {
 	pushBounded,
 	reconnectDelayMs,
 	resolveBootMode,
+	shouldClone,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
 	type BufferEntry,
@@ -37,6 +38,7 @@ describe("resolveBootMode", () => {
 				requested,
 				snapshotsEnabled: false,
 				workspacePopulated: false,
+				bakedWorkspacePopulated: false,
 			});
 			expect(result).toEqual({
 				kind: "resolved",
@@ -53,6 +55,7 @@ describe("resolveBootMode", () => {
 			requested: "warm",
 			snapshotsEnabled: true,
 			workspacePopulated: true,
+			bakedWorkspacePopulated: false,
 		});
 		expect(result.kind).toBe("refused");
 		if (result.kind !== "refused") throw new Error("unreachable");
@@ -62,40 +65,75 @@ describe("resolveBootMode", () => {
 		expect(result.message).toContain("setup.sh");
 	});
 
-	it("refuses contract modes this version does not implement", () => {
-		for (const requested of ["build", "repo_image"] as const) {
-			const result = resolveBootMode({
-				requested,
-				snapshotsEnabled: true,
-				workspacePopulated: true,
-			});
-			expect(result.kind).toBe("refused");
-			if (result.kind !== "refused") throw new Error("unreachable");
-			expect(result.reason).toBe("unsupported_in_this_version");
-		}
+	it("build resolves to a provisioning boot: clone the SHA and run setup fatally", () => {
+		// The image pipeline boots the base image in this mode. A populated workspace is
+		// irrelevant — a build starts from an empty base and clones — so the resolution
+		// does not depend on it.
+		const result = resolveBootMode({
+			requested: "build",
+			snapshotsEnabled: false,
+			workspacePopulated: false,
+			bakedWorkspacePopulated: false,
+		});
+		expect(result).toMatchObject({ kind: "resolved", mode: "build", reason: "build_provisioning" });
+	});
+
+	it("repo_image uses the baked checkout when present, and degrades to fresh when empty", () => {
+		// The decision is about the BAKED path, not the workspace, which is empty at boot
+		// until the copy this resolution gates.
+		expect(
+			resolveBootMode({
+				requested: "repo_image",
+				snapshotsEnabled: false,
+				workspacePopulated: false,
+				bakedWorkspacePopulated: true,
+			}),
+		).toMatchObject({ kind: "resolved", mode: "repo_image", reason: "image_workspace_present" });
+
+		// An image that baked no checkout must not skip setup on a tree that never had it
+		// run: degrade to a fresh clone plus setup, with a warning naming the cause.
+		const empty = resolveBootMode({
+			requested: "repo_image",
+			snapshotsEnabled: false,
+			workspacePopulated: false,
+			bakedWorkspacePopulated: false,
+		});
+		expect(empty).toMatchObject({
+			kind: "resolved",
+			mode: "fresh",
+			reason: "image_yielded_empty_workspace",
+			degradedFrom: "repo_image",
+		});
+		if (empty.kind !== "resolved" || empty.warning === null) throw new Error("expected a warning");
+		expect(empty.warning.code).toBe("boot.repo_image_empty");
 	});
 
 	it("covers every mode in the contract, so a new one cannot be silently ignored", () => {
 		// Not a formality: if BOOT_MODES grows and resolveBootMode is not updated, the
 		// new member lands in the `unrecognised` branch, which reads to an operator as
-		// "Harbor does not know its own contract".
+		// "Harbor does not know its own contract". All four are now implemented, so none
+		// is refused as unsupported.
 		for (const mode of BOOT_MODES) {
 			const result = resolveBootMode({
 				requested: mode,
 				snapshotsEnabled: true,
 				workspacePopulated: true,
+				bakedWorkspacePopulated: true,
 			});
-			if (result.kind === "refused") {
-				expect(result.reason).toBe("unsupported_in_this_version");
-			} else {
-				expect(["fresh", "snapshot_restore"]).toContain(result.mode);
-			}
+			expect(result.kind).toBe("resolved");
+			if (result.kind !== "resolved") throw new Error("unreachable");
+			expect(["fresh", "snapshot_restore", "build", "repo_image"]).toContain(result.mode);
 		}
 	});
 
 	describe("the snapshot matrix", () => {
 		const restore = (snapshotsEnabled: boolean, workspacePopulated: boolean) =>
-			resolveBootMode({ requested: "snapshot_restore", snapshotsEnabled, workspacePopulated });
+			resolveBootMode({
+				requested: "snapshot_restore",
+				snapshotsEnabled,
+				workspacePopulated,
+				bakedWorkspacePopulated: false,
+			});
 
 		it("honours a restore when snapshots are on and the tree is there", () => {
 			const result = restore(true, true);
@@ -149,6 +187,7 @@ describe("resolveBootMode", () => {
 					requested: "snapshot_restore",
 					snapshotsEnabled,
 					workspacePopulated,
+					bakedWorkspacePopulated: false,
 				});
 				if (result.kind !== "resolved") continue;
 				expect(result.degradedFrom === null).toBe(result.warning === null);
@@ -221,6 +260,22 @@ describe("hookPolicy", () => {
 			expect(() => hookPolicy("setup", mode)).not.toThrow();
 			expect(() => hookPolicy("start", mode)).not.toThrow();
 		}
+	});
+});
+
+describe("shouldClone", () => {
+	it("clones for the modes that start from an empty tree", () => {
+		expect(shouldClone("fresh")).toBe(true);
+		expect(shouldClone("build")).toBe(true);
+	});
+
+	it("does not clone over a workspace an image or snapshot already populated", () => {
+		expect(shouldClone("repo_image")).toBe(false);
+		expect(shouldClone("snapshot_restore")).toBe(false);
+	});
+
+	it("answers for every mode in the contract", () => {
+		for (const mode of BOOT_MODES) expect(() => shouldClone(mode)).not.toThrow();
 	});
 });
 

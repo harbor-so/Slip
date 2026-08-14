@@ -893,6 +893,7 @@ export function evaluateExecutionTimeout(
  */
 export type BootModeReason =
 	| "snapshot_available"
+	| "repo_image_fresh"
 	| "snapshots_disabled"
 	| "no_snapshot_ref"
 	| "provider_cannot_restore";
@@ -905,39 +906,63 @@ export interface BootModeResolution {
 export interface BootModeInput {
 	/** Provider handle for previously captured filesystem state, if any. */
 	snapshotRef: string | null;
+	/**
+	 * A published prebuilt repo image to boot from, or null.
+	 *
+	 * Already freshness-filtered AND provider-gated by the caller: this is `null`
+	 * unless the pointer is within `imageMaxAgeMs` and the provider can actually boot
+	 * an image. The freshness comparison reads the clock and the config through the
+	 * pure `src/images/decisions.ts`, and it lives in the caller rather than here so
+	 * this module's import list stays `{config, contracts}` — a boundary a test
+	 * asserts mechanically.
+	 */
+	repoImageRef: string | null;
 	capabilities: SandboxCapabilities;
 	overrides?: RepoOverrides;
 }
 
 /**
- * Pick how the box comes up.
+ * Pick how the box comes up. This resolver selects between three of the four
+ * `BOOT_MODES`; the fourth, `build`, is chosen by the image pipeline, never here.
  *
- * Only two of the four `BOOT_MODES` are reachable in v1, and that is a shipping
- * decision rather than an omission. `build` and `repo_image` describe a
- * pre-built-image pipeline that does not exist yet; having the resolver able to
- * return them would mean the supervisor's `HARBOR_BOOT_MODE` could take a value
- * no hook has ever been tested against, and the visible symptom would be
- * `setup.sh` silently not running — dependencies missing, agent confused, nothing
- * in the logs.
+ * The order encodes a precedence. `snapshot_restore` wins first: it carries THIS
+ * session's own prior filesystem, so it is strictly more specific than a generic
+ * warm image, and it needs all three of the flag on, a snapshot to restore, and a
+ * provider that can restore one — each a real failure if assumed. `repo_image` is
+ * next: a per-repo image with dependencies already baked, so `setup.sh` is skipped;
+ * it is an independent optimisation and is reachable even with snapshots off, but the
+ * caller only ever passes a non-null `repoImageRef` when the published image is fresh
+ * enough to boot and the provider can boot it. Everything else is `fresh`, and the
+ * returned reason names which fast path did not apply — because "why did this
+ * cold-boot" has several answers and the field is the only thing that distinguishes
+ * them.
  *
- * `snapshot_restore` needs all three of: the feature flag on, a snapshot to
- * restore, and a provider that can restore one. Every one of those is a real
- * failure if assumed. The flag is off by default because restore is a latency
- * optimisation with sharp edges — snapshots expire, some provider restore APIs
- * are experimental, and on at least one provider taking a snapshot can terminate
- * the source box. A new adopter's first strange bug should not be in the least
- * observable part of the system, so the honest default is `fresh` and the
- * upgrade is opt-in.
+ * Both fast paths are off by default and opt-in, because both are latency
+ * optimisations with sharp edges — a snapshot can expire, an image can go stale — and
+ * a new adopter's first strange bug should not be in the least observable part of the
+ * system.
  */
 export function resolveBootMode(input: BootModeInput): BootModeResolution {
-	if (!setting("enableSnapshots", input.overrides)) {
-		return { mode: "fresh", reason: "snapshots_disabled" };
+	const snapshotsEnabled = setting("enableSnapshots", input.overrides);
+
+	// Snapshot restore is the most specific fast path: it carries THIS session's own
+	// prior work, so it beats a generic warm image when both are available and usable.
+	if (snapshotsEnabled && input.snapshotRef && input.capabilities.supportsRestore) {
+		return { mode: "snapshot_restore", reason: "snapshot_available" };
 	}
+
+	// A fresh published repo image beats a cold boot: its dependencies are already
+	// baked, so `setup.sh` is skipped. Reachable even with snapshots off — it is an
+	// independent optimisation, not a variant of restore.
+	if (input.repoImageRef !== null) {
+		return { mode: "repo_image", reason: "repo_image_fresh" };
+	}
+
+	// Neither fast path applied. The fresh reason names which, because "why did this
+	// cold-boot" has several answers and only the reason field tells them apart.
+	if (!snapshotsEnabled) return { mode: "fresh", reason: "snapshots_disabled" };
 	if (!input.snapshotRef) return { mode: "fresh", reason: "no_snapshot_ref" };
-	if (!input.capabilities.supportsRestore) {
-		return { mode: "fresh", reason: "provider_cannot_restore" };
-	}
-	return { mode: "snapshot_restore", reason: "snapshot_available" };
+	return { mode: "fresh", reason: "provider_cannot_restore" };
 }
 
 // ---------------------------------------------------------------------------

@@ -82,6 +82,8 @@ export const SANDBOX_OPERATIONS = [
 	"restore",
 	"pause",
 	"resume",
+	"build_image",
+	"prune_images",
 ] as const;
 export type SandboxOperation = (typeof SANDBOX_OPERATIONS)[number];
 
@@ -507,6 +509,92 @@ export function isSnapshotProvider(provider: SandboxProvider): provider is Snaps
 
 export function isPersistentProvider(provider: SandboxProvider): provider is PersistentProvider {
 	return provider.kind === "persistent";
+}
+
+/** What to build, and what to publish it as. */
+export interface ImageBuildConfig {
+	/** The image to build FROM, before the repo's `setup.sh` bakes dependencies on top. */
+	base: string;
+	/** The reference to publish the result as, e.g. `harbor-repo-<id>:<sha>`. */
+	targetTag: string;
+	workspace: string;
+	/**
+	 * The same environment contract a spawn uses. A build IS a boot in `build` mode,
+	 * so this carries `HARBOR_BOOT_MODE=build` and `HARBOR_REPOS`, and the in-box
+	 * supervisor clones and runs `setup.sh` from it exactly as it would for a session.
+	 */
+	env: Record<string, string>;
+	features: Record<string, boolean>;
+	/** Wall-clock ceiling for the whole build, killed past it. */
+	timeoutMs: number;
+}
+
+/** A successfully built, bootable image. */
+export interface BuiltImage {
+	/** The handle a later spawn boots from. */
+	imageRef: string;
+	/** The provider that built it. */
+	provider: string;
+	/** A bounded tail of the build log, kept for the `image_builds` record. */
+	log: string;
+}
+
+/**
+ * A provider that can bake a per-repo image with dependencies pre-installed.
+ *
+ * This capability is ORTHOGONAL to `kind`, which is why it is a separate interface
+ * and not a fourth discriminant: `docker` is a `snapshot` provider AND an image
+ * builder, and a fourth `kind` would force it to be only one. So image-building is a
+ * mixin a provider may also implement, discovered through `isImageBuildingProvider`
+ * — the same "capability is a type, not a boolean" discipline the snapshot and
+ * persistent capabilities follow. A provider that cannot build images (the `local`
+ * provider) simply does not implement it, has no `buildImage` method on its type,
+ * and calling one on it is a **compile error** rather than a runtime refusal.
+ *
+ * It deliberately does NOT hang an optional `buildImage?()` off `SandboxProviderBase`
+ * paired with a `supportsImages` boolean. That shape — the one the codebase rejects
+ * everywhere — lets `provider.buildImage?.(cfg)` return `undefined` on a backend that
+ * cannot build, with nothing tying the boolean to the method, and the failure surfaces
+ * as a repo whose image never appears and no error that says why.
+ */
+export interface ImageBuildingProvider {
+	/**
+	 * Discriminant, present and `true` only on providers that build images. The guard
+	 * reads it so the narrowing is a type check rather than a `typeof method` sniff.
+	 */
+	readonly buildsImages: true;
+
+	/**
+	 * Build and publish an image, or throw.
+	 *
+	 * A non-zero `setup.sh` MUST fail the build and publish nothing — baking a broken
+	 * image is the one permanent permissiveness, inherited by every box from it with
+	 * no warning. The thrown `SandboxProviderError` is a `config`-type (non-tripping)
+	 * error, not `transient`: a repository's broken setup is the repository's problem
+	 * and must not open the provider's circuit against every other repo.
+	 */
+	buildImage(config: ImageBuildConfig): Promise<BuiltImage>;
+
+	/**
+	 * Remove images this provider built under `tagPrefix` that are not in `keep`,
+	 * returning the references actually removed. Bounds the disk an unattended,
+	 * per-interval build loop would otherwise grow forever.
+	 */
+	pruneImages(tagPrefix: string, keep: readonly string[]): Promise<string[]>;
+}
+
+/**
+ * Narrowing helper for the image-building capability.
+ *
+ * `"buildsImages" in provider` is a real type narrowing, so this needs no cast and
+ * a provider that lacks the field cannot pass. A `SandboxProvider` from the registry
+ * therefore cannot call `buildImage` without going through this guard, and a value
+ * statically typed as the `local` provider cannot call it at all.
+ */
+export function isImageBuildingProvider(
+	provider: SandboxProvider,
+): provider is SandboxProvider & ImageBuildingProvider {
+	return "buildsImages" in provider && provider.buildsImages === true;
 }
 
 /**

@@ -590,6 +590,95 @@ export const SETTINGS = {
 		parse: asBool,
 	} satisfies Setting<boolean>,
 
+	// -- Prebuilt repo images ------------------------------------------------
+
+	imageBuildEnabled: {
+		env: "HARBOR_IMAGE_BUILD_ENABLED",
+		fallback: false,
+		derivation:
+			"Off by default, opt in per repository. Building an image on a schedule is "
+			+ "a standing compute bill and a background loop with no human in it, so an "
+			+ "operator who upgrades Harbor must see no new spend and no behaviour change "
+			+ "until they deliberately turn it on for a repo whose cold start actually "
+			+ "hurts. Set it in `repos.config` to enable one repo without enabling all.",
+		parse: asBool,
+	} satisfies Setting<boolean>,
+
+	imageBuildIntervalMs: {
+		env: "HARBOR_IMAGE_BUILD_INTERVAL_MS",
+		fallback: 1_800_000,
+		derivation:
+			"Thirty minutes, the reference implementation's cadence. It is the staleness "
+			+ "bound on baked dependencies: a new dependency added to the repo is absent "
+			+ "from the image until the next build, so this is the longest a session may "
+			+ "boot with a slightly old lockfile installed. Shorter means fresher images "
+			+ "and more build spend; longer means cheaper and staler. Must be at most "
+			+ "`imageMaxAgeMs`, or every image is stale the moment it is published.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	imageMaxAgeMs: {
+		env: "HARBOR_IMAGE_MAX_AGE_MS",
+		fallback: 5_400_000,
+		derivation:
+			"Ninety minutes: three build intervals at the default cadence. The freshness "
+			+ "cutoff a spawn applies before booting from a published image — older than "
+			+ "this and the boot falls through to `fresh` rather than trust an image whose "
+			+ "dependencies may have drifted. Three intervals tolerates two consecutively "
+			+ "failed or skipped builds before sessions silently stop using the image; a "
+			+ "value below `imageBuildIntervalMs` would make every image stale on arrival "
+			+ "and quietly disable the feature, which `validateConfig` refuses.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	imageBaseImage: {
+		env: "HARBOR_IMAGE_BASE_IMAGE",
+		fallback: "",
+		derivation:
+			"The image a build starts FROM before running the repo's `setup.sh`. Empty "
+			+ "means 'use `sandboxImage`', which is the right default: a prebuilt repo "
+			+ "image is the base sandbox image with dependencies baked on top, so the two "
+			+ "must not drift. Overridden per repo only when a repository genuinely needs "
+			+ "a different toolchain base than the fleet default.",
+		parse: asString,
+	} satisfies Setting<string>,
+
+	imageBuildTimeoutMs: {
+		env: "HARBOR_IMAGE_BUILD_TIMEOUT_MS",
+		fallback: 900_000,
+		derivation:
+			"Fifteen minutes. A build clones a repo and runs its `setup.sh`, which "
+			+ "installs a full dependency tree — legitimately slower than a boot, so this "
+			+ "is generous where `sandboxBootTimeoutMs` is tight. It is a backstop against "
+			+ "a hung `setup.sh` holding the one active-build slot open forever, not a "
+			+ "normal-case budget. Must be at least `sandboxBootTimeoutMs`.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	imageTickIntervalMs: {
+		env: "HARBOR_IMAGE_TICK_INTERVAL_MS",
+		fallback: 60_000,
+		derivation:
+			"How often the scheduler checks whether any repo's image is due. Cheap when "
+			+ "there is nothing to do — one indexed query over `repo_images` — so it can "
+			+ "be frequent without cost, and a minute keeps the actual build cadence close "
+			+ "to `imageBuildIntervalMs` rather than quantised to a coarse tick.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
+	imageRetentionCount: {
+		env: "HARBOR_IMAGE_RETENTION_COUNT",
+		fallback: 2,
+		derivation:
+			"How many built images to keep per repo. Two: the current pointer plus one "
+			+ "predecessor, so a session that spawned against the previous image just "
+			+ "before a publish still finds its image on disk. Older images are pruned to "
+			+ "bound disk, which otherwise grows by one image per repo every interval "
+			+ "forever. Must be at least one, or a publish would prune the image it just "
+			+ "published.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	autoSetupEnabled: {
 		env: "HARBOR_AUTO_SETUP",
 		fallback: true,
@@ -768,6 +857,37 @@ export function validateConfig(overrides?: RepoOverrides): void {
 				+ `(${snapshotCap}). Compaction would then delete events a snapshot is still `
 				+ "expected to carry, so a reconnecting client would be sent a snapshot with "
 				+ "holes in it and no marker saying so.",
+		);
+	}
+
+	const imageInterval = setting("imageBuildIntervalMs", overrides);
+	const imageMaxAge = setting("imageMaxAgeMs", overrides);
+	if (imageMaxAge < imageInterval) {
+		problems.push(
+			`HARBOR_IMAGE_MAX_AGE_MS (${imageMaxAge}) is below HARBOR_IMAGE_BUILD_INTERVAL_MS `
+				+ `(${imageInterval}). The freshness cutoff would then be shorter than the rebuild `
+				+ "cadence, so every image is older than the cutoff the moment it is published and no "
+				+ "session ever boots from one. The feature would appear enabled and do nothing — the "
+				+ "worst outcome, because the standing build spend is paid for zero latency benefit.",
+		);
+	}
+
+	const imageBuildTimeout = setting("imageBuildTimeoutMs", overrides);
+	if (imageBuildTimeout < boot) {
+		problems.push(
+			`HARBOR_IMAGE_BUILD_TIMEOUT_MS (${imageBuildTimeout}) is below HARBOR_SANDBOX_BOOT_TIMEOUT_MS `
+				+ `(${boot}). A build boots a container and then does strictly more than a normal boot — `
+				+ "it also installs the full dependency tree — so a budget tighter than a plain boot's "
+				+ "would kill every build during `setup.sh` and no image would ever publish.",
+		);
+	}
+
+	const imageRetention = setting("imageRetentionCount", overrides);
+	if (imageRetention < 1) {
+		problems.push(
+			`HARBOR_IMAGE_RETENTION_COUNT (${imageRetention}) must be at least 1. At zero, the prune `
+				+ "that runs after a publish would delete the image that publish just pointed at, so "
+				+ "every spawn would find its pointer dangling and fall back to a cold boot.",
 		);
 	}
 

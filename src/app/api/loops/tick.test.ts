@@ -129,6 +129,7 @@ describe("what a tick actually does", () => {
 			"compaction",
 			"deadlines",
 			"devin",
+			"images",
 			"orphans",
 			"pull_requests",
 			"sessions",

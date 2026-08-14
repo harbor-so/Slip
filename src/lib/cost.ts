@@ -82,7 +82,16 @@ type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
  * new kind is a deliberate change reviewed at each decision point rather than a
  * string some caller invents and nobody ever groups by.
  */
-export const COST_KINDS = ["sandbox_spawn", "sandbox_seconds", "tokens", "provider_call"] as const;
+export const COST_KINDS = [
+	"sandbox_spawn",
+	"sandbox_seconds",
+	"tokens",
+	"provider_call",
+	// Scheduled per-repo image builds. Attributed like any other automated spend so the
+	// fourth amplification path — a build loop with no human in it — rolls up to the org
+	// cap rather than being the one unbounded thing.
+	"image_build",
+] as const;
 export type CostKind = (typeof COST_KINDS)[number];
 
 /**

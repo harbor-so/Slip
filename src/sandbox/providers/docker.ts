@@ -41,8 +41,11 @@ import {
 	normalizeProviderState,
 } from "../provider.js";
 import type {
+	BuiltImage,
 	CreateSandboxConfig,
 	CreatedSandbox,
+	ImageBuildConfig,
+	ImageBuildingProvider,
 	SandboxInspection,
 	SandboxOperation,
 	SnapshotProvider,
@@ -195,8 +198,14 @@ function isDockerFailure(error: unknown): error is DockerFailure & Error {
 // The provider
 // ---------------------------------------------------------------------------
 
-export class DockerSandboxProvider implements SnapshotProvider {
+export class DockerSandboxProvider implements SnapshotProvider, ImageBuildingProvider {
 	readonly name = PROVIDER_NAME;
+	/**
+	 * Present and `true` so `isImageBuildingProvider` narrows to this. Docker builds
+	 * images; `local` does not implement `ImageBuildingProvider` at all, so calling
+	 * `buildImage` on it is a compile error rather than a runtime refusal.
+	 */
+	readonly buildsImages = true as const;
 	/**
 	 * `snapshot`, even though docker can also do persistent pause/resume.
 	 *
@@ -625,6 +634,191 @@ export class DockerSandboxProvider implements SnapshotProvider {
 		return this.runContainer({ ...config, image: ref.handle }, "restore", ref);
 	}
 
+	// -- image building -----------------------------------------------------
+
+	/**
+	 * Build a per-repo image: boot the base in `build` mode so the in-box supervisor
+	 * clones and runs `setup.sh`, wait for it, and `docker commit` the result.
+	 *
+	 * Deliberately NOT `runContainer`. Two differences are load-bearing:
+	 *
+	 *  - **No volume mount.** `create()` mounts a per-session volume at the workspace,
+	 *    which puts the clone and setup output *outside* the image — a `docker commit`
+	 *    would then bake an empty tree. The build writes into the container's own
+	 *    writable layer so the commit captures it.
+	 *  - **No `--network none` / `--read-only`.** A build clones a repo and installs a
+	 *    dependency tree; both need the network and a writable root. This is an
+	 *    internal operation over the operator's own repository, running the same
+	 *    `setup.sh` a fresh boot runs unrestricted.
+	 *
+	 * The container is run detached and awaited with `docker wait` rather than a
+	 * foreground `docker run`, so a non-zero `setup.sh` is read as an exit code to act
+	 * on rather than thrown as a CLI error and misclassified.
+	 */
+	async buildImage(config: ImageBuildConfig): Promise<BuiltImage> {
+		const operation: SandboxOperation = "build_image";
+		assertArgSafe(config.base, "base image", operation);
+		assertArgSafe(config.targetTag, "target image tag", operation);
+		assertArgSafe(config.workspace, "workspace path", operation);
+
+		const container = buildContainerName(config.targetTag);
+		// Clear a container left by a crashed prior build with the same name; without
+		// this the `--name` below conflicts and every build after a crash fails.
+		await this.rmForce(container);
+
+		const args = [
+			"run",
+			"--detach",
+			"--name",
+			container,
+			"--init",
+			"--label",
+			`${LABEL.managed}=1`,
+			"--workdir",
+			config.workspace,
+		];
+		for (const [key, value] of Object.entries(config.env)) {
+			if (!ENV_KEY_SAFE.test(key)) {
+				throw new SandboxProviderError({
+					message: `Environment variable name ${JSON.stringify(key)} is not a valid identifier.`,
+					errorType: "invalid_config",
+					provider: PROVIDER_NAME,
+					operation,
+				});
+			}
+			if (value.includes("\0")) {
+				throw new SandboxProviderError({
+					message: `Environment value for ${key} contains a NUL byte and cannot be passed as argv.`,
+					errorType: "invalid_config",
+					provider: PROVIDER_NAME,
+					operation,
+				});
+			}
+			args.push("--env", `${key}=${value}`);
+		}
+		args.push(config.base, ...BUILD_COMMAND);
+
+		const { stdout } = await this.run(args, operation, config.timeoutMs);
+		const cid = lastLine(stdout);
+		if (!cid) {
+			await this.rmForce(container);
+			throw new SandboxProviderError({
+				message: "docker run for the build reported success but printed no container id.",
+				errorType: "unknown",
+				provider: PROVIDER_NAME,
+				operation,
+			});
+		}
+
+		try {
+			const exit = await this.waitForBuildExit(container, config.timeoutMs, operation);
+			const log = await this.buildLog(container);
+			if (exit !== 0) {
+				throw new SandboxProviderError({
+					message:
+						`Image build failed: the boot (setup.sh) exited ${exit}. A non-zero setup at build `
+						+ "time fails the build and publishes nothing — baking a broken image is permanent, "
+						+ "inherited by every box started from it with no warning anywhere.",
+					// The repository's setup is the repository's problem: a config error, not
+					// `transient`, so one repo's broken setup never opens the provider's circuit
+					// against every other repo building on the same schedule.
+					errorType: "invalid_config",
+					provider: PROVIDER_NAME,
+					operation,
+					detail: log.slice(-setting("maxEventPayloadChars")),
+				});
+			}
+			await this.run(
+				["commit", container, config.targetTag],
+				operation,
+				setting("sandboxBootTimeoutMs"),
+			);
+			return { imageRef: config.targetTag, provider: PROVIDER_NAME, log };
+		} finally {
+			await this.rmForce(container);
+		}
+	}
+
+	/**
+	 * Remove images under `tagPrefix` not in `keep`. Best-effort: an image still
+	 * backing a running container refuses removal, which is the safe direction — a
+	 * spawn mid-flight against the predecessor keeps its image — so a refusal is
+	 * skipped rather than fatal.
+	 */
+	async pruneImages(tagPrefix: string, keep: readonly string[]): Promise<string[]> {
+		const operation: SandboxOperation = "prune_images";
+		assertArgSafe(tagPrefix, "image tag prefix", operation);
+		const { stdout } = await this.run(
+			["images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", `reference=${tagPrefix}*`],
+			operation,
+			this.probeTimeoutMs(),
+		);
+		const keepSet = new Set(keep);
+		const removed: string[] = [];
+		for (const ref of stdout.split("\n").map((line) => line.trim()).filter(Boolean)) {
+			if (keepSet.has(ref)) continue;
+			try {
+				await this.run(["rmi", ref], operation, this.probeTimeoutMs());
+				removed.push(ref);
+			} catch (error) {
+				// In-use or already gone: skip. A daemon-down error would surface on the
+				// listing call above, not here, so anything at this point is safe to ignore.
+				if (error instanceof SandboxProviderError) continue;
+				throw error;
+			}
+		}
+		return removed;
+	}
+
+	/**
+	 * Await the build container's exit code via `docker wait`, bounded.
+	 *
+	 * `docker wait` prints the container's exit code and itself exits zero, so a
+	 * failed `setup.sh` comes back as a number rather than a thrown CLI error. Our own
+	 * timeout killing `docker wait` means the build overran; the caller's `finally`
+	 * removes the still-running container.
+	 */
+	private async waitForBuildExit(
+		container: string,
+		timeoutMs: number,
+		operation: SandboxOperation,
+	): Promise<number> {
+		try {
+			const { stdout } = await this.run(["wait", container], operation, timeoutMs);
+			const code = Number.parseInt(lastLine(stdout), 10);
+			return Number.isFinite(code) ? code : 1;
+		} catch (error) {
+			throw new SandboxProviderError({
+				message: `Image build exceeded its ${timeoutMs}ms budget and was aborted.`,
+				errorType: "transient",
+				provider: PROVIDER_NAME,
+				operation,
+				cause: error,
+			});
+		}
+	}
+
+	private async buildLog(container: string): Promise<string> {
+		try {
+			const { stdout, stderr } = await this.run(
+				["logs", "--tail", "200", container],
+				"build_image",
+				this.probeTimeoutMs(),
+			);
+			return `${stdout}\n${stderr}`.slice(-setting("maxRunOutputChars"));
+		} catch {
+			return "";
+		}
+	}
+
+	private async rmForce(container: string): Promise<void> {
+		try {
+			await this.run(["rm", "--force", container], "build_image", this.probeTimeoutMs());
+		} catch {
+			// Best effort: the container may already be gone, which is the goal.
+		}
+	}
+
 	// -- parsing ------------------------------------------------------------
 
 	private parseInspection(stdout: string, operation: SandboxOperation): SandboxInspection {
@@ -689,6 +883,27 @@ export function volumeName(sessionId: string): string {
 function snapshotTag(sandboxId: string, at: Date): string {
 	const stamp = at.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 	return `harbor-snapshot:${sandboxId.toLowerCase()}-${stamp}`;
+}
+
+/**
+ * The container command that runs a build.
+ *
+ * The build entrypoint runs `boot()` in `build` mode against a no-op bridge — it
+ * clones, runs `setup.sh` fatally, and exits — with no control-plane connection and
+ * no agent. Not a tunable; the emitted path is fixed by the Dockerfile's layout.
+ */
+const BUILD_COMMAND = ["node", "/opt/harbor/runtime/build-entry.js"] as const;
+
+/**
+ * A docker container name derived from the target image tag.
+ *
+ * Container names allow a narrower character set than image references — no `:` or
+ * `/` — so the tag is sanitised to a name that is stable per repo. Stable rather than
+ * random so a crashed build's leftover container is found and removed by the next
+ * build of the same repo instead of accumulating.
+ */
+function buildContainerName(targetTag: string): string {
+	return `harbor-build-${targetTag.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-")}`;
 }
 
 function firstLine(text: string): string {

@@ -6,7 +6,7 @@
  * colour. Everything else on this page is context for that number.
  */
 
-import { conflictsPrevented, recentEvents } from "../lib/dashboard.js";
+import { conflictsPrevented, listRepoImages, recentEvents } from "../lib/dashboard.js";
 import { relTime, shortId } from "../lib/format.js";
 import { currentSession } from "../lib/session.js";
 import { listWork, presenceWindowMs, presentAgents } from "../lib/work.js";
@@ -32,11 +32,12 @@ export default async function ActivityPage() {
 		return <Empty title="No organisation yet" hint="Run npm run db:seed to create one." />;
 	}
 
-	const [tasks, feed, conflicts, present] = await Promise.all([
+	const [tasks, feed, conflicts, present, images] = await Promise.all([
 		listWork(session.orgId),
 		recentEvents(session.orgId, 25),
 		conflictsPrevented(session.orgId),
 		presentAgents(session.orgId),
+		listRepoImages(session.orgId),
 	]);
 
 	const now = new Date();
@@ -148,6 +149,41 @@ export default async function ActivityPage() {
 					</Card>
 				)}
 			</section>
+
+			{/* Prebuilt images: shown only where a repo has opted in, so an operator not
+			    using the feature sees no new, empty section. */}
+			{images.length > 0 ? (
+				<section>
+					<SectionLabel>Prebuilt images</SectionLabel>
+					<div className="space-y-1">
+						{images.map((image) => {
+							const tone: Tone = image.pausedReason
+								? "expired"
+								: image.imageRef
+									? "completed"
+									: "neutral";
+							const label = image.pausedReason
+								? "paused"
+								: image.imageRef
+									? "built"
+									: "pending";
+							return (
+								<div className="flex items-baseline gap-3 text-sm" key={image.repoId}>
+									<Badge tone={tone}>{label}</Badge>
+									<span className="truncate">
+										{image.owner}/{image.name}
+									</span>
+									<span className="nums ml-auto shrink-0 text-xs text-muted-foreground">
+										{image.builtAt
+											? `built ${relTime(now.getTime() - image.builtAt.getTime())} ago`
+											: "not built yet"}
+									</span>
+								</div>
+							);
+						})}
+					</div>
+				</section>
+			) : null}
 
 			<section>
 				<SectionLabel>Recent activity</SectionLabel>

@@ -42,7 +42,7 @@ import type {
 	AgentUsage,
 } from "../src/contracts/agent.js";
 import { AGENT_RUNTIMES } from "../src/contracts/agent.js";
-import type { BootMode } from "../src/contracts/index.js";
+import { BAKED_WORKSPACE_ROOT, type BootMode } from "../src/contracts/index.js";
 import { adapterFor, stripAnsi, usageAccumulationFor } from "./adapters/index.js";
 import {
 	TUNNEL_ENV_PATH,
@@ -50,6 +50,7 @@ import {
 	hookPolicy,
 	pushDecision,
 	resolveBootMode,
+	shouldClone,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
 	type BootWarning,
@@ -319,6 +320,9 @@ export async function boot(
 		requested: config.requestedBootMode,
 		snapshotsEnabled: setting("enableSnapshots"),
 		workspacePopulated: hasCheckout(primary),
+		// A `repo_image` boot decides on the baked staging path, not the workspace: the
+		// workspace is empty until the copy that this resolution gates.
+		bakedWorkspacePopulated: hasCheckout(join(BAKED_WORKSPACE_ROOT, config.repos[0]?.name ?? "")),
 	});
 	if (resolution.kind === "refused") {
 		return finish({ kind: "failed", stage: "boot_mode", message: resolution.message, warnings });
@@ -334,10 +338,21 @@ export async function boot(
 
 	await configureGit(config, env);
 
-	if (mode === "fresh") {
+	if (shouldClone(mode)) {
 		const cloned = await cloneRepos(config, bridge, env);
 		if (cloned !== null) {
 			return finish({ kind: "failed", stage: "clone", message: cloned, warnings });
+		}
+	}
+
+	// A `repo_image` boot does not clone: the checkout and its dependencies were baked
+	// at build time. But they were baked at a staging path, because the workspace is a
+	// volume the build's `docker commit` could not capture — so copy them into the real
+	// workspace now, once, in place of the network clone + install a fresh boot pays.
+	if (mode === "repo_image") {
+		const restored = await restoreBakedWorkspace(config, bridge, env);
+		if (restored !== null) {
+			return finish({ kind: "failed", stage: "restore_baked", message: restored, warnings });
 		}
 	}
 
@@ -348,8 +363,10 @@ export async function boot(
 	if (setupResult.kind === "degraded") warn(setupResult.warning);
 
 	// The hook wins completely when it exists. This runs only when it does not —
-	// and only when the boot mode would have run one, so a `repo_image` boot does
-	// not reinstall what is already baked in.
+	// and only when the boot mode would have run one, so a `repo_image` boot (whose
+	// setup skip reason is `already_applied_in_image`, not `absent`) does not
+	// reinstall what is already baked in. A `build` with no hook DOES auto-install,
+	// so its dependencies get baked into the image.
 	if (setupResult.kind === "skipped" && setupResult.reason === "absent") {
 		const auto = await runAutoSetup(config, mode, bridge, env, primary);
 		if (auto.kind === "failed") {
@@ -358,8 +375,13 @@ export async function boot(
 		if (auto.kind === "degraded") warn(auto.warning);
 	}
 
-	const tunnels = await waitForTunnels(config, bridge, env);
-	if (tunnels !== null) warn(tunnels);
+	// A build has no agent and no start.sh (see hookPolicy), so there is nothing that
+	// consumes a tunnel URL. Waiting for one would burn the whole tunnel budget on
+	// every image build for a service no build ever starts.
+	if (mode !== "build") {
+		const tunnels = await waitForTunnels(config, bridge, env);
+		if (tunnels !== null) warn(tunnels);
+	}
 
 	const startResult = await runHook("start", config, mode, bridge, env, primary);
 	if (startResult.kind === "failed") {
@@ -499,14 +521,21 @@ async function cloneRepos(
 		const target = join(config.workspaceRoot, repo.name);
 		bridge.emit({ type: "boot_progress", payload: { stage: "clone", repo: repo.name } });
 
+		// `--branch` accepts a branch or tag, never a commit — so a SHA (which is what
+		// the image pipeline pins a build to) is cloned as the default branch and then
+		// checked out. The `--filter=blob:none` clone keeps the whole commit graph, so
+		// the checkout resolves without a second fetch as long as the commit is reachable
+		// from the default branch, which a default-branch HEAD always is.
+		const isSha = repo.ref !== undefined && /^[0-9a-f]{40}$/i.test(repo.ref);
 		const args = ["clone", "--filter=blob:none", repo.url, target];
-		if (repo.ref !== undefined) args.splice(2, 0, "--branch", repo.ref);
+		if (repo.ref !== undefined && !isSha) args.splice(2, 0, "--branch", repo.ref);
+		const cloneEnv = { ...env, HARBOR_GIT_OPERATION: "clone" };
 		const result = await runCommand("git", args, {
 			cwd: config.workspaceRoot,
 			// git's credential protocol carries no operation, so the privilege the
 			// broker should mint is stated here instead of inferred. A boot clone is
 			// read-only; an agent turn (below) is the only thing that gets write.
-			env: { ...env, HARBOR_GIT_OPERATION: "clone" },
+			env: cloneEnv,
 			timeoutMs: setting("sandboxBootTimeoutMs"),
 		});
 		if (result.code !== 0) {
@@ -515,6 +544,54 @@ async function cloneRepos(
 				+ `git said: ${tail(result.output)}`
 			);
 		}
+		if (isSha) {
+			const checkout = await runCommand("git", ["-C", target, "checkout", "--quiet", repo.ref!], {
+				cwd: config.workspaceRoot,
+				env: cloneEnv,
+				timeoutMs: setting("sandboxBootTimeoutMs"),
+			});
+			if (checkout.code !== 0) {
+				return (
+					`Checking out ${repo.ref} in ${repo.name} `
+					+ `${checkout.timedOut ? "timed out" : `failed (exit ${checkout.code})`}. `
+					+ `git said: ${tail(checkout.output)}`
+				);
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Copy the baked checkout + dependencies from the staging path into the workspace.
+ *
+ * The one effect that makes `repo_image` faster than a fresh boot: a local `cp -a`
+ * of an already-installed tree instead of a network clone plus a dependency install.
+ * `cp -a` preserves the symlinks and permissions a `node_modules` (or a virtualenv)
+ * depends on. Returns an error string on failure — a `repo_image` boot that could not
+ * populate the workspace is a boot with no code in it, which must fail loudly rather
+ * than hand the agent an empty tree that reads as "the repository is empty".
+ */
+async function restoreBakedWorkspace(
+	config: SupervisorConfig,
+	bridge: BridgeSink,
+	env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+	bridge.emit({ type: "boot_progress", payload: { stage: "restore_baked", from: BAKED_WORKSPACE_ROOT } });
+	await mkdir(config.workspaceRoot, { recursive: true });
+	// `${src}/.` copies the CONTENTS of the staging directory into the workspace, so
+	// `/opt/harbor/baked/<repo>` becomes `<workspaceRoot>/<repo>`. No shell: the source
+	// is a constant and the destination is the workspace root, both passed as argv.
+	const result = await runCommand("cp", ["-a", `${BAKED_WORKSPACE_ROOT}/.`, `${config.workspaceRoot}/`], {
+		cwd: config.workspaceRoot,
+		env,
+		timeoutMs: setting("sandboxBootTimeoutMs"),
+	});
+	if (result.code !== 0) {
+		return (
+			`Restoring the baked workspace ${result.timedOut ? "timed out" : `failed (exit ${result.code})`}. `
+			+ tail(result.output)
+		);
 	}
 	return null;
 }

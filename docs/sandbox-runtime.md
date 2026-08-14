@@ -43,11 +43,14 @@ and the least observable component in the system is also the first one to run.
 
 `resolveBootMode()` runs once, and its answer is exported as `HARBOR_BOOT_MODE`
 into the environment of every hook, so a `start.sh` that branches on the mode
-branches on the same answer the supervisor used. v1 implements `fresh` and
-`snapshot_restore`; `build` and `repo_image` are refused by name rather than
+branches on the same answer the supervisor used. All four modes are implemented:
+`fresh` and `snapshot_restore`, plus `build` (the image pipeline clones the pinned
+SHA and runs `setup.sh` fatally, with no agent — see ADR 0007) and `repo_image` (a
+session boots a published per-repo image whose dependencies are baked in, so
+`setup.sh` is skipped). An unrecognised string is still refused by name rather than
 approximated as `fresh`, because each mode implies a different answer to "has
-`setup.sh` already run", and approximating that answer either installs
-dependencies twice or not at all with no error either way.
+`setup.sh` already run", and approximating that answer either installs dependencies
+twice or not at all with no error either way.
 
 The snapshot matrix is decided on two inputs — is the feature enabled in *this
 box*, and is the workspace actually populated:

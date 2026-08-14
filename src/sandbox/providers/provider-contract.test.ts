@@ -29,6 +29,7 @@ import {
 	SandboxProviderError,
 	assertFeaturesSupported,
 	featureEnabled,
+	isImageBuildingProvider,
 	isLive,
 	isPersistentProvider,
 	isSnapshotProvider,
@@ -358,6 +359,28 @@ describe("capabilities are types, not runtime booleans", () => {
 		expect(typeof anyProvider.inspect).toBe("function");
 		expect(typeof anyProvider.findByAttemptId).toBe("function");
 	});
+
+	test("image-building is an orthogonal capability, gated the same way", () => {
+		const ephemeral: EphemeralProvider = localProvider();
+		// @ts-expect-error The local provider cannot build images and has no buildImage.
+		// This line failing to error means image-building leaked onto the base interface,
+		// which is the optional-method-plus-boolean shape the whole design rejects.
+		void ephemeral.buildImage;
+
+		const anyProvider: SandboxProvider = providerFor("docker");
+		// @ts-expect-error Not every member of the union can build, so the union cannot;
+		// a caller must narrow through isImageBuildingProvider first.
+		void anyProvider.buildImage;
+
+		// docker CAN build — and the guard is what makes buildImage reachable. If this
+		// stopped compiling, the image pipeline would have no provider to call.
+		if (isImageBuildingProvider(anyProvider)) {
+			expect(typeof anyProvider.buildImage).toBe("function");
+			expect(typeof anyProvider.pruneImages).toBe("function");
+		}
+		// The local provider is not image-building, at runtime and at the type level.
+		expect(isImageBuildingProvider(localProvider())).toBe(false);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -543,6 +566,31 @@ if ("reason" in dockerFixture) {
 			expect(error).toBeInstanceOf(SandboxProviderError);
 			expect((error as SandboxProviderError).errorType).toBe("invalid_config");
 		});
+	});
+
+	// The real `buildImage` — running a container in `build` mode and committing it —
+	// needs the harbor sandbox image with `build-entry.js` baked in and a clonable
+	// repo, so it is covered by the manual end-to-end in the PR rather than here. What
+	// runs against any Docker is the prune half of the capability.
+	describe("docker image building capability", () => {
+		test("pruneImages removes images under the prefix except those kept", async () => {
+			if (!isImageBuildingProvider(provider)) throw new Error("docker must be image-building");
+			const prefix = `harbor-repo-ctest-${randomUUID().slice(0, 8)}`;
+			const keep = `${prefix}:keep`;
+			const drop = `${prefix}:drop`;
+			docker(["tag", image, keep]);
+			docker(["tag", image, drop]);
+			try {
+				const removed = await provider.pruneImages(prefix, [keep]);
+				expect(removed).toContain(drop);
+				expect(removed).not.toContain(keep);
+				expect(docker(["image", "inspect", keep]).ok).toBe(true);
+				expect(docker(["image", "inspect", drop]).ok).toBe(false);
+			} finally {
+				docker(["rmi", "--force", keep]);
+				docker(["rmi", "--force", drop]);
+			}
+		}, PROVIDER_TEST_TIMEOUT_MS);
 	});
 }
 
