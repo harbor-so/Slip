@@ -22,6 +22,7 @@
  */
 
 import { type RepoOverrides, setting } from "../config.js";
+import { BAKED_WORKSPACE_ROOT } from "../contracts/index.js";
 import { SandboxProviderError, isImageBuildingProvider, type SandboxProvider } from "../sandbox/provider.js";
 
 /** A repository to bake, pinned to the exact commit the image will be built at. */
@@ -105,10 +106,13 @@ export async function buildRepoImage(req: BuildRequest): Promise<BuildResult> {
 		workspace,
 		env: {
 			// Caller-supplied env (credentials) first, so nothing it carries can shadow
-			// the two keys that define what the build actually is.
+			// the keys that define what the build actually is.
 			...(req.env ?? {}),
 			HARBOR_BOOT_MODE: "build",
-			HARBOR_WORKSPACE_ROOT: workspace,
+			// Provision into the baked staging path, NOT the workspace volume — a volume
+			// is invisible to `docker commit`, so a build that wrote to it would bake an
+			// empty tree. See BAKED_WORKSPACE_ROOT. A `repo_image` boot copies it back out.
+			HARBOR_WORKSPACE_ROOT: BAKED_WORKSPACE_ROOT,
 			HARBOR_REPOS: JSON.stringify([{ name: req.repo.name, url: req.repo.url, ref: req.repo.sha }]),
 		},
 		// A build runs unrestricted: it needs the network to install dependencies and a

@@ -118,6 +118,21 @@ export const BOOT_MODES = ["build", "fresh", "repo_image", "snapshot_restore"] a
 export type BootMode = (typeof BOOT_MODES)[number];
 
 /**
+ * Where a `build` bakes the checkout + dependencies, and where a `repo_image` boot
+ * copies them from.
+ *
+ * NOT `/workspace`. The sandbox image declares `/workspace` a `VOLUME`, and a volume
+ * is invisible to `docker commit` — anything a build writes there lands in a throwaway
+ * anonymous volume the image never sees, and a later `docker run` masks it with a fresh
+ * empty one. So a build provisions into this ordinary (non-volume) path, which the
+ * commit captures, and a `repo_image` boot copies it into the real workspace volume
+ * once, replacing the clone + install a fresh boot would pay over the network. Shared
+ * between the builder (which sets `HARBOR_WORKSPACE_ROOT` to it) and the supervisor
+ * (which copies out of it), so the two cannot disagree about the path.
+ */
+export const BAKED_WORKSPACE_ROOT = "/opt/harbor/baked";
+
+/**
  * What a provider can do, declared rather than assumed.
  *
  * The alternative is a lowest-common-denominator interface where every provider

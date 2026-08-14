@@ -38,6 +38,7 @@ describe("resolveBootMode", () => {
 				requested,
 				snapshotsEnabled: false,
 				workspacePopulated: false,
+				bakedWorkspacePopulated: false,
 			});
 			expect(result).toEqual({
 				kind: "resolved",
@@ -54,6 +55,7 @@ describe("resolveBootMode", () => {
 			requested: "warm",
 			snapshotsEnabled: true,
 			workspacePopulated: true,
+			bakedWorkspacePopulated: false,
 		});
 		expect(result.kind).toBe("refused");
 		if (result.kind !== "refused") throw new Error("unreachable");
@@ -71,13 +73,21 @@ describe("resolveBootMode", () => {
 			requested: "build",
 			snapshotsEnabled: false,
 			workspacePopulated: false,
+			bakedWorkspacePopulated: false,
 		});
 		expect(result).toMatchObject({ kind: "resolved", mode: "build", reason: "build_provisioning" });
 	});
 
 	it("repo_image uses the baked checkout when present, and degrades to fresh when empty", () => {
+		// The decision is about the BAKED path, not the workspace, which is empty at boot
+		// until the copy this resolution gates.
 		expect(
-			resolveBootMode({ requested: "repo_image", snapshotsEnabled: false, workspacePopulated: true }),
+			resolveBootMode({
+				requested: "repo_image",
+				snapshotsEnabled: false,
+				workspacePopulated: false,
+				bakedWorkspacePopulated: true,
+			}),
 		).toMatchObject({ kind: "resolved", mode: "repo_image", reason: "image_workspace_present" });
 
 		// An image that baked no checkout must not skip setup on a tree that never had it
@@ -86,6 +96,7 @@ describe("resolveBootMode", () => {
 			requested: "repo_image",
 			snapshotsEnabled: false,
 			workspacePopulated: false,
+			bakedWorkspacePopulated: false,
 		});
 		expect(empty).toMatchObject({
 			kind: "resolved",
@@ -107,6 +118,7 @@ describe("resolveBootMode", () => {
 				requested: mode,
 				snapshotsEnabled: true,
 				workspacePopulated: true,
+				bakedWorkspacePopulated: true,
 			});
 			expect(result.kind).toBe("resolved");
 			if (result.kind !== "resolved") throw new Error("unreachable");
@@ -116,7 +128,12 @@ describe("resolveBootMode", () => {
 
 	describe("the snapshot matrix", () => {
 		const restore = (snapshotsEnabled: boolean, workspacePopulated: boolean) =>
-			resolveBootMode({ requested: "snapshot_restore", snapshotsEnabled, workspacePopulated });
+			resolveBootMode({
+				requested: "snapshot_restore",
+				snapshotsEnabled,
+				workspacePopulated,
+				bakedWorkspacePopulated: false,
+			});
 
 		it("honours a restore when snapshots are on and the tree is there", () => {
 			const result = restore(true, true);
@@ -170,6 +187,7 @@ describe("resolveBootMode", () => {
 					requested: "snapshot_restore",
 					snapshotsEnabled,
 					workspacePopulated,
+					bakedWorkspacePopulated: false,
 				});
 				if (result.kind !== "resolved") continue;
 				expect(result.degradedFrom === null).toBe(result.warning === null);

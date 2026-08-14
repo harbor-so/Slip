@@ -113,6 +113,13 @@ export interface BootModeInput {
 	snapshotsEnabled: boolean;
 	/** Does the workspace root already contain a checkout? See `resolveBootMode`. */
 	workspacePopulated: boolean;
+	/**
+	 * Does the baked staging path contain a checkout? The `repo_image` analogue of
+	 * `workspacePopulated`: a `repo_image` boot copies from the baked path rather than
+	 * the workspace (which is empty until the copy), so its "did the image actually
+	 * carry a checkout" question is about the staging path, not the workspace.
+	 */
+	bakedWorkspacePopulated: boolean;
 }
 
 /**
@@ -269,7 +276,7 @@ export function resolveBootMode(input: BootModeInput): BootModeResolution {
 			};
 
 		case "repo_image":
-			if (input.workspacePopulated) {
+			if (input.bakedWorkspacePopulated) {
 				return {
 					kind: "resolved",
 					mode: "repo_image",
