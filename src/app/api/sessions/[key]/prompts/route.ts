@@ -42,6 +42,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ key
 		// difference between a commit authored by the person who asked and a
 		// bot-attributed one; it comes from the session cookie, never the body.
 		authorEmail: viewer.userEmail,
+		// Also from the cookie, never the body, and for a sharper reason than the
+		// email: this is the identity whose OAuth token opens the pull request for
+		// this session's work. A client that could name it could have Harbor open a
+		// pull request as a colleague.
+		authorUserId: viewer.userId,
 		body: body.body ?? "",
 	});
 

@@ -1,0 +1,128 @@
+# The whole control plane, in containers.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# An OVERLAY on docker-compose.yml rather than a replacement, so the base file
+# keeps meaning exactly what the README promises: `docker compose up -d` gives you
+# Postgres and nothing else, and `npm run dev` runs Harbor on the host. That is
+# still the fastest way to hack on Harbor, and this file must not change it.
+#
+# ---------------------------------------------------------------------------
+# HARBOR_PUBLIC_URL is the setting that goes wrong first. Read this.
+# ---------------------------------------------------------------------------
+#
+# It is the address a SANDBOX uses to call Harbor back, not the address you type
+# into a browser, and with the `docker` provider those are different values.
+#
+# `src/sandbox/providers/docker.ts` builds its `docker run` with no `--network`
+# and no `--add-host`, so sandbox containers are created by the HOST daemon on the
+# default bridge. They are not on this compose network and cannot resolve the
+# service name `app`. What works:
+#
+#   Docker Desktop (macOS/Windows)  http://host.docker.internal:3000
+#   Docker Engine (Linux)           http://172.17.0.1:3000    ← the docker0 gateway
+#   Anything remote                 https://harbor.example.com
+#
+# `http://localhost:3000` is always wrong here: from inside a container it
+# resolves to that container.
+
+services:
+
+  # Applies migrations once, then exits. Both long-lived services wait for it to
+  # succeed. Migrations are NOT run on app boot: drizzle's postgres-js migrator
+  # takes no advisory lock, so replicas starting together race each other.
+  migrate:
+    image: ${HARBOR_IMAGE:-harbor:latest}
+    build: .
+    command: ["migrate"]
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://harbor:harbor@postgres:5432/harbor}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    image: ${HARBOR_IMAGE:-harbor:latest}
+    build: .
+    command: ["web"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Note `postgres:5432`, not `localhost:5433`. The published 5433 is for the
+      # host; between containers it is the service name and the internal port.
+      DATABASE_URL: ${DATABASE_URL:-postgres://harbor:harbor@postgres:5432/harbor}
+      HARBOR_PUBLIC_URL: ${HARBOR_PUBLIC_URL:-http://host.docker.internal:3000}
+      HARBOR_AGENT_MCP_URL: ${HARBOR_AGENT_MCP_URL:-}
+      HARBOR_ENCRYPTION_KEY: ${HARBOR_ENCRYPTION_KEY:?set it — openssl rand -base64 32}
+      AUTH_SECRET: ${AUTH_SECRET:?set it — openssl rand -base64 32}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      HARBOR_ALLOWED_GITHUB_LOGINS: ${HARBOR_ALLOWED_GITHUB_LOGINS:-}
+      HARBOR_SANDBOX_PROVIDER: ${HARBOR_SANDBOX_PROVIDER:-docker}
+      HARBOR_SANDBOX_IMAGE: ${HARBOR_SANDBOX_IMAGE:-harbor-sandbox:latest}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # `node -e fetch(...)` rather than curl or wget, because neither is installed
+    # in the runtime image and adding one just for a health check is a package to
+    # patch forever. Node 20+ has fetch as a global.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    # Uncomment for the `docker` sandbox provider. This is root-equivalent on the
+    # host — read docs/SECURITY.md before you do. DOCKER_GID must be the host's
+    # docker group id (`getent group docker | cut -d: -f3`; 0 on Docker Desktop),
+    # because the image runs as uid 10001 and the socket is root:docker.
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "${DOCKER_GID:-999}"
+
+  # The worker. Owns every background loop — claim sweeps, automations, sandbox
+  # deadlines, session ticks, compaction, orphan sweeps, Devin polling — and
+  # serves both MCP surfaces. Without this service nothing ever sweeps.
+  mcp:
+    image: ${HARBOR_IMAGE:-harbor:latest}
+    build: .
+    command: ["mcp"]
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://harbor:harbor@postgres:5432/harbor}
+      HARBOR_PUBLIC_URL: ${HARBOR_PUBLIC_URL:-http://host.docker.internal:3000}
+      HARBOR_AGENT_MCP_URL: ${HARBOR_AGENT_MCP_URL:-}
+      HARBOR_ENCRYPTION_KEY: ${HARBOR_ENCRYPTION_KEY:?set it — openssl rand -base64 32}
+      HARBOR_SANDBOX_PROVIDER: ${HARBOR_SANDBOX_PROVIDER:-docker}
+      HARBOR_SANDBOX_IMAGE: ${HARBOR_SANDBOX_IMAGE:-harbor-sandbox:latest}
+      # Deliberately no HARBOR_MAINTENANCE_TOKEN. That variable exists for a
+      # deployment that runs `web` WITHOUT this service and has to drive the
+      # sweeps from an external cron. Setting it here would publish an
+      # unauthenticated-by-default global-sweep endpoint for no benefit, since the
+      # loops in this process are already running.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8788/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "${DOCKER_GID:-999}"

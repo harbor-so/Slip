@@ -1,7 +1,16 @@
 /** @type {import("next").NextConfig} */
 const config = {
-	// postgres.js opens real sockets; it must stay external to the server bundle.
-	serverExternalPackages: ["postgres"],
+	// Packages that must be `require`d at runtime rather than bundled by webpack.
+	//
+	// `postgres` opens real sockets. The two vendor SDKs are here for a sharper
+	// reason: `src/sandbox/registry.ts` imports every provider eagerly — that is what
+	// makes a missing `switch` case a compile error — so both SDKs are reachable from
+	// the Next.js server graph even on a deployment that will never use them. Each
+	// resolves modules by computed expression (`modal` → `@grpc/grpc-js` and
+	// `protobufjs`; `@codesandbox/sdk` → `blessed`'s widget loader), which webpack
+	// cannot follow. Their imports are also deferred to first use inside the
+	// providers themselves; this list is what keeps the bundler's hands off them.
+	serverExternalPackages: ["postgres", "modal", "@codesandbox/sdk"],
 
 	webpack: (config) => {
 		// The source imports with explicit `.js` extensions because that is what

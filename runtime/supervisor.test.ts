@@ -26,7 +26,9 @@ import {
 	configureGit,
 	createResumeTokenAccumulator,
 	parseRepos,
+	pushWorkingBranch,
 	readSupervisorConfig,
+	runAutoSetup,
 	runCommand,
 	runHook,
 	waitForTunnels,
@@ -488,7 +490,10 @@ describe("runHook", () => {
 		// Most repositories have no hooks at all; their boots must not warn.
 		const workspace = hookWorkspace(null);
 		const result = await runHook("start", supervisorConfig(), "fresh", sink(), process.env, workspace);
-		expect(result).toEqual({ kind: "skipped" });
+		// `absent` rather than a bare skip: auto-setup keys off exactly this, so
+		// that a repository with no hook still gets its dependencies installed
+		// while a policy skip stays a policy skip.
+		expect(result).toEqual({ kind: "skipped", reason: "absent" });
 	});
 
 	it("obeys the policy skip: setup does not run on a snapshot_restore boot", async () => {
@@ -499,7 +504,7 @@ describe("runHook", () => {
 		const workspace = hookWorkspace("setup");
 		const bridge = sink();
 		const result = await runHook("setup", supervisorConfig(), "snapshot_restore", bridge, process.env, workspace);
-		expect(result).toEqual({ kind: "skipped" });
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
 		const stages = bridge.events.map((event) => event.payload?.stage);
 		expect(stages).toContain("setup.skipped");
 	});
@@ -717,5 +722,284 @@ describe("configureGit", () => {
 		const env = gitEnv();
 		await configureGit(supervisorConfig({ repos: [{ name: "app", url: "not a url" }] }), env);
 		expect(env.HARBOR_SCM_HOST).toBeUndefined();
+	});
+});
+
+/**
+ * The push, against real git repositories on disk.
+ *
+ * A fake here would prove nothing: the properties worth asserting are that the
+ * commits actually arrive on the named branch of the actual remote, that the
+ * remote's other branches are untouched, and that a rejected push is reported
+ * rather than forced through. All three are properties of git, so git runs.
+ *
+ * No network and no credential helper: the "remote" is a bare repository in a
+ * temp directory, reached over a filesystem path.
+ */
+describe("pushWorkingBranch", () => {
+	function gitEnv(home: string): NodeJS.ProcessEnv {
+		return {
+			NODE_ENV: "test",
+			PATH: process.env.PATH,
+			HOME: home,
+			GIT_CONFIG_GLOBAL: join(home, "gitconfig"),
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_AUTHOR_NAME: "Rin",
+			GIT_AUTHOR_EMAIL: "rin@acme.test",
+			GIT_COMMITTER_NAME: "Harbor",
+			GIT_COMMITTER_EMAIL: "bot@harbor.test",
+		};
+	}
+
+	const run = (cwd: string, env: NodeJS.ProcessEnv, args: string[]) =>
+		runCommand("git", args, { cwd, env, timeoutMs: 20_000 });
+
+	/** A bare remote with one commit on `main`, and a clone of it with the agent's work. */
+	async function workspace(options: { commits?: number } = {}) {
+		const home = tempDir("harbor-push-home-");
+		const env = gitEnv(home);
+		const remote = tempDir("harbor-push-remote-");
+		const seed = tempDir("harbor-push-seed-");
+		const clone = tempDir("harbor-push-clone-");
+
+		await run(remote, env, ["init", "--bare", "--initial-branch=main", "."]);
+
+		await run(seed, env, ["init", "--initial-branch=main", "."]);
+		writeFileSync(join(seed, "README.md"), "base\n");
+		await run(seed, env, ["add", "."]);
+		await run(seed, env, ["commit", "-m", "base"]);
+		await run(seed, env, ["remote", "add", "origin", remote]);
+		await run(seed, env, ["push", "origin", "main"]);
+
+		await run(clone, env, ["clone", remote, "."]);
+		for (let index = 0; index < (options.commits ?? 1); index += 1) {
+			writeFileSync(join(clone, `fix-${index}.txt`), `work ${index}\n`);
+			await run(clone, env, ["add", "."]);
+			await run(clone, env, ["commit", "-m", `agent commit ${index}`]);
+		}
+
+		return { env, remote, clone };
+	}
+
+	const invocation = (pushBranch: string | null) => ({
+		promptId: "11111111-1111-4111-8111-111111111111",
+		seq: 1,
+		body: "do the thing",
+		identity: { mode: "agent-only" } as const,
+		timeoutMs: 10_000,
+		pushBranch,
+		baseBranch: "main",
+	});
+
+	const remoteBranches = async (remote: string, env: NodeJS.ProcessEnv) =>
+		(await run(remote, env, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).output
+			.trim()
+			.split("\n")
+			.filter(Boolean);
+
+	it("pushes the agent's commits to the named branch and reports the sha", async () => {
+		const { env, remote, clone } = await workspace({ commits: 2 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(await remoteBranches(remote, env)).toEqual(
+			expect.arrayContaining(["main", "harbor/lse_7f3a"]),
+		);
+
+		const pushed = bridge.events.find((event) => event.type === "branch_pushed");
+		expect(pushed).toBeDefined();
+		const payload = pushed!.payload as Record<string, unknown>;
+		expect(payload.branch).toBe("harbor/lse_7f3a");
+		expect(payload.commits).toBe(2);
+		expect(payload.uncommitted_changes).toBe(false);
+		expect(String(payload.commit_sha)).toMatch(/^[0-9a-f]{40}$/);
+
+		// The base is untouched. A push that moved `main` would be the worst
+		// possible outcome of a background agent.
+		const mainTip = await run(remote, env, ["rev-parse", "main"]);
+		const seedTip = await run(clone, env, ["rev-parse", "origin/main"]);
+		expect(mainTip.output.trim()).toBe(seedTip.output.trim());
+	});
+
+	it("emits nothing when the agent committed nothing", async () => {
+		const { env, remote, clone } = await workspace({ commits: 0 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		expect(await remoteBranches(remote, env)).toEqual(["main"]);
+	});
+
+	it("pushes committed work and flags the edits the agent left behind", async () => {
+		const { env, clone } = await workspace({ commits: 1 });
+		writeFileSync(join(clone, "half-done.txt"), "not committed\n");
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		const pushed = bridge.events.find((event) => event.type === "branch_pushed");
+		expect((pushed!.payload as Record<string, unknown>).uncommitted_changes).toBe(true);
+	});
+
+	it("does nothing at all when no branch was sent with the prompt", async () => {
+		const { env, remote, clone } = await workspace({ commits: 1 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation(null), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		expect(await remoteBranches(remote, env)).toEqual(["main"]);
+	});
+
+	it("reports a rejected push instead of forcing it", async () => {
+		// A non-fast-forward means something else wrote to this branch, which the
+		// fencing token is supposed to have made impossible. Overwriting somebody's
+		// commits is not an acceptable response to a violated guarantee.
+		const { env, remote, clone } = await workspace({ commits: 1 });
+		const other = tempDir("harbor-push-other-");
+		await run(other, env, ["clone", remote, "."]);
+		writeFileSync(join(other, "theirs.txt"), "someone else\n");
+		await run(other, env, ["add", "."]);
+		await run(other, env, ["commit", "-m", "theirs"]);
+		await run(other, env, ["push", "origin", "HEAD:refs/heads/harbor/lse_7f3a"]);
+		const theirTip = (await run(remote, env, ["rev-parse", "harbor/lse_7f3a"])).output.trim();
+
+		const bridge = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		const failure = bridge.events.find(
+			(event) => (event.payload as { code?: string } | undefined)?.code === "push.failed",
+		);
+		expect(failure).toBeDefined();
+		// Their commit is still the tip.
+		expect((await run(remote, env, ["rev-parse", "harbor/lse_7f3a"])).output.trim()).toBe(theirTip);
+	});
+
+	it("does not push twice when nothing new was committed between turns", async () => {
+		const { env, clone } = await workspace({ commits: 1 });
+		const first = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, first);
+		expect(first.events.some((event) => event.type === "branch_pushed")).toBe(true);
+
+		// `HEAD --not --remotes` returns to zero once the branch exists on the
+		// remote, so an idle second turn is silent rather than re-reporting a push.
+		const second = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, second);
+		expect(second.events.some((event) => event.type === "branch_pushed")).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// runAutoSetup — the stand-in for a setup.sh nobody wrote
+// ---------------------------------------------------------------------------
+
+/**
+ * The reason this exists: `.harbor/setup.sh` is optional and a missing one is
+ * silently skipped, so every repository needed a hook written, committed and
+ * reviewed before an agent could run its tests — and for a JavaScript monorepo
+ * that hook is one line. These tests pin the two properties that make
+ * auto-detection safe rather than merely convenient: **a hook always wins**, and
+ * **a failure degrades exactly the way a failed hook would**.
+ */
+describe("runAutoSetup", () => {
+	/** A workspace containing the named files, each empty. */
+	function repoWorkspace(files: string[]): string {
+		const workspace = tempDir("harbor-auto-");
+		for (const file of files) writeFileSync(join(workspace, file), "");
+		return workspace;
+	}
+
+	it("does nothing at all when there is nothing to install", async () => {
+		const bridge = sink();
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			bridge,
+			process.env,
+			repoWorkspace(["README.md"]),
+		);
+		// Not a warning: a documentation repository is not degraded.
+		expect(result).toEqual({ kind: "skipped", reason: "absent" });
+		expect(bridge.events.map((event) => event.payload?.stage)).toContain("auto_setup.skipped");
+	});
+
+	it("runs the detected install and announces what it detected and why", async () => {
+		// `go.sum` maps to `go mod download`, which is not installed here — so the
+		// assertion is on the announcement, which is what makes an auto-install
+		// visible rather than magic. The exit path is covered below.
+		const bridge = sink();
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.HARBOR_SETUP_TIMEOUT_MS = "20000";
+		await runAutoSetup(supervisorConfig(), "fresh", bridge, process.env, workspace);
+
+		const announced = bridge.events.find((event) => event.payload?.stage === "auto_setup");
+		expect(announced?.payload).toMatchObject({
+			manager: "npm",
+			evidence: "package.json",
+			command: "npm install",
+		});
+	});
+
+	it("refuses to guess between two lockfiles, and says which disagree", async () => {
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			sink(),
+			process.env,
+			repoWorkspace(["pnpm-lock.yaml", "package-lock.json"]),
+		);
+		expect(result.kind).toBe("degraded");
+		if (result.kind !== "degraded") return;
+		expect(result.warning.code).toBe("auto_setup.ambiguous");
+		expect(result.warning.message).toContain("pnpm-lock.yaml");
+		expect(result.warning.message).toContain("package-lock.json");
+	});
+
+	it("degrades on a failed install, and names the escape hatch", async () => {
+		// A command that does not exist stands in for an install that fails. The
+		// asymmetry is inherited from hookPolicy rather than restated: a broken
+		// provisioning step on a fresh boot degrades.
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.PATH = "/nonexistent";
+		const result = await runAutoSetup(supervisorConfig(), "fresh", sink(), process.env, workspace);
+		expect(result.kind).toBe("degraded");
+		if (result.kind !== "degraded") return;
+		expect(result.warning.code).toBe("auto_setup.failed");
+		expect(result.warning.message).toContain(".harbor/setup.sh");
+	});
+
+	it("is fatal at image-build time, where a bad install bakes in permanently", async () => {
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.PATH = "/nonexistent";
+		const result = await runAutoSetup(supervisorConfig(), "build", sink(), process.env, workspace);
+		expect(result.kind).toBe("failed");
+	});
+
+	it("does not run on a boot mode whose setup is already applied", async () => {
+		// A `repo_image` boot has dependencies baked in. Reinstalling is the one
+		// case where doing the work again is pure cost.
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"repo_image",
+			sink(),
+			process.env,
+			repoWorkspace(["package.json"]),
+		);
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
+	});
+
+	it("is switched off entirely by HARBOR_AUTO_SETUP=0", async () => {
+		process.env.HARBOR_AUTO_SETUP = "0";
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			sink(),
+			process.env,
+			repoWorkspace(["package.json"]),
+		);
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
 	});
 });

@@ -382,11 +382,20 @@ export class FlySandboxProvider implements EphemeralProvider {
 	 * Live boxes only. A `stopped` or `destroyed` Machine is already reclaimed —
 	 * this provider is ephemeral, so `stop` destroys — and re-reporting one would
 	 * have the sweep issue a delete for a box that no longer exists.
+	 *
+	 * The filter value is `"true"` because that is what `create` writes (see the
+	 * `metadata` block there). It read `"1"` until this was fixed — copied from the
+	 * docker provider's `label=harbor.managed=1`, which is correct for docker and
+	 * wrong here — so this method returned `[]` for every Machine Harbor had ever
+	 * created, and the orphan sweep silently reaped nothing. The fix is on the READ
+	 * side deliberately: Machines stranded by the buggy version are already tagged
+	 * `"true"`, so changing `create` to write `"1"` would have made this correct
+	 * going forward while leaving every currently-leaking Machine invisible forever.
 	 */
 	async listManaged(): Promise<SandboxInspection[]> {
 		const { status, json } = await this.request(
 			"GET",
-			`/machines?metadata.${META.managed}=1`,
+			`/machines?metadata.${META.managed}=true`,
 			"list_managed",
 		);
 		if (status !== 200) throw this.fail(status, "list_managed", json);
@@ -396,7 +405,7 @@ export class FlySandboxProvider implements EphemeralProvider {
 			// Defensive client-side filter for the same reason as `findByAttemptId`:
 			// the server-side metadata filter is honoured today, and this costs nothing
 			// if a future API version quietly stops honouring it.
-			.filter((machine) => machine.config?.metadata?.[META.managed] === "1")
+			.filter((machine) => machine.config?.metadata?.[META.managed] === "true")
 			.map((machine) => this.toInspection(machine))
 			.filter(
 				(inspection) => inspection.state === "running" || inspection.state === "starting",

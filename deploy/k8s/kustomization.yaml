@@ -1,0 +1,35 @@
+# Harbor on Kubernetes.
+#
+#   kubectl kustomize deploy/k8s              # render offline, no cluster needed
+#   kubectl apply -k deploy/k8s
+#
+# Postgres is deliberately NOT here. Harbor is a stateless deployment plus a
+# database you already run — and a Postgres StatefulSet in an example manifest is
+# how somebody ends up running their production database with no backups because
+# the example did not mention them. Point DATABASE_URL at RDS, Cloud SQL, Neon, or
+# whatever your platform team already operates.
+#
+# Read secret.example.yaml before applying: it is a template with placeholders,
+# named `.example` so that `kubectl apply -k` does not create it by reflex.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: harbor
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - job-migrate.yaml
+  - deployment-web.yaml
+  - deployment-mcp.yaml
+  - service-web.yaml
+  - service-mcp.yaml
+  # Uncomment ONLY if you run deployment-web.yaml without deployment-mcp.yaml.
+  # With the worker running, the loops are already running and this would just
+  # duplicate work an advisory lock is about to reject.
+  # - cronjob-tick.yaml
+
+images:
+  - name: ghcr.io/harbor-so/harbor
+    newTag: latest

@@ -48,7 +48,7 @@ import {
 	TUNNEL_ENV_PATH,
 	assertNever,
 	hookPolicy,
-	pushVerdict,
+	pushDecision,
 	resolveBootMode,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
@@ -56,6 +56,7 @@ import {
 	type HookName,
 } from "./boot-decisions.js";
 import { Bridge, defaultBridgeDeps, type BridgeHandlers, type TurnInvocation } from "./bridge.js";
+import { detectPackageManager } from "./setup-detect.js";
 
 /**
  * The one capability boot code actually has on the bridge: emitting events.
@@ -91,6 +92,16 @@ export interface SupervisorConfig {
 	workspaceRoot: string;
 	repos: RepoSpec[];
 	requestedBootMode: string | null;
+	/**
+	 * The agent's own conversation id from a previous box, when one carries over.
+	 *
+	 * Injected **only** when this boot restored the filesystem that the agent's
+	 * transcript lives on — see `resumeTokenForBoot` in `src/sandbox/env.ts`.
+	 * `--resume <id>` reads a transcript from disk; handing an id to a box whose
+	 * disk has never seen it makes the agent fail to start on a session that is
+	 * not there, which is a worse outcome than starting fresh.
+	 */
+	resumeToken?: string;
 	/**
 	 * Base URL of the MCP server that serves `harbor-agent`, if this deployment
 	 * runs one.
@@ -186,6 +197,8 @@ export function readSupervisorConfig(env: NodeJS.ProcessEnv): ConfigResolution {
 	}
 	const agentMcpUrl = (env.HARBOR_AGENT_MCP_URL ?? "").trim().replace(/\/+$/, "");
 	if (agentMcpUrl !== "") config.agentMcpUrl = agentMcpUrl;
+	const resumeToken = (env.HARBOR_RESUME_TOKEN ?? "").trim();
+	if (resumeToken !== "") config.resumeToken = resumeToken;
 	return { kind: "ok", config };
 }
 
@@ -333,6 +346,17 @@ export async function boot(
 		return finish({ kind: "failed", stage: "setup", message: setupResult.message, warnings });
 	}
 	if (setupResult.kind === "degraded") warn(setupResult.warning);
+
+	// The hook wins completely when it exists. This runs only when it does not —
+	// and only when the boot mode would have run one, so a `repo_image` boot does
+	// not reinstall what is already baked in.
+	if (setupResult.kind === "skipped" && setupResult.reason === "absent") {
+		const auto = await runAutoSetup(config, mode, bridge, env, primary);
+		if (auto.kind === "failed") {
+			return finish({ kind: "failed", stage: "setup", message: auto.message, warnings });
+		}
+		if (auto.kind === "degraded") warn(auto.warning);
+	}
 
 	const tunnels = await waitForTunnels(config, bridge, env);
 	if (tunnels !== null) warn(tunnels);
@@ -497,7 +521,16 @@ async function cloneRepos(
 
 export type HookResult =
 	| { kind: "ok" }
-	| { kind: "skipped" }
+	/**
+	 * `policy` — this boot mode does not run this hook at all (a restored
+	 * filesystem already has setup applied). `absent` — the hook would have run
+	 * and there is no script.
+	 *
+	 * The distinction is what auto-setup keys off. Collapsing it would run an
+	 * install inside a `repo_image` boot that already has one baked in, which is
+	 * the one case where doing the work again is pure cost.
+	 */
+	| { kind: "skipped"; reason: "policy" | "absent" }
 	| { kind: "degraded"; warning: BootWarning }
 	| { kind: "failed"; message: string };
 
@@ -524,11 +557,11 @@ export async function runHook(
 			type: "boot_progress",
 			payload: { stage: `${hook}.skipped`, reason: policy.skipReason, mode },
 		});
-		return { kind: "skipped" };
+		return { kind: "skipped", reason: "policy" };
 	}
 
 	const script = join(workspace, ".harbor", `${hook}.sh`);
-	if (!existsSync(script)) return { kind: "skipped" };
+	if (!existsSync(script)) return { kind: "skipped", reason: "absent" };
 
 	bridge.emit({ type: "boot_progress", payload: { stage: hook, script } });
 	const result = await runCommand("bash", [script], {
@@ -565,6 +598,114 @@ export async function runHook(
 			};
 	}
 	return assertNever(policy.fatality, "hook fatality in runHook");
+}
+
+/**
+ * Install dependencies for a repository that never wrote a `.harbor/setup.sh`.
+ *
+ * The decision is entirely in `detectPackageManager`, which is pure and reads a
+ * directory listing; this function contributes the `readdir`, the `spawn`, and
+ * the policy that a failure here is exactly as fatal as a failed hook would have
+ * been — `fatal` at image-build time, `non_fatal` on a fresh boot. Reusing
+ * `hookPolicy` rather than restating it is deliberate: auto-setup is the setup
+ * hook's stand-in, and the day somebody changes that asymmetry it must change
+ * for both or the two paths silently disagree.
+ *
+ * Three of the four outcomes emit a warning rather than staying silent:
+ *
+ *  - **ambiguous** — two lockfiles naming different managers. Harbor refuses to
+ *    guess and says which files disagree, because installing the wrong one
+ *    produces a dependency tree that fails much later with an error about a
+ *    missing binary rather than about a lockfile.
+ *  - **nothing recognised** — a `boot_progress` line and no warning. A
+ *    documentation repository with no dependencies is not degraded.
+ *  - **install failed** — the same `hook.setup_failed`-shaped warning a failed
+ *    hook produces, so a client rendering boot warnings needs no new case.
+ */
+export async function runAutoSetup(
+	config: SupervisorConfig,
+	mode: BootMode,
+	bridge: BridgeSink,
+	env: NodeJS.ProcessEnv,
+	workspace: string,
+): Promise<HookResult> {
+	if (!setting("autoSetupEnabled")) return { kind: "skipped", reason: "policy" };
+
+	const policy = hookPolicy("setup", mode);
+	if (!policy.run) return { kind: "skipped", reason: "policy" };
+
+	let entries: string[];
+	try {
+		entries = readdirSync(workspace);
+	} catch (error) {
+		// A workspace we cannot list is a clone that did not land where we think it
+		// did. Not fatal — the hook path treats a missing setup as survivable — but
+		// emphatically not silent.
+		return {
+			kind: "degraded",
+			warning: {
+				code: "auto_setup.workspace_unreadable",
+				message:
+					`Harbor could not read ${workspace} to work out how to install dependencies `
+					+ `(${(error as Error).message}). The agent's first build or test run will `
+					+ "probably fail on missing dependencies.",
+			},
+		};
+	}
+
+	const detection = detectPackageManager(entries);
+
+	if (detection.kind === "none") {
+		bridge.emit({
+			type: "boot_progress",
+			payload: { stage: "auto_setup.skipped", reason: "nothing_recognised", mode },
+		});
+		return { kind: "skipped", reason: "absent" };
+	}
+
+	if (detection.kind === "ambiguous") {
+		return {
+			kind: "degraded",
+			warning: { code: "auto_setup.ambiguous", message: detection.reason },
+		};
+	}
+
+	bridge.emit({
+		type: "boot_progress",
+		payload: {
+			stage: "auto_setup",
+			manager: detection.manager,
+			evidence: detection.evidence,
+			command: detection.command.join(" "),
+			mode,
+		},
+	});
+
+	const [bin, ...args] = detection.command;
+	const result = await runCommand(bin!, args, {
+		cwd: workspace,
+		env: { ...env, HARBOR_BOOT_MODE: mode },
+		timeoutMs: setting(policy.timeoutSetting),
+		onLine: (line) =>
+			bridge.emit({ type: "log", payload: { source: "auto_setup", line: stripAnsi(line) } }),
+	});
+	if (result.code === 0) return { kind: "ok" };
+
+	const what = result.timedOut
+		? `timed out after ${setting(policy.timeoutSetting)}ms`
+		: `exited ${result.code}`;
+	const detail =
+		`Harbor detected ${detection.evidence} and ran \`${detection.command.join(" ")}\`, which `
+		+ `${what}. Write .harbor/setup.sh if this repository needs something different — a `
+		+ `hook always wins over detection. Output: ${tail(result.output)}`;
+
+	switch (policy.fatality) {
+		case "fatal":
+			return { kind: "failed", message: detail };
+		case "non_fatal":
+			return { kind: "degraded", warning: { code: "auto_setup.failed", message: detail } };
+	}
+	return assertNever(policy.fatality, "hook fatality in runAutoSetup");
 }
 
 /**
@@ -691,6 +832,116 @@ export function createResumeTokenAccumulator(
 }
 
 /**
+ * Push what the turn committed, and tell the control plane the branch.
+ *
+ * This is the producer of `branch_pushed`, and therefore the first half of the
+ * only path by which a session ever becomes a pull request. It lives in the
+ * supervisor rather than in the agent for one reason: **an agent that was never
+ * told about git must still produce a branch.** Harbor supports "bring your own
+ * agent" down to an argv template, and a generic model with tool access cannot be
+ * relied upon to run `git push`, to push to the right ref, or to push at all.
+ * Making the product's central guarantee contingent on that is how it becomes a
+ * guarantee that holds for the agents you tested and not for the one an adopter
+ * actually runs.
+ *
+ * Every fact the decision needs is gathered first and the decision is made in one
+ * pure call, so the reasoning is testable without a git binary. What happens here
+ * is only the effects.
+ *
+ * The push is **not forced**. A non-fast-forward rejection means something else
+ * has written to this branch — which the fencing token is supposed to have made
+ * impossible — and the correct response to a guarantee being violated is to stop
+ * and report, not to overwrite somebody's commits with `--force`.
+ */
+export async function pushWorkingBranch(
+	invocation: TurnInvocation,
+	workspace: string,
+	env: NodeJS.ProcessEnv,
+	bridge: BridgeSink,
+): Promise<void> {
+	const timeoutMs = setting("gitPushTimeoutMs");
+	const git = (args: string[]): Promise<RunResult> =>
+		runCommand("git", args, {
+			cwd: workspace,
+			// Stated, not inferred. Everything here but the push itself is local and
+			// needs no credential; the broker mints a write-scoped one only for the
+			// operation that actually writes, and validates the fencing token when it
+			// does — which is what stops a superseded box pushing at all.
+			env: { ...env, HARBOR_GIT_OPERATION: "push" },
+			timeoutMs,
+		});
+
+	const inRepo = await git(["rev-parse", "--is-inside-work-tree"]);
+	// `HEAD --not --remotes` is "committed here and on no remote". It needs no base
+	// branch, so it cannot be wrong about one; it returns to zero once pushed, so a
+	// second turn that commits nothing is silent; and after a snapshot restore it
+	// still counts what the previous box committed and never managed to send.
+	const ahead = await git(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+	const status = await git(["status", "--porcelain"]);
+
+	const verdict = pushDecision({
+		branch: invocation.pushBranch,
+		commits: Number.parseInt(ahead.output.trim(), 10),
+		dirty: status.output.trim() !== "",
+		repoPresent: inRepo.code === 0 && inRepo.output.trim() === "true",
+	});
+
+	if (!verdict.push) {
+		// A skip is a log, not a timeline event. "The agent made no commits" is the
+		// ordinary outcome of a question-answering turn, and putting it on the
+		// transcript would train everybody to ignore the line that matters.
+		bridge.emit({
+			type: "log",
+			payload: {
+				level: verdict.reason === "branch_malformed" ? "warning" : "info",
+				source: "supervisor",
+				code: "push.skipped",
+				reason: verdict.reason,
+				message: verdict.detail,
+				prompt_id: invocation.promptId,
+			},
+		});
+		return;
+	}
+
+	const result = await git(["push", "origin", `HEAD:refs/heads/${verdict.branch}`]);
+	if (result.code !== 0) {
+		// Loud, and on the timeline. A push that failed is work the user believes is
+		// safe and is not — the one failure here that must never be quiet.
+		bridge.emit({
+			type: "log",
+			payload: {
+				level: "error",
+				source: "supervisor",
+				code: "push.failed",
+				branch: verdict.branch,
+				timed_out: result.timedOut,
+				message: tail(result.output),
+				prompt_id: invocation.promptId,
+			},
+		});
+		return;
+	}
+
+	const head = await git(["rev-parse", "HEAD"]);
+	bridge.emit({
+		type: "branch_pushed",
+		payload: {
+			branch: verdict.branch,
+			base: invocation.baseBranch,
+			commit_sha: head.code === 0 ? head.output.trim() : null,
+			commits: verdict.commits,
+			// Reported rather than resolved. The control plane surfaces it so a human
+			// can see that the agent stopped mid-edit; Harbor does not commit on the
+			// agent's behalf, because a commit Harbor authored would carry the
+			// prompting human's name on work they never wrote.
+			uncommitted_changes: verdict.dirty,
+			prompt_id: invocation.promptId,
+		},
+	});
+}
+
+/**
  * Drive one turn through the adapter, translating its stdout into session events.
  *
  * The adapter owns the argv, the parsing and the interrupt signal; this owns the
@@ -699,70 +950,6 @@ export function createResumeTokenAccumulator(
  * that answers "is this usage record a running total or an increment", a question
  * whose wrong answer is an invoice nobody notices for a month.
  */
-/**
- * Ask git what the agent actually did, and tell the control plane if it pushed.
- *
- * Harbor does not run the push — the agent does, whenever it decides to, using
- * the brokered credential. So there is no call to hook; the only way to know is
- * to look. Three cheap plumbing commands per repository after each turn: what
- * branch are we on, what is its tip, and does the remote agree.
- *
- * Every failure here is silent by construction. `pushVerdict` returns `silent`
- * for anything it cannot read, and a git invocation that fails yields nulls
- * rather than throwing, because this runs after a completed turn: a broken
- * `ls-remote` must not turn a successful piece of work into a failed one. The
- * cost of missing a push is a pull request that opens on the next turn or not at
- * all; the cost of failing the turn is the work itself.
- */
-async function reportPushedBranches(
-	config: SupervisorConfig,
-	bridge: BridgeSink,
-	env: NodeJS.ProcessEnv,
-	reported: Map<string, string>,
-): Promise<void> {
-	for (const repo of config.repos) {
-		const cwd = join(config.workspaceRoot, repo.name);
-		const git = async (args: string[]): Promise<string | null> => {
-			const result = await runCommand("git", args, {
-				cwd,
-				// A read, so the broker mints a read-only credential. `ls-remote` is
-				// the only one of the three that talks to the host at all.
-				env: { ...env, HARBOR_GIT_OPERATION: "fetch" },
-				timeoutMs: setting("gitPushCheckTimeoutMs"),
-			});
-			if (result.code !== 0) return null;
-			return result.output.trim().split("\n")[0]?.trim() ?? null;
-		};
-
-		const localBranch = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
-		const localSha = await git(["rev-parse", "HEAD"]);
-		// `ls-remote` prints `<sha>\t<ref>`; the sha is the first field.
-		const remoteLine = localBranch
-			? await git(["ls-remote", "--heads", "origin", localBranch])
-			: null;
-		const remoteSha = remoteLine?.split(/\s+/)[0] ?? null;
-
-		const verdict = pushVerdict({
-			localBranch,
-			localSha,
-			remoteSha,
-			lastReported: reported.get(repo.name) ?? null,
-		});
-		if (verdict.kind !== "report") continue;
-
-		reported.set(repo.name, verdict.sha);
-		bridge.emit({
-			type: "branch_pushed",
-			payload: {
-				repo: repo.name,
-				branch: verdict.branch,
-				head_sha: verdict.sha,
-				...(repo.ref !== undefined ? { base: repo.ref } : {}),
-			},
-		});
-	}
-}
-
 export function createTurnRunner(
 	adapter: AgentAdapter,
 	config: SupervisorConfig,
@@ -771,7 +958,12 @@ export function createTurnRunner(
 ): { run: (invocation: TurnInvocation) => Promise<void>; interrupt: (kind: AgentInterrupt) => void } {
 	let active: ReturnType<typeof spawn> | null = null;
 	const workspace = join(config.workspaceRoot, config.repos[0]?.name ?? "");
-	let resumeToken: string | null = null;
+	// Seeded from the control plane rather than starting at null. Before this, the
+	// closure was the *only* home for the token, so every box replacement — an
+	// inactivity stop, a stale heartbeat, an execution timeout — silently started
+	// the agent's conversation over while Harbor's own transcript carried on
+	// looking continuous. The user reads that as the model having forgotten.
+	let resumeToken: string | null = config.resumeToken ?? null;
 
 	return {
 		interrupt(kind) {
@@ -886,6 +1078,28 @@ export function createTurnRunner(
 			active = null;
 
 			resumeToken = resumeTokens.finish(resumeToken);
+
+			// Before `agent_finished`, deliberately. That event is what closes the
+			// turn — `completeTurn` runs on it, and when the queue is empty it hands
+			// the lease back. Pushing afterwards would race the next turn for the
+			// workspace and, worse, would report a branch under a lease that had
+			// already been released. A push that throws must not lose the turn's
+			// completion, so it is caught here rather than allowed to escape.
+			try {
+				await pushWorkingBranch(invocation, workspace, env, bridge);
+			} catch (error) {
+				bridge.emit({
+					type: "log",
+					payload: {
+						level: "error",
+						source: "supervisor",
+						code: "push.threw",
+						message: (error as Error).message,
+						prompt_id: invocation.promptId,
+					},
+				});
+			}
+
 			bridge.emit({
 				type: timedOut || code !== 0 ? "agent_failed" : "agent_finished",
 				payload: {
@@ -947,17 +1161,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 	}
 
 	let runner: { interrupt: (kind: AgentInterrupt) => void } | null = null;
-	// Last sha reported per repository, so a five-turn session does not open the
-	// same pull request five times. In memory because it is per-box state and the
-	// box is the thing that pushed; a restart re-reports, which the control plane
-	// absorbs by adopting the existing pull request.
-	const reportedPushes = new Map<string, string>();
 	const handlers: BridgeHandlers = {
 		runTurn: async (invocation) => {
 			await turnRunner.run(invocation);
-			// After the turn, not during: the agent pushes whenever it likes, and the
-			// only moment we know it has finished doing so is when it stops.
-			await reportPushedBranches(config, bridge, env, reportedPushes);
 		},
 		interrupt: (kind) => runner?.interrupt(kind),
 		quiesceForSnapshot: async () => {},

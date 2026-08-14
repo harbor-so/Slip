@@ -41,8 +41,11 @@ import {
 	type InstallationTokenScope,
 	type PullRequestOutcome,
 	type RepoAccess,
+	type RepoListing,
+	type RepoListingProvider,
 	type RepoPermission,
 	type RepoRef,
+	type RepoSummary,
 	type ScmProvider,
 	type ScmProviderId,
 	assertNever,
@@ -174,9 +177,11 @@ export function looksLikeRefreshToken(token: string): boolean {
 // The provider
 // ---------------------------------------------------------------------------
 
-export class GitHubProvider implements ScmProvider {
+export class GitHubProvider implements ScmProvider, RepoListingProvider {
 	readonly id: ScmProviderId = "github";
 	readonly host: string;
+	/** The discriminant `listsRepositories()` narrows on. See `RepoListingProvider`. */
+	readonly listsRepositories = true as const;
 
 	private readonly doFetch: FetchLike;
 	private readonly app: { appId: string; privateKey: string } | null;
@@ -368,6 +373,93 @@ export class GitHubProvider implements ScmProvider {
 		}
 
 		return { decision: "allowed", permission, checked_at: checkedAt };
+	}
+
+	// -- Listing ------------------------------------------------------------
+
+	/**
+	 * What this user can see, for the connect picker.
+	 *
+	 * Asked with the **user's own token**, like every other question about what a
+	 * person may reach. Listing through the App installation would be easier and
+	 * would show every repository the App is installed on to every user of the
+	 * deployment — which is the multi-tenancy hole `verifyRepoAccess` exists to
+	 * close, reintroduced at the only place a user goes looking for repositories.
+	 *
+	 * This is a convenience, never an authority: `connectRepo` re-checks the
+	 * chosen repository with `verifyRepoAccess` before writing a row, so a stale
+	 * or over-generous list cannot connect anything.
+	 */
+	async listRepositories(
+		userToken: string,
+		options: { limit?: number } = {},
+	): Promise<RepoListing> {
+		// One page. A picker showing the hundred most recently pushed repositories
+		// with a search box beats paginating a thousand, and the honest answer for
+		// anything past it is `truncated: true` plus the owner/name box, which is
+		// what a person with a thousand repositories will use anyway.
+		const limit = Math.min(Math.max(options.limit ?? 100, 1), 100);
+		const result = await this.request(
+			`/user/repos?per_page=${limit}&sort=pushed&affiliation=owner,collaborator,organization_member`,
+			{ method: "GET", token: userToken, scheme: "token" },
+		);
+
+		if (result.kind === "transport_error") {
+			return {
+				kind: "unavailable",
+				reason: result.error_type === "transient" ? "upstream_unavailable" : "upstream_timeout",
+				detail: result.message,
+			};
+		}
+
+		const { status, headers, body } = result;
+		if (status === 401) {
+			return {
+				kind: "unavailable",
+				reason: "token_invalid",
+				detail: "GitHub rejected the stored token. Reconnect your account in Settings.",
+			};
+		}
+		if (isRateLimited(status, headers, body)) {
+			return { kind: "unavailable", reason: "rate_limited", detail: messageFrom(body, "Rate limited.") };
+		}
+		if (status === 403) {
+			return { kind: "unavailable", reason: "forbidden", detail: messageFrom(body, "Forbidden.") };
+		}
+		if (status >= 500) {
+			return {
+				kind: "unavailable",
+				reason: "upstream_unavailable",
+				detail: `GitHub returned ${status}.`,
+			};
+		}
+		if (!Array.isArray(body)) {
+			return {
+				kind: "unavailable",
+				reason: "malformed_response",
+				detail: "GitHub returned a repository list Harbor could not read.",
+			};
+		}
+
+		const repositories: RepoSummary[] = [];
+		for (const entry of body) {
+			if (!isRecord(entry)) continue;
+			const owner = isRecord(entry.owner) ? entry.owner.login : null;
+			if (typeof owner !== "string" || typeof entry.name !== "string") continue;
+			repositories.push({
+				owner,
+				name: entry.name,
+				default_branch: typeof entry.default_branch === "string" ? entry.default_branch : "main",
+				description: typeof entry.description === "string" ? entry.description : null,
+				private: entry.private === true,
+				permission: readPermission(entry.permissions),
+			});
+		}
+
+		// GitHub only sends a `link` header when there is another page, so its
+		// presence is the truthful test for "there is more than this".
+		const truncated = (headers.get("link") ?? "").includes('rel="next"');
+		return { kind: "listed", repositories, truncated };
 	}
 
 	// -- Pull requests ------------------------------------------------------
