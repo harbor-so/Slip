@@ -21,6 +21,7 @@ const NAV = [
 	{ href: "/", label: "Activity" },
 	{ href: "/channels", label: "Channels" },
 	{ href: "/sessions", label: "Sessions" },
+	{ href: "/repos", label: "Repos" },
 	{ href: "/automations", label: "Automations" },
 	{ href: "/usage", label: "Usage" },
 	{ href: "/digest", label: "Digest" },

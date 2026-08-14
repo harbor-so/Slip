@@ -888,5 +888,64 @@ export async function prAuthorityForUser(
 	return assertNever(outcome, "prAuthorityForUser");
 }
 
+/**
+ * Forget a user's stored source-control identity.
+ *
+ * Deleting the row rather than blanking the ciphertext, because a row that
+ * exists with an unreadable secret is `stored_token_undecryptable` — an
+ * INDETERMINATE answer, which `openPullRequest` retries forever. Disconnecting
+ * is a decision, and the honest encoding of a decision is `no_scm_identity`:
+ * absent, degraded loudly, not retried.
+ *
+ * Returns whether there was anything to forget so the caller can tell a
+ * disconnect from a double-click without a second query.
+ */
+export async function forgetUserScmToken(
+	userId: string,
+	provider: ScmProviderId = "github",
+): Promise<boolean> {
+	const removed = await db
+		.delete(userScmTokens)
+		.where(and(eq(userScmTokens.userId, userId), eq(userScmTokens.provider, provider)))
+		.returning({ id: userScmTokens.id });
+	return removed.length > 0;
+}
+
+/**
+ * What to show a person on the settings page, without touching the secret.
+ *
+ * Deliberately does NOT go through `userScmToken`: that function refreshes, and
+ * rendering a page must not rotate a refresh token as a side effect of somebody
+ * looking at it. Expiry is read from the column, which is what the column is
+ * for.
+ */
+export interface ScmIdentitySummary {
+	connected: boolean;
+	login: string | null;
+	scopes: string | null;
+	/** Null for a token that does not expire — a classic OAuth App grant. */
+	expires_at: string | null;
+	connected_at: string | null;
+}
+
+export async function scmIdentitySummary(
+	userId: string,
+	provider: ScmProviderId = "github",
+): Promise<ScmIdentitySummary> {
+	const row = await db.query.userScmTokens.findFirst({
+		where: and(eq(userScmTokens.userId, userId), eq(userScmTokens.provider, provider)),
+	});
+	if (!row) {
+		return { connected: false, login: null, scopes: null, expires_at: null, connected_at: null };
+	}
+	return {
+		connected: true,
+		login: row.login,
+		scopes: row.scopes,
+		expires_at: row.expiresAt?.toISOString() ?? null,
+		connected_at: row.createdAt?.toISOString() ?? null,
+	};
+}
+
 /** Re-exported so callers do not have to import from two files to switch on a gap. */
 export type { ScmIdentityGap, ScmIdentityIndeterminacy };

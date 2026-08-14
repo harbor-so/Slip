@@ -589,6 +589,39 @@ export const SETTINGS = {
 			+ "new adopter hits is in the least observable part of the system.",
 		parse: asBool,
 	} satisfies Setting<boolean>,
+
+	autoSetupEnabled: {
+		env: "HARBOR_AUTO_SETUP",
+		fallback: true,
+		derivation:
+			"On by default, and this is the onboarding cost of the whole product. "
+			+ "`.harbor/setup.sh` is optional and a missing one is silently skipped, "
+			+ "which means every repository needs a hook written, committed and "
+			+ "reviewed before an agent can run its tests — and for a JavaScript "
+			+ "monorepo that hook is one line. So when the hook is absent, Harbor "
+			+ "detects the package manager from the lockfile and installs. A present "
+			+ "hook always wins, completely: a repository that described its own setup "
+			+ "knew something detection does not. Off is for a deployment that would "
+			+ "rather a repository fail loudly than boot with dependencies somebody "
+			+ "did not ask for.",
+		parse: asBool,
+	} satisfies Setting<boolean>,
+
+	githubOAuthScopes: {
+		env: "HARBOR_GITHUB_OAUTH_SCOPES",
+		fallback: "read:user",
+		derivation:
+			"What signing in to the dashboard asks GitHub for. `read:user` is the "
+			+ "default and it is the whole point: looking at a dashboard should not "
+			+ "require handing over write access to every repository you can push to. "
+			+ "Pull-request authorship needs `repo`, and the default way to get it is "
+			+ "the separate opt-in consent at /api/auth/scm, which a user grants once, "
+			+ "deliberately, and can revoke on its own. An operator who would rather "
+			+ "have one flow than two can set this to `read:user,repo`, at which point "
+			+ "sign-in also stores the token — a real trade, made explicitly, rather "
+			+ "than a scope that crept into the login button.",
+		parse: asString,
+	} satisfies Setting<string>,
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS;
