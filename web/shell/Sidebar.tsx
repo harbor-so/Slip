@@ -21,6 +21,7 @@ import {
 	MessagesSquare,
 	Plug,
 	Settings,
+	Sparkles,
 	Terminal,
 	Users,
 	Workflow,
@@ -46,6 +47,7 @@ const NAV: Array<{ href: string; label: string; icon: LucideIcon }> = [
 	{ href: "/digest", label: "Digest", icon: FileText },
 	{ href: "/connectors", label: "Connectors", icon: Plug },
 	{ href: "/settings", label: "Settings", icon: Settings },
+	{ href: "/demo", label: "Demo", icon: Sparkles },
 ];
 
 const CONNECTOR_LABEL: Record<string, string> = {
