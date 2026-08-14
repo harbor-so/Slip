@@ -590,6 +590,23 @@ export const SETTINGS = {
 		parse: asBool,
 	} satisfies Setting<boolean>,
 
+	autoSetupEnabled: {
+		env: "HARBOR_AUTO_SETUP",
+		fallback: true,
+		derivation:
+			"On by default, and this is the onboarding cost of the whole product. "
+			+ "`.harbor/setup.sh` is optional and a missing one is silently skipped, "
+			+ "which means every repository needs a hook written, committed and "
+			+ "reviewed before an agent can run its tests — and for a JavaScript "
+			+ "monorepo that hook is one line. So when the hook is absent, Harbor "
+			+ "detects the package manager from the lockfile and installs. A present "
+			+ "hook always wins, completely: a repository that described its own setup "
+			+ "knew something detection does not. Off is for a deployment that would "
+			+ "rather a repository fail loudly than boot with dependencies somebody "
+			+ "did not ask for.",
+		parse: asBool,
+	} satisfies Setting<boolean>,
+
 	githubOAuthScopes: {
 		env: "HARBOR_GITHUB_OAUTH_SCOPES",
 		fallback: "read:user",

@@ -25,9 +25,10 @@ import type { OutboundEvent } from "./bridge.js";
 import {
 	configureGit,
 	createResumeTokenAccumulator,
-	pushWorkingBranch,
 	parseRepos,
+	pushWorkingBranch,
 	readSupervisorConfig,
+	runAutoSetup,
 	runCommand,
 	runHook,
 	waitForTunnels,
@@ -489,7 +490,10 @@ describe("runHook", () => {
 		// Most repositories have no hooks at all; their boots must not warn.
 		const workspace = hookWorkspace(null);
 		const result = await runHook("start", supervisorConfig(), "fresh", sink(), process.env, workspace);
-		expect(result).toEqual({ kind: "skipped" });
+		// `absent` rather than a bare skip: auto-setup keys off exactly this, so
+		// that a repository with no hook still gets its dependencies installed
+		// while a policy skip stays a policy skip.
+		expect(result).toEqual({ kind: "skipped", reason: "absent" });
 	});
 
 	it("obeys the policy skip: setup does not run on a snapshot_restore boot", async () => {
@@ -500,7 +504,7 @@ describe("runHook", () => {
 		const workspace = hookWorkspace("setup");
 		const bridge = sink();
 		const result = await runHook("setup", supervisorConfig(), "snapshot_restore", bridge, process.env, workspace);
-		expect(result).toEqual({ kind: "skipped" });
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
 		const stages = bridge.events.map((event) => event.payload?.stage);
 		expect(stages).toContain("setup.skipped");
 	});
@@ -885,5 +889,117 @@ describe("pushWorkingBranch", () => {
 		const second = sink();
 		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, second);
 		expect(second.events.some((event) => event.type === "branch_pushed")).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// runAutoSetup — the stand-in for a setup.sh nobody wrote
+// ---------------------------------------------------------------------------
+
+/**
+ * The reason this exists: `.harbor/setup.sh` is optional and a missing one is
+ * silently skipped, so every repository needed a hook written, committed and
+ * reviewed before an agent could run its tests — and for a JavaScript monorepo
+ * that hook is one line. These tests pin the two properties that make
+ * auto-detection safe rather than merely convenient: **a hook always wins**, and
+ * **a failure degrades exactly the way a failed hook would**.
+ */
+describe("runAutoSetup", () => {
+	/** A workspace containing the named files, each empty. */
+	function repoWorkspace(files: string[]): string {
+		const workspace = tempDir("harbor-auto-");
+		for (const file of files) writeFileSync(join(workspace, file), "");
+		return workspace;
+	}
+
+	it("does nothing at all when there is nothing to install", async () => {
+		const bridge = sink();
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			bridge,
+			process.env,
+			repoWorkspace(["README.md"]),
+		);
+		// Not a warning: a documentation repository is not degraded.
+		expect(result).toEqual({ kind: "skipped", reason: "absent" });
+		expect(bridge.events.map((event) => event.payload?.stage)).toContain("auto_setup.skipped");
+	});
+
+	it("runs the detected install and announces what it detected and why", async () => {
+		// `go.sum` maps to `go mod download`, which is not installed here — so the
+		// assertion is on the announcement, which is what makes an auto-install
+		// visible rather than magic. The exit path is covered below.
+		const bridge = sink();
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.HARBOR_SETUP_TIMEOUT_MS = "20000";
+		await runAutoSetup(supervisorConfig(), "fresh", bridge, process.env, workspace);
+
+		const announced = bridge.events.find((event) => event.payload?.stage === "auto_setup");
+		expect(announced?.payload).toMatchObject({
+			manager: "npm",
+			evidence: "package.json",
+			command: "npm install",
+		});
+	});
+
+	it("refuses to guess between two lockfiles, and says which disagree", async () => {
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			sink(),
+			process.env,
+			repoWorkspace(["pnpm-lock.yaml", "package-lock.json"]),
+		);
+		expect(result.kind).toBe("degraded");
+		if (result.kind !== "degraded") return;
+		expect(result.warning.code).toBe("auto_setup.ambiguous");
+		expect(result.warning.message).toContain("pnpm-lock.yaml");
+		expect(result.warning.message).toContain("package-lock.json");
+	});
+
+	it("degrades on a failed install, and names the escape hatch", async () => {
+		// A command that does not exist stands in for an install that fails. The
+		// asymmetry is inherited from hookPolicy rather than restated: a broken
+		// provisioning step on a fresh boot degrades.
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.PATH = "/nonexistent";
+		const result = await runAutoSetup(supervisorConfig(), "fresh", sink(), process.env, workspace);
+		expect(result.kind).toBe("degraded");
+		if (result.kind !== "degraded") return;
+		expect(result.warning.code).toBe("auto_setup.failed");
+		expect(result.warning.message).toContain(".harbor/setup.sh");
+	});
+
+	it("is fatal at image-build time, where a bad install bakes in permanently", async () => {
+		const workspace = repoWorkspace(["package.json"]);
+		process.env.PATH = "/nonexistent";
+		const result = await runAutoSetup(supervisorConfig(), "build", sink(), process.env, workspace);
+		expect(result.kind).toBe("failed");
+	});
+
+	it("does not run on a boot mode whose setup is already applied", async () => {
+		// A `repo_image` boot has dependencies baked in. Reinstalling is the one
+		// case where doing the work again is pure cost.
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"repo_image",
+			sink(),
+			process.env,
+			repoWorkspace(["package.json"]),
+		);
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
+	});
+
+	it("is switched off entirely by HARBOR_AUTO_SETUP=0", async () => {
+		process.env.HARBOR_AUTO_SETUP = "0";
+		const result = await runAutoSetup(
+			supervisorConfig(),
+			"fresh",
+			sink(),
+			process.env,
+			repoWorkspace(["package.json"]),
+		);
+		expect(result).toEqual({ kind: "skipped", reason: "policy" });
 	});
 });

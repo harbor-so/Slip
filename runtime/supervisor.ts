@@ -56,6 +56,7 @@ import {
 	type HookName,
 } from "./boot-decisions.js";
 import { Bridge, defaultBridgeDeps, type BridgeHandlers, type TurnInvocation } from "./bridge.js";
+import { detectPackageManager } from "./setup-detect.js";
 
 /**
  * The one capability boot code actually has on the bridge: emitting events.
@@ -346,6 +347,17 @@ export async function boot(
 	}
 	if (setupResult.kind === "degraded") warn(setupResult.warning);
 
+	// The hook wins completely when it exists. This runs only when it does not —
+	// and only when the boot mode would have run one, so a `repo_image` boot does
+	// not reinstall what is already baked in.
+	if (setupResult.kind === "skipped" && setupResult.reason === "absent") {
+		const auto = await runAutoSetup(config, mode, bridge, env, primary);
+		if (auto.kind === "failed") {
+			return finish({ kind: "failed", stage: "setup", message: auto.message, warnings });
+		}
+		if (auto.kind === "degraded") warn(auto.warning);
+	}
+
 	const tunnels = await waitForTunnels(config, bridge, env);
 	if (tunnels !== null) warn(tunnels);
 
@@ -509,7 +521,16 @@ async function cloneRepos(
 
 export type HookResult =
 	| { kind: "ok" }
-	| { kind: "skipped" }
+	/**
+	 * `policy` — this boot mode does not run this hook at all (a restored
+	 * filesystem already has setup applied). `absent` — the hook would have run
+	 * and there is no script.
+	 *
+	 * The distinction is what auto-setup keys off. Collapsing it would run an
+	 * install inside a `repo_image` boot that already has one baked in, which is
+	 * the one case where doing the work again is pure cost.
+	 */
+	| { kind: "skipped"; reason: "policy" | "absent" }
 	| { kind: "degraded"; warning: BootWarning }
 	| { kind: "failed"; message: string };
 
@@ -536,11 +557,11 @@ export async function runHook(
 			type: "boot_progress",
 			payload: { stage: `${hook}.skipped`, reason: policy.skipReason, mode },
 		});
-		return { kind: "skipped" };
+		return { kind: "skipped", reason: "policy" };
 	}
 
 	const script = join(workspace, ".harbor", `${hook}.sh`);
-	if (!existsSync(script)) return { kind: "skipped" };
+	if (!existsSync(script)) return { kind: "skipped", reason: "absent" };
 
 	bridge.emit({ type: "boot_progress", payload: { stage: hook, script } });
 	const result = await runCommand("bash", [script], {
@@ -577,6 +598,114 @@ export async function runHook(
 			};
 	}
 	return assertNever(policy.fatality, "hook fatality in runHook");
+}
+
+/**
+ * Install dependencies for a repository that never wrote a `.harbor/setup.sh`.
+ *
+ * The decision is entirely in `detectPackageManager`, which is pure and reads a
+ * directory listing; this function contributes the `readdir`, the `spawn`, and
+ * the policy that a failure here is exactly as fatal as a failed hook would have
+ * been — `fatal` at image-build time, `non_fatal` on a fresh boot. Reusing
+ * `hookPolicy` rather than restating it is deliberate: auto-setup is the setup
+ * hook's stand-in, and the day somebody changes that asymmetry it must change
+ * for both or the two paths silently disagree.
+ *
+ * Three of the four outcomes emit a warning rather than staying silent:
+ *
+ *  - **ambiguous** — two lockfiles naming different managers. Harbor refuses to
+ *    guess and says which files disagree, because installing the wrong one
+ *    produces a dependency tree that fails much later with an error about a
+ *    missing binary rather than about a lockfile.
+ *  - **nothing recognised** — a `boot_progress` line and no warning. A
+ *    documentation repository with no dependencies is not degraded.
+ *  - **install failed** — the same `hook.setup_failed`-shaped warning a failed
+ *    hook produces, so a client rendering boot warnings needs no new case.
+ */
+export async function runAutoSetup(
+	config: SupervisorConfig,
+	mode: BootMode,
+	bridge: BridgeSink,
+	env: NodeJS.ProcessEnv,
+	workspace: string,
+): Promise<HookResult> {
+	if (!setting("autoSetupEnabled")) return { kind: "skipped", reason: "policy" };
+
+	const policy = hookPolicy("setup", mode);
+	if (!policy.run) return { kind: "skipped", reason: "policy" };
+
+	let entries: string[];
+	try {
+		entries = readdirSync(workspace);
+	} catch (error) {
+		// A workspace we cannot list is a clone that did not land where we think it
+		// did. Not fatal — the hook path treats a missing setup as survivable — but
+		// emphatically not silent.
+		return {
+			kind: "degraded",
+			warning: {
+				code: "auto_setup.workspace_unreadable",
+				message:
+					`Harbor could not read ${workspace} to work out how to install dependencies `
+					+ `(${(error as Error).message}). The agent's first build or test run will `
+					+ "probably fail on missing dependencies.",
+			},
+		};
+	}
+
+	const detection = detectPackageManager(entries);
+
+	if (detection.kind === "none") {
+		bridge.emit({
+			type: "boot_progress",
+			payload: { stage: "auto_setup.skipped", reason: "nothing_recognised", mode },
+		});
+		return { kind: "skipped", reason: "absent" };
+	}
+
+	if (detection.kind === "ambiguous") {
+		return {
+			kind: "degraded",
+			warning: { code: "auto_setup.ambiguous", message: detection.reason },
+		};
+	}
+
+	bridge.emit({
+		type: "boot_progress",
+		payload: {
+			stage: "auto_setup",
+			manager: detection.manager,
+			evidence: detection.evidence,
+			command: detection.command.join(" "),
+			mode,
+		},
+	});
+
+	const [bin, ...args] = detection.command;
+	const result = await runCommand(bin!, args, {
+		cwd: workspace,
+		env: { ...env, HARBOR_BOOT_MODE: mode },
+		timeoutMs: setting(policy.timeoutSetting),
+		onLine: (line) =>
+			bridge.emit({ type: "log", payload: { source: "auto_setup", line: stripAnsi(line) } }),
+	});
+	if (result.code === 0) return { kind: "ok" };
+
+	const what = result.timedOut
+		? `timed out after ${setting(policy.timeoutSetting)}ms`
+		: `exited ${result.code}`;
+	const detail =
+		`Harbor detected ${detection.evidence} and ran \`${detection.command.join(" ")}\`, which `
+		+ `${what}. Write .harbor/setup.sh if this repository needs something different — a `
+		+ `hook always wins over detection. Output: ${tail(result.output)}`;
+
+	switch (policy.fatality) {
+		case "fatal":
+			return { kind: "failed", message: detail };
+		case "non_fatal":
+			return { kind: "degraded", warning: { code: "auto_setup.failed", message: detail } };
+	}
+	return assertNever(policy.fatality, "hook fatality in runAutoSetup");
 }
 
 /**
