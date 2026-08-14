@@ -299,6 +299,31 @@ export const sessions = pgTable(
 		runtime: text("runtime"),
 		/** Paused sessions stop consuming the queue. Set by a budget or by a human. */
 		pausedReason: text("paused_reason"),
+		/**
+		 * The agent's own conversation id, so a replaced sandbox can carry on rather
+		 * than silently starting over.
+		 *
+		 * A session outlives its sandboxes: a box is stopped on inactivity, reaped on
+		 * a stale heartbeat, or killed by an execution timeout, and the next prompt
+		 * boots a new one. The supervisor holds the resume token in a closure, so
+		 * before this column every one of those events reset the agent's context
+		 * while Harbor's transcript carried on looking unbroken — which reads to the
+		 * user as the model having got worse, not as a restart.
+		 *
+		 * Written only from a verified `agent_finished` payload on the fenced ingest
+		 * path, and re-injected only when the boot restored the filesystem the
+		 * transcript lives on. See `resumeTokenForBoot`.
+		 */
+		agentResumeToken: text("agent_resume_token"),
+		/**
+		 * Which runtime minted that token. Not decoration: a token is adapter-
+		 * specific — a Claude Code session id means nothing to OpenCode's `--session`
+		 * — and `sessions.runtime` is editable, so the two can legitimately disagree.
+		 * Storing the minting runtime is what lets the mismatch be detected instead
+		 * of handing one agent another's identifier and getting an opaque failure on
+		 * the first turn after a reboot.
+		 */
+		agentResumeRuntime: text("agent_resume_runtime"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
 	},
@@ -369,6 +394,22 @@ export const sessionPrompts = pgTable(
 		 * attributed turn in the product.
 		 */
 		authorEmail: text("author_email"),
+		/**
+		 * The signed-in user who wrote this prompt, when there was one.
+		 *
+		 * The pull request for this session's work is opened with **this person's**
+		 * OAuth token — that is what makes them the PR author, and what makes GitHub
+		 * refuse to let them approve it. `prAuthorityForUser` takes a user id, so
+		 * without this column the only route from a prompt to an identity is
+		 * matching `author_email` against `users.email`, which is nullable and not
+		 * unique. A near-miss there does not fail; it opens a pull request in
+		 * somebody else's name.
+		 *
+		 * Nullable because a prompt can legitimately have no user behind it — an
+		 * automation, a connector, an agent's `spawn_child`. Those sessions push a
+		 * branch and hand back a compare URL rather than opening a PR as the bot.
+		 */
+		authorUserId: uuid("author_user_id").references(() => users.id),
 		body: text("body").notNull(),
 		status: text("status").notNull().default("queued"),
 		/** Monotonic within a session, so ordering never depends on timestamps. */
@@ -848,6 +889,63 @@ export const artifacts = pgTable(
 	],
 );
 
+/**
+ * The Devin sessions Harbor is tracking, and the cursor it polls them with.
+ *
+ * Devin is a cloud agent with no hooks and no outbound webhooks — the only way to
+ * learn what one did is to GET its session. This table is what makes that pull
+ * idempotent and attributable: it stores where the last poll left off
+ * (`lastUpdatedAt` / `lastMessageCount` / `lastStatus`) so a tick only emits the
+ * activity that is new, and it maps each Devin session to a minted Harbor
+ * `sessions` row so the PR it produces has a home — `artifacts.session_id` is
+ * NOT NULL, and a Devin PR has to live under a session like every other artifact.
+ *
+ * A row leaves the poll set by its `status`: the terminal values Devin reports
+ * (`finished`, `suspended`) and the `expired` we set after the session stops
+ * being reachable drop it from `devin_sessions_poll_idx`. The row is kept for
+ * provenance — it owns the PR artifact link — rather than deleted.
+ */
+export const devinSessions = pgTable(
+	"devin_sessions",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		/** Devin's own session id, e.g. devin-xxxx — the join key to its API. */
+		devinSessionId: text("devin_session_id").notNull(),
+		/** The Harbor session minted to host this Devin session's artifacts. */
+		sessionId: uuid("session_id").references(() => sessions.id),
+		/**
+		 * Mirrors Devin's `status_enum`. The terminal set (`finished`, `suspended`)
+		 * plus `expired` is what the poll query excludes, so this column is both the
+		 * live state and the de-registration switch.
+		 */
+		status: text("status").notNull().default("working"),
+		/** The previous `status_enum`, so a tick can emit only the transition. */
+		lastStatus: text("last_status"),
+		/** How many messages had been seen — `messages.slice(this)` is the new tail. */
+		lastMessageCount: integer("last_message_count").notNull().default(0),
+		/**
+		 * Devin's `updated_at` at the last poll. The short-circuit cursor: an
+		 * unchanged value means nothing happened and the tick does no work beyond
+		 * bumping `lastPolledAt`, which is what keeps an idle long-running session
+		 * from generating repeat writes every interval.
+		 */
+		lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }),
+		lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+		prUrl: text("pr_url"),
+		prArtifactId: uuid("pr_artifact_id").references(() => artifacts.id),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// One Devin session is tracked once per org; re-registration is a no-op.
+		uniqueIndex("devin_sessions_org_session_idx").on(table.orgId, table.devinSessionId),
+		// The poll query: non-terminal rows, oldest-polled first.
+		index("devin_sessions_poll_idx").on(table.status, table.lastPolledAt),
+	],
+);
+
 // ---------------------------------------------------------------------------
 // Secrets and credentials
 // ---------------------------------------------------------------------------
@@ -1175,6 +1273,11 @@ export const ACTIVITY_RUNTIMES = [
 	"opencode",
 	"cursor",
 	"conductor",
+	// A cloud agent with no hooks: its activity is pulled by the devin poll loop
+	// (src/devin/poll.ts) and fed through the same `recordActivity` path, not
+	// pushed by a host. The generic `/api/hooks/devin` route also accepts it for
+	// manual replay, but the poller is authoritative.
+	"devin",
 ] as const;
 export type ActivityRuntime = (typeof ACTIVITY_RUNTIMES)[number];
 

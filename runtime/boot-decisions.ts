@@ -752,3 +752,120 @@ export function reconnectDelayMs(input: {
 	const random = Number.isFinite(input.random) ? Math.min(Math.max(input.random, 0), 1) : 0;
 	return Math.max(1, Math.round(window / 2 + (window / 2) * random));
 }
+
+// ---------------------------------------------------------------------------
+// Pushing the working branch
+// ---------------------------------------------------------------------------
+
+export type PushSkipReason =
+	/** The control plane sent no branch. This deployment has the feature off. */
+	| "no_branch"
+	/** A branch name that will not be interpolated into a git ref. */
+	| "branch_malformed"
+	/** No workspace repository to push from. */
+	| "no_repo"
+	/** The agent committed nothing this turn, and nothing was left over from a previous one. */
+	| "nothing_to_push";
+
+export type PushVerdict =
+	| { push: true; branch: string; commits: number; dirty: boolean }
+	| { push: false; reason: PushSkipReason; detail: string };
+
+/**
+ * Refs Harbor will push to, and the shape check that keeps this honest.
+ *
+ * The branch arrives from the control plane, inside the Harbor-controlled region
+ * of the prompt command where a repository secret cannot reach it — so this is
+ * defence in depth rather than the only guard. It is still worth having: the
+ * value is interpolated into `git push origin HEAD:refs/heads/<branch>`, and a
+ * ref containing `..`, whitespace, or a leading `-` is either rejected by git in a
+ * confusing way or, at worst, read as something other than a branch name. A shape
+ * check here turns that into one refusal with a reason attached.
+ */
+const REF_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,190}$/;
+
+function branchIsSane(branch: string): boolean {
+	if (!REF_SHAPE.test(branch)) return false;
+	if (branch.includes("..") || branch.includes("//")) return false;
+	if (branch.endsWith("/") || branch.endsWith(".lock") || branch.endsWith(".")) return false;
+	return true;
+}
+
+/**
+ * Should this turn's work be pushed, and to where?
+ *
+ * Pure, so the boundaries are testable exactly: zero commits versus one is the
+ * difference between a session that produces a pull request and one that does
+ * not, and it is not a boundary anyone should be discovering from a container log.
+ *
+ * Three decisions are deliberate and each has an alternative that looks more
+ * helpful and is worse:
+ *
+ * **`dirty` does not block the push, and it does not trigger a commit either.**
+ * Uncommitted changes mean the agent stopped mid-edit. Harbor pushes what was
+ * committed and reports `dirty` so the timeline can say so. Committing on the
+ * agent's behalf is the tempting alternative and it forges the commit metadata
+ * that the entire attribution split rests on — `GIT_AUTHOR_*` is set per turn from
+ * the prompting human, so a commit Harbor makes would be attributed to a person
+ * who never wrote it and never saw it.
+ *
+ * **A failed or timed-out turn still pushes.** The commits exist in the workspace
+ * either way; the only question is whether anybody can reach them. `stop` is
+ * documented as "wind up and keep its work", and discarding a timed-out turn's
+ * three good commits because the fourth ran long is losing work the user already
+ * paid for. What the turn outcome changes is the *narration*, not the push.
+ *
+ * **`commits` counts work not on any remote**, rather than commits ahead of a
+ * named base. It needs no base-branch resolution, so it cannot be wrong about
+ * one; it is naturally idempotent across turns (after a push the count returns to
+ * zero); and after a snapshot restore it correctly counts whatever the previous
+ * box committed and never managed to push.
+ */
+export function pushDecision(input: {
+	branch: string | null;
+	/** `git rev-list --count HEAD --not --remotes`. */
+	commits: number;
+	dirty: boolean;
+	repoPresent: boolean;
+}): PushVerdict {
+	if (!input.repoPresent) {
+		return {
+			push: false,
+			reason: "no_repo",
+			detail: "No git repository in the workspace, so there is nothing to push from.",
+		};
+	}
+
+	const branch = (input.branch ?? "").trim();
+	if (branch === "") {
+		return {
+			push: false,
+			reason: "no_branch",
+			detail:
+				"The control plane sent no branch with this prompt. Nothing is pushed and no pull "
+				+ "request will be opened; the agent's commits stay in the sandbox.",
+		};
+	}
+	if (!branchIsSane(branch)) {
+		return {
+			push: false,
+			reason: "branch_malformed",
+			detail:
+				`${JSON.stringify(branch)} is not a shape Harbor will interpolate into a git ref. `
+				+ "This is a bug in the control plane, not in your configuration.",
+		};
+	}
+
+	const commits = Number.isFinite(input.commits) ? Math.max(0, Math.floor(input.commits)) : 0;
+	if (commits === 0) {
+		return {
+			push: false,
+			reason: "nothing_to_push",
+			detail: input.dirty
+				? "The agent changed files but committed nothing, so there is no commit to push."
+				: "The agent made no commits this turn.",
+		};
+	}
+
+	return { push: true, branch, commits, dirty: input.dirty };
+}

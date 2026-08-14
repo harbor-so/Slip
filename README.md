@@ -6,11 +6,12 @@ You @-mention it in Slack, or assign it a Linear issue, or type into a shared
 room. It boots an isolated sandbox, runs the coding agent you already use against
 your repository, and streams what it is doing to anyone who opens the link.
 
-(Opening the pull request is the one advertised step that is not wired up yet —
-the attribution machinery is written and tested, nothing calls it. See
-[Pull requests](#pull-requests-are-authored-by-the-human).)
-
 One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
+
+And when you outgrow one host, the cloud path is additive rather than a rewrite:
+a container image for the control plane, committed manifests for Fly, Render and
+Kubernetes, and twelve remote sandbox backends — none of which the laptop story
+depends on. See [Deploying](./DEPLOY.md).
 
 [Quick start](#quick-start) · [Why this exists](#why-this-exists) ·
 [How it works](#how-it-works) · [Deploying](./DEPLOY.md) ·
@@ -42,7 +43,7 @@ Harbor is the version any company can adopt.
 |---|---|---|
 | Runs on | Cloudflare + Modal + Vercel + Terraform | Node + Postgres |
 | Evaluate it | four vendor accounts | `docker compose up` |
-| Sandbox | Modal (and four other paid providers) | **Docker by default**, Fly optional |
+| Sandbox | Modal (and four other paid providers) | **Docker by default**; 11 remote backends optional (Fly, E2B, Daytona, Modal, Runloop, Morph, Blaxel, CodeSandbox, Vercel, Cloudflare, Northflank) |
 | Coding agent | OpenCode only | Claude Code, Codex, OpenCode, Cursor, or your own |
 | Tenancy | single-tenant, one shared App install, no per-user repo check | org-scoped schema, per-user repo access check, tenant resolved from verified webhook payload |
 | Adding a connector | write and deploy another Worker | one file, one registry line |
@@ -199,14 +200,25 @@ lowest-common-denominator interface loses the best property of each.
 | Provider | Isolation | Needs |
 |---|---|---|
 | `docker` **(default)** | container | nothing |
-| `fly` | hardware VM | a Fly account, `FLY_API_TOKEN` |
+| `fly`, `e2b`, `modal`, `daytona`, `morph`, `runloop`, `blaxel`, `vercel` | hardware VM / microVM | that vendor's account and key |
+| `cloudflare`, `northflank`, `codesandbox` | container, in the vendor's cloud | that vendor's account and key |
 | `local` | **none** — see below | opt-in flags |
 
-`fly` is the remote option, for a deployment that has outgrown one host. It is
-`ephemeral` by choice rather than by limitation: a Machine can be stopped and
-started, but a persistent resume with no Machine left to resume has nowhere to
+Twelve remote backends, and `docker` still needs nothing. The remote ones are
+`ephemeral` by choice rather than by limitation: several of them can stop and
+start a box, but a persistent resume with no box left to resume has nowhere to
 fall back to, and the rule is to advertise the capability you can honour on a bad
 day.
+
+Picking a remote provider is not purely an upgrade. The sandbox environment
+carries your repository secrets **decrypted** — that is the only way an agent can
+use them — so a remote box moves them across a vendor boundary Harbor can repeat
+claims about but not verify. `docker` on a dedicated host is the weaker isolation
+tier and the smaller trust surface; [docs/SECURITY.md](./docs/SECURITY.md) states
+the trade rather than implying one answer.
+
+Getting the image to a vendor is its own step, and only half a step for half of
+them: [docs/sandbox-images.md](./docs/sandbox-images.md).
 
 `local` runs the agent as the server user with no isolation. It is off unless
 `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must
@@ -252,17 +264,34 @@ Token counts come from the agent when it reports them and are marked
 number that disagrees with the real invoice is worse than a visible gap, because
 somebody makes a decision from it.
 
+A session is a conversation, and it survives its sandbox. The agent's own resume
+token is persisted on the session and re-injected — but **only into a box that
+restored the filesystem the transcript lives on**, because `--resume` reads a
+transcript from disk and handing that id to a fresh box makes the first turn die
+on a session that is not there. On a fresh boot the session says so on the
+timeline. A restart that silently drops the agent's memory is indistinguishable,
+from the room, from a model that has started ignoring you.
+
 ### Pull requests are authored by the human
 
-> **Not wired up yet.** Everything in this section is implemented in
-> `src/git/provider.ts` and covered by `src/git/attribution.test.ts`, and none of
-> it has a production caller: the sandbox does not report its push, so
-> `openPullRequest` is never invoked. The design below is what the code does when
-> something calls it, not what a deployment does today.
+The **supervisor** pushes the branch with short-lived brokered credentials once a
+turn commits anything, and reports it as `branch_pushed`. The control plane pins
+that branch to the session, records it, and opens the pull request **with the
+prompting user's own token**.
 
-The sandbox pushes a branch with short-lived brokered credentials and reports the
-name. The control plane opens the pull request **with the prompting user's own
-token**. GitHub does not let an author approve their own PR, so unreviewed agent
+Harbor pushes rather than asking the agent to, because "bring your own agent" goes
+down to an argv template: a generic model with tool access cannot be relied on to
+run `git push`, to use the right ref, or to push at all. A guarantee that holds
+only for the agents we tested is not one. Harbor does **not** commit on the
+agent's behalf — `GIT_AUTHOR_*` is the prompting human, so a commit Harbor made
+would carry their name on work they never wrote. Uncommitted leftovers are
+reported, not resolved.
+
+The branch is `harbor/lse_<claim_id>`, **pinned to the session on the first push**
+and reused after that. It has to be: `completeTurn` releases the lease whenever
+the queue drains, so a follow-up an hour later runs under a different claim id,
+and re-deriving would fork a second branch from base carrying none of the first
+turn's commits. GitHub does not let an author approve their own PR, so unreviewed agent
 code becomes structurally impossible rather than policy-prohibited.
 
 Author and committer are separate properties from separate mechanisms — the PR
@@ -367,8 +396,8 @@ get no Harbor tools.
 The guarantee is one Postgres partial unique index:
 
 ```sql
-create unique index one_active_claim_per_task
-  on claims (task_id) where released_at is null;
+create unique index one_active_lease_per_scope
+  on claims (org_id, scope) where released_at is null;
 ```
 
 Two agents racing both INSERT; Postgres serialises them and exactly one lands. The
@@ -405,11 +434,11 @@ value — an agent that opens forty pull requests nobody merges has produced non
 which is why the number counts merges and not openings. `artifacts.merged_at` is
 written only from a verified source-control webhook; no agent can move it.
 
-**Known gap:** nothing opens the pull request yet. `openPullRequest` and the
-attribution rules above are implemented and tested, but no production caller
-reaches them — the sandbox never reports a push, so no `pull_request` artifact is
-created and this metric reads `0/n` on every deployment. The plumbing behind it
-is real; the trigger is not written.
+The chain behind it runs end to end: a turn that commits is pushed by the
+supervisor, the push pins the session's branch and inserts a `branch` artifact,
+the pull request is opened as the prompting human, and its `html_url` is what a
+later merge webhook joins on. A session that pushes six times has one pull
+request, not six.
 
 ---
 

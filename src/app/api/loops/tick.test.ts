@@ -121,15 +121,17 @@ describe("what a tick actually does", () => {
 		};
 
 		// An operator reading a cron log needs to know WHICH sweep is failing. A bare
-		// 500 would also make the cron retry the five loops that worked.
+		// 500 would also make the cron retry the loops that worked.
 		expect(body.ok).toBe(true);
 		expect(body.loops.map((entry) => entry.name).sort()).toEqual([
 			"automations",
 			"claims",
 			"compaction",
 			"deadlines",
+			"devin",
 			"images",
 			"orphans",
+			"pull_requests",
 			"sessions",
 		]);
 	});

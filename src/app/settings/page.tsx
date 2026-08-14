@@ -7,10 +7,14 @@
  * page renders the real block, with the real URL, ready to copy.
  */
 
+import { scmIdentitySummary } from "../../git/credentials.js";
 import { listApiKeys } from "../../lib/dashboard.js";
-import { currentSession } from "../../lib/session.js";
+import { signInGrantsAuthorship } from "../../lib/github-oauth.js";
+import { currentSession, oauthConfigured } from "../../lib/session.js";
+import { dashboardUrl, mcpUrl } from "../../lib/urls.js";
 import { Badge, Card, Empty, SectionLabel } from "../../components/ui.js";
 import { CreateKeyPanel } from "./create-key.js";
+import { ScmIdentityPanel } from "./scm-identity.js";
 
 export const dynamic = "force-dynamic";
 
@@ -19,11 +23,64 @@ export default async function SettingsPage() {
 	if (!session) return <Empty title="No organisation yet" hint="Run npm run db:seed." />;
 
 	const keys = await listApiKeys(session.orgId);
-	const mcpUrl = process.env.HARBOR_MCP_URL ?? "http://localhost:8788/mcp";
-	const appUrl = process.env.HARBOR_URL ?? "http://localhost:3000";
+	const scm = session.userId
+		? await scmIdentitySummary(session.userId)
+		: { connected: false, login: null, scopes: null, expires_at: null, connected_at: null };
+	const mcpEndpoint = mcpUrl();
+	const appUrl = dashboardUrl();
 
 	return (
 		<div className="space-y-8">
+			<section>
+				<SectionLabel>Pull-request authorship</SectionLabel>
+				<Card>
+					<p className="text-xs text-muted-foreground">
+						Harbor opens each pull request with <strong>your</strong> GitHub token, not a bot&rsquo;s.
+						GitHub does not let an author approve their own pull request, so agent code cannot be
+						merged without a second pair of eyes — a structural guarantee rather than a policy.
+						That needs the <code>repo</code> scope, which is why it is a separate consent from
+						signing in.
+					</p>
+
+					{!oauthConfigured() ? (
+						<p className="mt-3 text-xs text-destructive">
+							This deployment has no GitHub OAuth app configured, so nobody can connect an
+							identity. Harbor will push branches and hand back compare URLs instead of opening
+							pull requests. Set <code>GITHUB_CLIENT_ID</code> and{" "}
+							<code>GITHUB_CLIENT_SECRET</code>.
+						</p>
+					) : !session.userId ? (
+						<p className="mt-3 text-xs text-destructive">
+							You are on the development sign-in bypass, which has no user row to store an
+							identity against. Configure GitHub OAuth and sign in to connect one.
+						</p>
+					) : scm.connected ? (
+						<p className="mt-3 text-xs text-muted-foreground">
+							Pull requests from your prompts are authored by you.
+							{scm.expires_at ? ` This grant expires ${new Date(scm.expires_at).toDateString()}; Harbor refreshes it automatically.` : null}
+						</p>
+					) : (
+						<p className="mt-3 text-xs text-destructive">
+							No identity connected. Your prompts still run and still push branches, but Harbor
+							will not open the pull request — it refuses to open one as the bot, because then
+							you could approve your own agent&rsquo;s changes and nothing would record that the
+							guarantee had lapsed. You will get a compare URL instead.
+						</p>
+					)}
+
+					<div className="mt-4">
+						<ScmIdentityPanel connected={scm.connected} login={scm.login} />
+					</div>
+
+					{signInGrantsAuthorship() ? (
+						<p className="mt-3 text-xs text-muted-foreground">
+							This deployment sets <code>HARBOR_GITHUB_OAUTH_SCOPES</code> to include{" "}
+							<code>repo</code>, so signing in already collects this grant.
+						</p>
+					) : null}
+				</Card>
+			</section>
+
 			<section>
 				<SectionLabel>API keys</SectionLabel>
 				<CreateKeyPanel />
@@ -60,7 +117,7 @@ export default async function SettingsPage() {
   "mcpServers": {
     "harbor": {
       "type": "http",
-      "url": "${mcpUrl}",
+      "url": "${mcpEndpoint}",
       "headers": { "Authorization": "Bearer \${HARBOR_API_KEY}" }
     }
   }
@@ -84,7 +141,7 @@ export default async function SettingsPage() {
 				<Card>
 					<pre className="overflow-x-auto text-xs leading-relaxed text-muted-foreground">
 {`[mcp_servers.harbor]
-url = "${mcpUrl}"
+url = "${mcpEndpoint}"
 bearer_token_env_var = "HARBOR_API_KEY"`}
 					</pre>
 				</Card>
@@ -139,6 +196,15 @@ Authorization: Bearer \${HARBOR_API_KEY}
 					<strong>Conductor:</strong> it has no hook format of its own — it runs Claude Code or
 					Codex under the hood. Commit that tool&rsquo;s config above and every Conductor workspace
 					inherits it; the <code>conductor</code> runtime endpoint parses either dialect.
+				</p>
+				<p className="mt-2 text-xs text-muted-foreground">
+					<strong>Devin:</strong> a cloud agent with no hooks to fire, so it is <em>pulled</em>, not
+					pushed. Drop a token — a <code>devin</code> connector with <code>config.apiToken</code>, or{" "}
+					<code>DEVIN_API_TOKEN</code> — then register a session with{" "}
+					<code>POST {appUrl}/api/devin/sessions</code> (same <code>Bearer</code> key), passing{" "}
+					<code>{`{ devinSessionId }`}</code> to observe an existing session or{" "}
+					<code>{`{ prompt }`}</code> to start and track a new one. A background loop then polls it
+					and its activity — and any pull request it opens — shows up like every other runtime.
 				</p>
 			</section>
 

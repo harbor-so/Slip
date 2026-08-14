@@ -34,10 +34,16 @@ Two environment variables drive every installer:
 | **Codex CLI** | Command hook → `curl` forwarder | [`codex/`](./codex) + [`harbor-forward.sh`](./harbor-forward.sh) |
 | **Cursor** (≥1.7) | Command hook → `curl` forwarder | [`cursor/`](./cursor) + [`harbor-forward.sh`](./harbor-forward.sh) |
 | **opencode** | JS plugin — `fetch()`s directly | [`opencode/`](./opencode) |
+| **Devin** | No hooks — Harbor **polls** Devin's API | [`devin/`](./devin) |
 
 Only Claude Code and opencode can reach HTTP on their own. Codex and Cursor run
 local commands only, so they share one tiny forwarder script,
 [`harbor-forward.sh`](./harbor-forward.sh).
+
+Devin is the exception to the whole table: it is a cloud agent with no hook
+system, so there is nothing to install into it. Instead you give Harbor a token
+and a session id, and a background loop pulls the activity. See
+[`devin/`](./devin).
 
 ### Conductor
 
