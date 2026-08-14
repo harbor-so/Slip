@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "start": "next start -p 3000",
+    "start": "next start",
     "mcp": "tsx --env-file-if-exists=.env src/mcp/server.ts",
     "mcp:stdio": "tsx --env-file-if-exists=.env src/mcp/stdio.ts",
     "db:generate": "drizzle-kit generate",
@@ -23,6 +23,8 @@
     "demo:chat": "tsx --env-file-if-exists=.env scripts/chat-demo.ts",
     "lint:config": "node scripts/lint-config.mjs",
     "sandbox:build": "docker build -f sandbox/Dockerfile -t ${HARBOR_SANDBOX_IMAGE:-harbor-sandbox:latest} .",
+    "sandbox:push": "node scripts/sandbox-push.mjs",
+    "docker:build": "docker build -t ${HARBOR_IMAGE:-harbor:latest} .",
     "check": "npm run lint:config && npm run typecheck && npm run test",
     "docs:connectors": "tsx --env-file-if-exists=.env scripts/gen-connectors-doc.ts"
   },
@@ -40,6 +42,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.6.0",
+    "tsx": "^4.23.12",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -50,7 +53,6 @@
     "@types/react-dom": "^19.0.0",
     "drizzle-kit": "^0.31.10",
     "tailwindcss": "^4.1.0",
-    "tsx": "^4.23.12",
     "typescript": "^5.7.2",
     "vitest": "^3.2.4"
   }

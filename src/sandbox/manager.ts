@@ -86,6 +86,7 @@ import { db } from "../db/index.js";
 import { claims, events, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
 import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
+import { PUBLIC_URL_MISSING_MESSAGE, agentMcpUrl, publicUrl } from "../lib/urls.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
 import { buildSandboxEnv } from "./env.js";
@@ -137,36 +138,15 @@ function sha256Hex(value: string): string {
  * emits is dropped, its heartbeat never arrives, and the connecting watchdog reaps
  * it. The symptom is "sandboxes always time out", which is a very long way from
  * "an environment variable is unset".
+ *
+ * Resolution and the wording both live in `src/lib/urls.ts`, which is the single
+ * place that decides what any Harbor address is; only the error *type* is local,
+ * because callers here catch `HarborError` specifically.
  */
 function controlPlaneUrl(): string {
-	const url = process.env.HARBOR_PUBLIC_URL?.trim();
-	if (!url) {
-		throw new HarborError(
-			"HARBOR_PUBLIC_URL is not set, so a sandbox would have no address to call back "
-				+ "on. It must be a URL reachable FROM INSIDE a sandbox — on Docker that is "
-				+ "usually http://host.docker.internal:3000, not http://localhost:3000, which "
-				+ "from inside a container resolves to the container itself.",
-		);
-	}
-	return url.replace(/\/+$/, "");
-}
-
-/**
- * Where the `harbor-agent` MCP surface is reachable from inside a sandbox.
- *
- * Separate from `controlPlaneUrl()` because they are genuinely different
- * processes on different ports — the dashboard is Next.js, `harbor-agent` is the
- * Express MCP server — and a deployment may run one without the other.
- *
- * Unset returns null rather than throwing, unlike `controlPlaneUrl`. A sandbox
- * with no control-plane address cannot report anything and is a deployment fault;
- * a sandbox with no MCP address simply has no Harbor tools, which is a smaller
- * product with no broken part in it. Read at call time, not at import, for the
- * reason given in src/config.ts.
- */
-function agentMcpUrl(): string | null {
-	const url = process.env.HARBOR_AGENT_MCP_URL?.trim();
-	return url ? url.replace(/\/+$/, "") : null;
+	const url = publicUrl();
+	if (!url) throw new HarborError(PUBLIC_URL_MISSING_MESSAGE);
+	return url;
 }
 
 type SandboxRow = typeof sandboxes.$inferSelect;

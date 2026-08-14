@@ -1,0 +1,26 @@
+# Non-secret configuration. Anything that decrypts data or authenticates a caller
+# belongs in the Secret, not here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-config
+data:
+  # Must be reachable FROM INSIDE a sandbox, not just from a browser. On any
+  # remote provider that means a public HTTPS origin — a cluster-internal Service
+  # name means nothing to E2B or Modal, and the sandbox hangs until the boot
+  # timeout rather than failing fast.
+  HARBOR_PUBLIC_URL: "https://harbor.example.com"
+
+  # Which backend runs the agents. `docker` is NOT a sensible default in a
+  # cluster: it needs the node's docker socket, which makes the pod node-root.
+  # See docs/SECURITY.md and the note in deployment-web.yaml.
+  HARBOR_SANDBOX_PROVIDER: "fly"
+  HARBOR_SANDBOX_IMAGE: "ghcr.io/harbor-so/harbor-sandbox:latest"
+
+  # Where the coordination MCP surface is, for agents inside the cluster.
+  HARBOR_MCP_URL: "http://harbor-mcp:8788/mcp"
+
+  # Leave unset to give background agents no Harbor tools (a smaller product with
+  # no broken part in it). To enable it, this must be resolvable BY THE SANDBOX —
+  # so a public URL unless your sandboxes run in this cluster.
+  # HARBOR_AGENT_MCP_URL: "https://harbor-mcp.example.com/mcp"

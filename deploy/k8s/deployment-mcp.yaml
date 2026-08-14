@@ -1,0 +1,87 @@
+# The worker: both MCP surfaces, and every background loop.
+#
+# A Deployment, not a StatefulSet, and that is a decision rather than an
+# oversight. `src/mcp/server.ts` is explicitly stateless — MCP sessions are not
+# persisted (`sessionIdGenerator: undefined`), so any process can serve any
+# request — and every loop takes an advisory lock or is a compare-and-set. A
+# StatefulSet buys stable network identity and ordered rollout, neither of which
+# anything here uses, and charges for it with slower, serialised updates.
+#
+# `replicas: 1` is the default because one is enough: the loops are advisory-
+# locked, so a second replica adds timeliness, not throughput. Raising it is safe.
+#
+# WITHOUT this Deployment nothing ever sweeps — expired leases are never
+# reclaimed, sandboxes outlive their deadlines, events never compact. If you
+# deliberately run web-only, enable cronjob-tick.yaml instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harbor-mcp
+  labels:
+    app.kubernetes.io/name: harbor
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harbor
+        app.kubernetes.io/component: mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: mcp
+          image: ghcr.io/harbor-so/harbor:latest
+          args: ["mcp"]
+          ports:
+            - name: http
+              containerPort: 8788
+          envFrom:
+            - configMapRef:
+                name: harbor-config
+            - secretRef:
+                name: harbor-secrets
+          env:
+            # The image already sets HOST=0.0.0.0; restated here because a pod
+            # whose MCP server binds loopback is unreachable and the symptom —
+            # connection refused from a Service that looks correctly wired — is
+            # one of the harder ones to place.
+            - name: HOST
+              value: "0.0.0.0"
+            - name: HARBOR_MCP_PORT
+              value: "8788"
+
+          # /health does not touch Postgres, so it is honest as both probes here.
+          # Unlike the web tier, this process has no traffic to withhold — it is a
+          # worker, and it exits on invalid configuration rather than serving
+          # degraded — so there is no readiness/liveness split to make.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { memory: "1Gi" }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: false

@@ -1,0 +1,114 @@
+# Harbor on Fly.io.
+#
+#   fly launch --no-deploy --copy-config --config deploy/fly/fly.toml
+#   fly secrets set HARBOR_ENCRYPTION_KEY=... AUTH_SECRET=... DATABASE_URL=...
+#   fly deploy --config deploy/fly/fly.toml
+#
+# Two processes from one image, which is what `[processes]` below expresses.
+# `release_command` runs the migration once, on a temporary machine, before the
+# new release takes traffic — the cleanest migration story of any target here.
+#
+# ---------------------------------------------------------------------------
+# auto_stop_machines = false is a CORRECTNESS setting, not a cost preference
+# ---------------------------------------------------------------------------
+#
+# Scaling to zero is the first thing anyone turns on to save money, and it breaks
+# Harbor in a way that looks like a bug rather than a setting:
+#
+#   - Live updates are Postgres LISTEN/NOTIFY. Each open dashboard holds a
+#     dedicated connection in the web process. Stop the machine and every
+#     listener dies; the dashboard goes quiet with no error.
+#   - Open SSE responses are severed mid-frame. Clients reconnect and resnapshot,
+#     so nothing is lost — but a sandbox streaming a long turn produces exactly
+#     the "idle" traffic pattern that triggers a stop.
+#   - The `mcp` process owns every background sweep. Stopped, nothing reclaims an
+#     expired lease or reaps a sandbox past its deadline, and Fly has no request
+#     to wake it with.
+#
+# If cost is the constraint, use a smaller `[[vm]]`, not auto-stop.
+
+app = "harbor"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[deploy]
+  # One-shot, before the new version serves. Migrations are deliberately not run
+  # on app boot: drizzle's postgres-js migrator takes no advisory lock, so two
+  # machines starting together race on `__drizzle_migrations`.
+  release_command = "/usr/local/bin/harbor-entrypoint migrate"
+
+[processes]
+  app = "web"
+  mcp = "mcp"
+
+[env]
+  # `[env]` is shared across every process, which is exactly why the MCP server
+  # reads HARBOR_MCP_PORT before PORT. Without that precedence the worker would
+  # bind 3000 here, collide with the dashboard's health check, and fail in a way
+  # that says nothing about the cause.
+  PORT = "3000"
+  HARBOR_MCP_PORT = "8788"
+  HARBOR_SANDBOX_PROVIDER = "fly"
+
+  # Must be reachable FROM INSIDE a sandbox. On a remote provider that means a
+  # public HTTPS origin — `host.docker.internal` and private addresses simply
+  # hang until the boot timeout. Set this to your real hostname.
+  HARBOR_PUBLIC_URL = "https://harbor.fly.dev"
+
+  # Over 6PN, the worker is reachable at <app>.internal from the web process.
+  # HARBOR_AGENT_MCP_URL is different: it is resolved by the SANDBOX, so it may
+  # only be an `.internal` name if your sandboxes are Fly Machines in this same
+  # org. On any other provider it must be public.
+  HARBOR_MCP_URL = "http://harbor.internal:8788/mcp"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  processes = ["app"]
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.http_options.response]
+    # SSE must not be buffered, and long-lived connections must not be cut. Harbor
+    # sends `x-accel-buffering: no` for proxies that honour it; Fly's proxy streams
+    # by default, so there is nothing to disable — this block is here as the place
+    # to look when a future option changes that.
+    pristine = true
+
+  [[http_service.checks]]
+    # Readiness: depends on Postgres, so a database blip correctly drains this
+    # machine out of rotation.
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/api/health"
+
+# The worker has no public service — it is reached over 6PN by the web tier and,
+# if HARBOR_AGENT_MCP_URL is set, by sandboxes. Expose it publicly only if your
+# sandboxes are off-platform, and then put it behind its own hostname.
+[[services]]
+  processes = ["mcp"]
+  internal_port = 8788
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  processes = ["mcp"]

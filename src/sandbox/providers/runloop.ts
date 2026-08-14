@@ -407,7 +407,40 @@ export class RunloopSandboxProvider implements EphemeralProvider {
 			operation,
 		);
 		if (status !== 200) throw this.fail(status, operation, json);
+
+		// A truncated page is not an answer.
+		//
+		// `has_more` was declared on the response type and read nowhere, so one page
+		// was returned as though it were the whole fleet. Both callers are authority
+		// operations: `findByAttemptId` concluding "absent" from page one starts a
+		// duplicate box on the same branch, and `listManaged` concluding "no orphans"
+		// leaves a stranded Devbox billing forever. ADR 0003 says an answer we cannot
+		// prove complete is not an answer, so this throws `transient` — the caller
+		// retries, and the operator gets a message naming the fix.
+		//
+		// Throwing rather than following a cursor is deliberate: Runloop's pagination
+		// parameter is not something this repository can test against, and a guessed
+		// cursor that silently pages wrong is worse than a loud refusal.
+		if (this.isTruncated(json)) {
+			throw new SandboxProviderError({
+				message:
+					`Runloop reported more Devboxes than the ${limit}-item page returned, so this `
+					+ "result cannot be treated as complete — concluding 'absent' from a partial "
+					+ "list would spawn a duplicate box, and concluding 'no orphans' would strand "
+					+ "one. Raise RUNLOOP_LIST_LIMIT above your concurrent sandbox count.",
+				errorType: "transient",
+				provider: PROVIDER_NAME,
+				operation,
+			});
+		}
+
 		return this.asDevboxList(json);
+	}
+
+	/** `has_more` on the envelope; a bare array carries no pagination and is complete. */
+	private isTruncated(json: unknown): boolean {
+		if (!json || typeof json !== "object" || Array.isArray(json)) return false;
+		return (json as RunloopDevboxList).has_more === true;
 	}
 
 	/** Runloop returns a `{ devboxes: [...] }` envelope; tolerate a bare array too. */

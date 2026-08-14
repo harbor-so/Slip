@@ -1,0 +1,40 @@
+# Migrations, once per release, before the Deployments roll.
+#
+# Not an initContainer and not on app boot: drizzle's postgres-js migrator takes
+# no advisory lock, so N replicas starting together race each other on
+# `__drizzle_migrations`. A Job is the one shape that guarantees a single runner.
+#
+# Helm users: add the hook annotations below so this runs on every upgrade rather
+# than only on first install.
+#   "helm.sh/hook": pre-install,pre-upgrade
+#   "helm.sh/hook-weight": "-5"
+#   "helm.sh/hook-delete-policy": before-hook-creation
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbor-migrate
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      name: harbor-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: migrate
+          image: ghcr.io/harbor-so/harbor:latest
+          args: ["migrate"]
+          envFrom:
+            - secretRef:
+                name: harbor-secrets
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { memory: "512Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
