@@ -1,0 +1,47 @@
+{
+	// Harbor's Cloudflare Sandbox control shim. See README.md for deploy steps.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "harbor-cloudflare-sandbox",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-08-01",
+	"compatibility_flags": ["nodejs_compat"],
+
+	// The Sandbox Durable Object + its Container image. The image built here is the
+	// box every Harbor session boots into, so build the Harbor sandbox image
+	// (repo root `sandbox/Dockerfile`) into it — Cloudflare fixes the image at
+	// deploy time, it is not chosen per create call.
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile",
+			"max_instances": 100
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Sandbox",
+				"name": "Sandbox"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Sandbox"]
+		}
+	],
+
+	// The enumerable registry of managed sandboxes. Create `wrangler kv namespace
+	// create HARBOR_SANDBOX_INDEX` and paste the id below.
+	"kv_namespaces": [
+		{
+			"binding": "HARBOR_SANDBOX_INDEX",
+			"id": "REPLACE_WITH_KV_NAMESPACE_ID"
+		}
+	]
+
+	// AUTH_TOKEN is a secret, not a var. Set it with:
+	//   wrangler secret put AUTH_TOKEN
+	// and give the same value to Harbor as CLOUDFLARE_SANDBOX_WORKER_TOKEN.
+}
