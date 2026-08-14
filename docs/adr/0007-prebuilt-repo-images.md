@@ -102,11 +102,23 @@ cutoff past which a spawn will not boot from the pointer and falls through to `f
 every image stale on arrival and silently disables the feature while still paying the
 build bill.
 
-**Boot semantics: bake the checkout and dependencies, boot as-is.** The `build` mode
-clones the pinned SHA and runs `setup.sh` fatally; `repo_image` boots that image, skips
-`setup.sh` (baked) and runs `start.sh`, and does not re-clone. Repo state is therefore
-at most `imageBuildIntervalMs` stale, which is the reference's accepted trade and keeps
-`read-before-sync` out.
+**Boot semantics: bake the checkout and dependencies, copy them in on boot.** The
+`build` mode clones the pinned SHA and runs `setup.sh` (or, when a repo has no hook,
+auto-setup) fatally; `repo_image` boots that image, skips `setup.sh` (baked) and runs
+`start.sh`, and does not re-clone. Repo state is therefore at most `imageBuildIntervalMs`
+stale, which is the reference's accepted trade and keeps `read-before-sync` out.
+
+There is one implementation subtlety the end-to-end build forced, worth recording
+because the obvious version silently produces an empty image. `/workspace` is declared a
+`VOLUME` in the sandbox image, and a volume is invisible to `docker commit` — a build
+that provisioned into `/workspace` would bake an empty tree, and a later `docker run`
+would mask it with a fresh anonymous volume anyway. So a build provisions into a
+non-volume staging path (`BAKED_WORKSPACE_ROOT`), which the commit captures, and a
+`repo_image` boot copies it into the real workspace volume once with `cp -a` — a local
+copy of an already-installed tree, still an order of magnitude cheaper than the network
+clone plus dependency install a fresh boot pays. Relatedly, `git clone --branch` rejects
+a commit SHA, so a SHA-pinned clone checks the commit out after a `--filter=blob:none`
+clone rather than passing it to `--branch`.
 
 **Spend is attributed.** Builds reserve budget under a new `image_build` cost kind with
 `actor: "harbor"` and `repo_id` set, so the fourth amplification path — a build loop
@@ -130,8 +142,19 @@ still backing a running container refuses removal, which is the safe direction.
   interface or the guard returns false.
 - Off by default, per-repo opt-in via `repos.config`, so an upgrade adds no standing
   compute bill until an operator turns it on for a repo whose cold start hurts.
+- Measured end to end against `tj/commander.js` with the real sandbox image: a fresh
+  boot (clone + `npm ci`) took 9.8s median, a `repo_image` boot (the `cp -a` of the
+  baked tree) 2.1s — 7.7s saved, 4.7× faster, on a *tiny* repo. The saving is the
+  dependency-install time, so it grows with the dependency tree; a repo whose install
+  takes two minutes saves close to two minutes per cold start.
 
 ### Negative — the accepted costs
+
+- **A `repo_image` boot still copies.** It is not zero-cost: `cp -a` of the baked tree
+  into the workspace volume is the price of `/workspace` being a volume the image cannot
+  bake into directly. It is local disk, no network, an order of magnitude below the
+  install it replaces — but a very large `node_modules` makes the copy itself
+  non-trivial, and a future optimisation could bind the baked layer in read-only instead.
 
 - **Repo state is up to one interval stale.** An agent may branch from a default-branch
   HEAD that moved in the last `imageBuildIntervalMs`. This is deliberate; freshening at
