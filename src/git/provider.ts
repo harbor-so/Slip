@@ -384,11 +384,12 @@ export type RepoAuthorisation =
 /**
  * Turn an access answer into an authority decision. **Fails CLOSED.**
  *
- * This is the fix for the multi-tenancy hole in the competing implementation:
- * there, one shared App installation reaches every repository it is installed on
- * and no per-user check is made, so any user of the deployment can start a
- * session against any repository in the org — including one they have never been
- * granted access to. The check has to be made against *the user's own token*,
+ * This closes the multi-tenancy hole that a shared App installation creates. The
+ * installation reaches every repository it is installed on, so authorising
+ * against *it* means any user of the deployment can start a session on any
+ * repository in the org — including ones they have never been granted access to,
+ * and the deployment looks correct right up until someone notices. The check has
+ * to be made against *the user's own token*,
  * because that is the only credential that encodes what that particular human is
  * allowed to see.
  *

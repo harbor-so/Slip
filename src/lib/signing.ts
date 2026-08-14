@@ -1,29 +1,31 @@
 /**
  * Signed events: the one primitive the whole chat model is built on.
  *
- * The bet here is `block/buzz`'s (a Nostr relay for humans + agents): every
- * message is a cryptographically signed event, and identity IS a public key. One
- * primitive then gives attribution, integrity, an audit trail, and a single
- * identity model for humans and agents — because a human and an agent are both
- * just a keypair, and the room never has to tell them apart.
+ * The bet: every message is a cryptographically signed event, and identity IS a
+ * public key. One primitive then gives attribution, integrity, an audit trail,
+ * and a single identity model for humans and agents — because a human and an
+ * agent are both just a keypair, and the room never has to tell them apart.
  *
- * Two decisions differ from buzz on purpose:
+ * Two choices inside that bet are worth stating, because the conventional
+ * alternatives are both defensible:
  *
  *   1. Ed25519, not secp256k1 Schnorr. Ed25519 is in WebCrypto natively, so the
  *      exact same module signs in a browser tab and verifies on the server with
- *      no dependency and no second implementation to drift. Nostr's curve would
- *      have forced a library into both.
+ *      no dependency and no second implementation to drift. A curve that is not
+ *      in WebCrypto forces a library into both halves.
  *
- *   2. The `kind` is a closed TypeScript union, not a magic integer. buzz's own
- *      assessment names kind-integers as its weak point: a global namespace with
- *      no compile-time coupling to behaviour. A string union an exhaustive switch
- *      can check is strictly better at Harbor's scale.
+ *   2. The `kind` is a closed TypeScript union, not a magic integer. Kind
+ *      integers are a global namespace with no compile-time coupling to
+ *      behaviour: nothing catches two features claiming the same number, and
+ *      nothing tells you which handler runs. A string union an exhaustive switch
+ *      can check gives up federation Harbor does not want, and buys back a
+ *      compiler error.
  *
  * The event id is a hash of the canonical serialization and is verified
  * INDEPENDENTLY of the signature (see `verifyEvent`). The signature proves the
  * author signed *some* payload; the id check proves it is *this* payload. Skipping
  * the second step is the subtle bug that lets a signed event be replayed with its
- * body swapped, and buzz calls it out specifically.
+ * body swapped — and it is subtle because every signature check still passes.
  *
  * This module has no Node imports and touches only `globalThis.crypto.subtle`, so
  * it is safe to import from a React client component and from server code alike.
@@ -83,10 +85,11 @@ export interface SignedEvent extends UnsignedEvent {
 /**
  * Canonical serialization as a positional array, never an object.
  *
- * An array sidesteps the entire problem buzz solves with a `BTreeMap`: object key
- * ordering is not guaranteed by JSON and two encoders can disagree, which would
- * make the same event hash differently on two clients. A fixed-order array has one
- * encoding by construction, so the id is reproducible anywhere.
+ * An array sidesteps the problem that otherwise needs an ordered-map type to
+ * solve: object key ordering is not guaranteed by JSON and two encoders can
+ * disagree, which would make the same event hash differently on two clients. A
+ * fixed-order array has one encoding by construction, so the id is reproducible
+ * anywhere, including in a browser tab that never saw the server's code.
  */
 export function canonicalize(event: UnsignedEvent): string {
 	return JSON.stringify([

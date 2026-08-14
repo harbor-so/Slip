@@ -1,21 +1,21 @@
 # Chat: a signed-event connection primitive
 
 Harbor's chat lets a human, an agent, or two agents talk in the same room on the
-same terms. It is built on one idea borrowed from [`block/buzz`][buzz]: **every
-message is a cryptographically signed event, and an identity is a public key.** A
-human and an agent are both just a keypair, so the room never has to tell them
-apart, and human↔human, human↔agent and agent↔agent are one primitive rather than
-three.
+same terms. It rests on one idea: **every message is a cryptographically signed
+event, and an identity is a public key.** A human and an agent are both just a
+keypair, so the room never has to tell them apart, and human↔human, human↔agent
+and agent↔agent are one primitive rather than three.
 
-This document is also the study that produced it — what we took from buzz, what we
-deliberately left, and the gaps we know about.
+That matters more here than it would in a chat product. The two connection types
+Harbor most needs are human↔agent and agent↔agent, and every design that models
+agents as *bots* ends up with two permission systems, two identity tables and two
+audit trails that drift. Modelling both as principals means there is one of each.
 
-[buzz]: https://github.com/block/buzz
-
-## What we took from buzz
+## The six decisions
 
 - **Everything is a signed event.** One primitive gives attribution, integrity, an
-  audit trail, live fan-out and a single identity model — for free and at once.
+  audit trail, live fan-out and a single identity model — at once, rather than as
+  five features that have to agree with each other.
 - **Agents are members, not bots.** An agent has its own keypair, its own channel
   memberships, its own signed history. There is no separate bot-permission model to
   keep in sync with the human one.
@@ -26,31 +26,27 @@ deliberately left, and the gaps we know about.
 - **Check access before subscription.** A stream refuses a non-member of a private
   channel *before* it registers a listener, closing the race that leaks private
   rooms. See `src/app/api/channels/[key]/stream/route.ts`.
-- **Ephemeral vs durable events.** Typing and presence fan out but are never
-  stored; messages and membership are durable. Keeps the log clean.
+- **Ephemeral events are never stored.** Typing and presence fan out and are then
+  gone; messages and membership are durable. An audit log nobody trusts because it
+  is 95% keystroke noise is not an audit log.
 - **Batch the backlog into one read.** A member's read cursor lets an agent pull
   everything said since it last looked in a single call, instead of one message per
   turn. See `readChannel` in `src/lib/chat.ts`.
 
-## What we deliberately left
+## Three things this deliberately is not
 
-- **The Nostr wire protocol and its 18 custom NIPs.** buzz's own assessment admits
-  "it's just Nostr" oversells portability. We keep the signed-event *shape* and drop
-  the protocol lock-in; interop with the Nostr ecosystem is a non-goal.
-- **Kind _integers_.** buzz names these its weak point — a global namespace with no
-  compile-time coupling. Our `kind` is a closed TypeScript union an exhaustive
-  switch can check (`EVENT_KINDS` in `src/lib/signing.ts`).
-- **Redis** for pub/sub, presence and typing. We reuse Postgres `LISTEN/NOTIFY`,
-  the one piece of infrastructure Harbor already requires — the same choice the
-  coordination dashboard already made. buzz's own Redis tenant-scoping is a
-  documented gap, not an invariant.
-- **secp256k1 Schnorr.** Ed25519 is native to WebCrypto, so the same module signs
-  in a browser tab and verifies on the server with no dependency and no second
-  implementation.
-- **The formal-methods stack (TLA+/Tamarin/model checkers).** Right for buzz's
-  scale, overkill here. We keep Harbor's lighter discipline: `*.test.ts` beside the
-  source proving the concurrency and trust properties (`src/lib/chat.test.ts`,
-  `src/lib/signing.test.ts`).
+- **Not a federated protocol.** Signed events are a shape Harbor uses internally,
+  not a wire standard it interoperates over. Adopting an external event protocol
+  would buy interop Harbor has no use for and cost a spec's worth of compatibility
+  surface — so `kind` is a closed TypeScript union an exhaustive switch can check
+  (`EVENT_KINDS` in `src/lib/signing.ts`) rather than a global integer namespace.
+- **Not a second piece of infrastructure.** Pub/sub, presence and typing reuse
+  Postgres `LISTEN/NOTIFY`, which Harbor already requires. Adding Redis to carry
+  typing indicators would double the operational surface of a self-hosted install
+  for the least durable data in the system.
+- **Not on its own curve.** Ed25519 is native to WebCrypto, so the same module
+  signs in a browser tab and verifies on the server, with no dependency and no
+  second implementation to drift.
 
 ## The primitives
 
@@ -104,7 +100,7 @@ These are verified gaps in the current implementation, not aspirations.
    Writes are unaffected — those always require a signature (`mayRead` in
    `src/lib/chat.ts`).
 3. **No rate limiting.** An agent can post as fast as it can sign. The org API key
-   bounds *who*, not *how fast*. Same gap buzz ships with.
+   bounds *who*, not *how fast*.
 4. **No key rotation or revocation.** A principal's pubkey is forever; a compromised
    key cannot yet be retired.
 5. **Server-authored membership/system events are unsigned.** `join`, `leave`,

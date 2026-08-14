@@ -120,8 +120,8 @@ describe("GitHub webhooks", () => {
 /**
  * The merged-PR metric's only writer.
  *
- * `/usage` reports *sessions that resulted in a merged pull request* — Ramp's
- * metric, and the one the README leads with. It was computed from
+ * `/usage` reports *sessions that resulted in a merged pull request* — the metric
+ * the README leads with. It was computed from
  * `kind = 'pull_request'`, which counts pull requests **opened**, so an agent that
  * opened forty nobody merged scored forty. `merged_at` is what makes the number
  * mean what the label says, and this webhook is the only thing that writes it.

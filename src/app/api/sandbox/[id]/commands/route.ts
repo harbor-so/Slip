@@ -1,9 +1,9 @@
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import postgres from "postgres";
 import { setting } from "../../../../../config.js";
 import type { BridgeCommand } from "../../../../../contracts/index.js";
-import { databaseUrl, db } from "../../../../../db/index.js";
+import { db } from "../../../../../db/index.js";
+import { subscribe } from "../../../../../lib/bus.js";
 import { sandboxes, sessionPrompts, sessions } from "../../../../../db/schema.js";
 import { isReconnectBlockedStatus } from "../../../../../sandbox/decisions.js";
 import { validateFence } from "../../../../../sandbox/manager.js";
@@ -62,11 +62,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 	const { orgId, sessionId } = auth.sandbox;
 	const sandboxId = auth.sandbox.id;
 
-	const url = databaseUrl();
-	// A dedicated connection, because LISTEN occupies one for as long as it is
-	// listening; taking one from the request pool would starve it one sandbox at a
-	// time until the whole control plane stopped answering.
-	const listener = postgres(url, { max: 1 });
 	const encoder = new TextEncoder();
 
 	const stream = new ReadableStream({
@@ -272,7 +267,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 			// argues for at length: a command that becomes true between the read and
 			// the subscription would otherwise wait for the next unrelated NOTIFY,
 			// which on a quiet session is indefinitely.
-			const subscription = await listener.listen("harbor_changes", (payload) => {
+			const unsubscribe = await subscribe("harbor_changes", (payload) => {
 				try {
 					const change = JSON.parse(payload) as { orgId?: string };
 					if (change.orgId === orgId) void drain();
@@ -281,8 +276,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 				}
 			});
 			releaseListener = () => {
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
+				void unsubscribe().catch(() => {});
 			};
 
 			send("ready", { sandbox_id: sandboxId, session_id: sessionId, fencing_token: fence.token });

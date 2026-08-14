@@ -22,6 +22,7 @@ import { db } from "../db/index.js";
 import { agentPresence, claims, events, projects, sessions, tasks } from "../db/schema.js";
 import type { Task } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
+import { publish } from "./bus.js";
 import { DEFAULT_RIGHTS } from "./rights.js";
 
 export class HarborError extends Error {}
@@ -109,7 +110,7 @@ export async function touchPresence(
  */
 export async function notifyChange(orgId: string, verb: string): Promise<void> {
 	try {
-		await db.execute(raw`select pg_notify('harbor_changes', ${JSON.stringify({ orgId, verb })})`);
+		await publish("harbor_changes", JSON.stringify({ orgId, verb }));
 	} catch (error) {
 		console.error("[notify] ignored:", error);
 	}

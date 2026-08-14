@@ -117,12 +117,15 @@ lock rather than being a designated singleton, and the session runner takes one
 per session, so replicas cooperate without electing a leader.
 
 **Sandboxes on Kubernetes.** Do not mount the node's Docker socket into the Harbor
-pod. Run the Harbor deployment on a dedicated node pool with the `docker` provider
-and accept that the pod is effectively node-root there. A first-class Kubernetes
-Job provider — or any VM-isolated remote provider — is the obvious contribution,
-and the provider contract test suite is what proves one correct. (The shipped
-providers are `docker` and `local`; nothing else exists yet, whatever older docs
-implied.)
+pod. Either run the Harbor deployment on a dedicated node pool with the `docker`
+provider and accept that the pod is effectively node-root there, or use `fly`,
+which needs no local container runtime at all and gives a hardware VM boundary
+instead of a shared kernel. A first-class Kubernetes Job provider is the obvious
+contribution, and the provider contract test suite is what proves one correct.
+
+The shipped providers are `docker`, `fly` and `local` — the full list is
+`SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`, and there are no stubs in
+it: a provider that is not listed does not partially exist.
 
 ---
 
@@ -163,8 +166,8 @@ The three to look at first:
 
 | Variable | Default | Change it when |
 |---|---|---|
-| `HARBOR_SANDBOX_BOOT_TIMEOUT_MS` | 180000 | your repository takes longer than three minutes to clone and install |
-| `HARBOR_SANDBOX_INACTIVITY_TIMEOUT_MS` | 900000 | the single largest lever on cost |
+| `HARBOR_SANDBOX_BOOT_TIMEOUT_MS` | 480000 | your repository takes longer than eight minutes to clone and install |
+| `HARBOR_SANDBOX_INACTIVITY_TIMEOUT_MS` | 2100000 | the single largest lever on cost |
 | `HARBOR_MAX_SPEND_PER_DAY_MICRO_USD` | 50000000 | $50/day per org is not your number |
 
 Per-repository overrides live in `repos.config` and beat the environment, so one

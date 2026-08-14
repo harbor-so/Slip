@@ -1,12 +1,12 @@
 /**
  * Adding a connector is one file and one line here.
  *
- * That is the entire extensibility story, and it is deliberate. The competing
- * implementation ships Slack, GitHub and Linear as three separately deployed
- * Cloudflare Workers, so "we also use Jira" means writing a service, wiring
- * Terraform for it, and deploying it. Here it means implementing the `Connector`
- * interface and adding a line below, and the result runs inside the app the
- * operator already has running.
+ * That is the entire extensibility story, and it is deliberate. If each connector
+ * were its own deployable service, "we also use Jira" would mean writing a
+ * service, provisioning it and adding it to the on-call rotation — a cost few
+ * teams pay, which is why that shape tends to ship three connectors forever. Here
+ * it means implementing the `Connector` interface and adding a line below, and
+ * the result runs inside the app the operator already has running.
  *
  * Lookup is nullable because persisted connector rows outlive implementations: a
  * row for a connector that has been removed from a build must not turn webhook

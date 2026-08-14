@@ -195,12 +195,17 @@ wide enough that it must be stated rather than implied.
 |---|---|---|
 | `local` | **None.** The agent runs as the server user, on the server's filesystem and network. | Your own laptop, your own repo. Nothing else. |
 | `docker` | Container. Kernel shared with the host. | A single-tenant deployment on a dedicated host. |
+| `fly` | Hardware virtualisation. A Fly Machine per sandbox, in Fly's datacentre. | A deployment that needs a VM boundary, and can accept that the code leaves your infrastructure. |
 
-These two are the ONLY shipped providers. No current option gives a hardware
-virtualisation boundary; a deployment that needs one must contribute a
-VM-isolated provider (the contract test suite in
-`src/sandbox/providers/provider-contract.test.ts` is what proves one correct)
-rather than choose an option that does not exist.
+These three are the shipped providers; the authoritative list is
+`SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`, which contains no stubs.
+
+`fly` is the only one of the three with a hardware virtualisation boundary, and
+it buys that by running the sandbox on someone else's hardware — which is the
+opposite trade from the one a self-hosted deployment is usually making. Choose it
+deliberately, not by default. A provider that gives a VM boundary *inside* your
+own infrastructure does not exist yet; the contract test suite in
+`src/sandbox/providers/provider-contract.test.ts` is what would prove one correct.
 
 `local` is off unless `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are
 both set, the runtime must be one of a known set of binaries, and the prompt is

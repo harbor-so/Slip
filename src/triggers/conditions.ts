@@ -3,12 +3,12 @@
  * something a team can actually leave switched on.
  *
  * This module is shared by every trigger source, and the sharing is the point.
- * The reference implementation built a perfectly good condition system for its
- * automations and then wired auto-review on pull requests as a blunt
- * fire-on-every-PR-open with a per-repository toggle. The result is that a repo
- * either gets agent review on generated migrations, vendored dependencies and
- * one-line typo fixes, or gets none at all — and the team turns it off within a
- * week.
+ * The common failure is to build a perfectly good condition system for scheduled
+ * automations and then wire pull-request auto-review as a blunt
+ * fire-on-every-PR-open with a per-repository toggle. A repo then either gets
+ * agent review on generated migrations, vendored dependencies and one-line typo
+ * fixes, or gets none at all — and the team turns it off within a week. Every
+ * source getting the same conditions is what prevents that.
  *
  * So: one condition evaluator, used by cron targets, webhook payloads, GitHub
  * events and Slack rules alike.

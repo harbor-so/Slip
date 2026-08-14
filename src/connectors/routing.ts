@@ -1,9 +1,9 @@
 /**
  * Turning "hey @harbor, the login page is broken" into a repository.
  *
- * The competing implementation answers this by handing the message, the thread,
- * the channel name and a description of every repository to a fast model and
- * asking it to classify. That works, and we keep it — as the *last* step.
+ * The obvious answer is to hand the message, the thread, the channel name and a
+ * description of every repository to a fast model and ask it to classify. That
+ * works, and we keep it — as the *last* step.
  *
  * It is last for three reasons, and none of them is a dislike of models:
  *

@@ -1,10 +1,10 @@
 /**
  * What a sandbox backend has to implement, with capabilities expressed as TYPES.
  *
- * The obvious shape for this file — and the one the competing implementation
- * uses — is a single wide interface where every method exists, half of them are
- * optional, and a `capabilities` object of runtime booleans tells you which ones
- * are real. That shape has one specific, recurring failure: nothing ties the
+ * The obvious shape for this file is a single wide interface where every method
+ * exists, half of them are optional, and a `capabilities` object of runtime
+ * booleans tells you which ones are real. That shape has one specific,
+ * recurring failure: nothing ties the
  * boolean to the method. `provider.restoreFromSnapshot?.(ref)` on a backend that
  * cannot restore is not a crash and not an error — it is `undefined`, silently,
  * and the resume path continues as though a box came back. The session then
@@ -35,7 +35,7 @@
  * other: it either leaks the original box (treating restore as if it resumed one)
  * or it re-registers a new external id for a box whose id never changed.
  *
- * `docker` is the reference implementation and the default. See
+ * `docker` is the canonical implementation of this interface and the default. See
  * `providers/docker.ts` — running the whole product on a laptop with no vendor
  * account is the point of this project, not a fallback.
  */

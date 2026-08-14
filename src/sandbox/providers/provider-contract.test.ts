@@ -295,7 +295,7 @@ describe("provider decisions", () => {
 		expect(providerFor("docker").name).toBe("docker");
 		expect(providerFor("local").name).toBe("local");
 		try {
-			providerFor("modal");
+			providerFor("kubernetes");
 			throw new Error("expected providerFor to refuse an unimplemented provider");
 		} catch (error) {
 			expect(error).toBeInstanceOf(SandboxProviderError);
@@ -492,7 +492,7 @@ if ("reason" in dockerFixture) {
 			const error = await provider
 				.restoreFromSnapshot(
 					{
-						provider: "modal",
+						provider: "kubernetes",
 						handle: "some-remote-handle",
 						sourceExternalId: "x",
 						takenAt: new Date().toISOString(),

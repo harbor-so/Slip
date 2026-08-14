@@ -1,12 +1,13 @@
 /**
  * The connector boundary.
  *
- * A connector is one file. That is the whole design goal, and it is a direct
- * response to how the competing implementation does it: there, Slack, GitHub and
- * Linear are three separately deployed Cloudflare Workers, so "add Jira" means
- * writing and deploying a fourth service. Here it means implementing this
- * interface and adding one line to `registry.ts`, and the thing you wrote runs
- * inside the app that is already deployed.
+ * A connector is one file. That is the whole design goal. The alternative shape —
+ * one deployable service per integration — makes "we also use Jira" a decision
+ * about infrastructure: a service to write, provision, deploy and monitor. Almost
+ * nobody pays that for the fourth integration, so the connector list stops
+ * growing at whatever shipped. Here it means implementing this interface and
+ * adding one line to `registry.ts`, and the thing you wrote runs inside the app
+ * the operator is already running.
  *
  * The interface grew from four members to seven when Harbor stopped being
  * inbound-only. Each addition has a reason:

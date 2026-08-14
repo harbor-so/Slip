@@ -11,9 +11,8 @@
  *
  * This builds that environment from the session's snapshotted repositories, its
  * chosen runtime and its resolved secrets, and `ensureSandbox` injects it into
- * every provider — so docker, Fly and any future Modal or Daytona backend all
- * inherit the full clone → agent loop from one place rather than each reimplementing
- * it.
+ * every provider — so `docker`, `fly` and any future backend all inherit the full
+ * clone → agent loop from one place rather than each reimplementing it.
  *
  * Two properties are load-bearing:
  *

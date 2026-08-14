@@ -139,7 +139,7 @@ export class ChatClient {
 
 	/**
 	 * Poll a channel for new events, batching everything past the cursor into one
-	 * callback — the agent-side of buzz's "one turn, all the new context" idea.
+	 * callback — the agent-side of "one turn, all the new context".
 	 * Returns a stop function. For a browser, prefer an EventSource on the stream
 	 * endpoint; polling keeps the agent path dependency-free.
 	 */

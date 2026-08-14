@@ -10,7 +10,7 @@ your repository, and streams what it is doing to anyone who opens the link.
 the attribution machinery is written and tested, nothing calls it. See
 [Pull requests](#pull-requests-are-authored-by-the-human).)
 
-One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
+One `docker compose up`. A Node process and a Postgres database, and nothing else.
 
 [Quick start](#quick-start) · [Why this exists](#why-this-exists) ·
 [How it works](#how-it-works) · [Deploying](./DEPLOY.md) ·
@@ -20,48 +20,39 @@ One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
 
 ## Why this exists
 
-Ramp published [an account][ramp] of the background agent they built internally.
-The thesis is right and worth restating: interactive coding assistants couple the
-work to your presence — you type, it responds, you watch. A background agent
-decouples them. You send a prompt, it runs in the cloud, you check later. Within a
-couple of months roughly 30% of merged pull requests in their frontend and backend
-repos came from it, with no mandate.
+An interactive coding assistant couples the work to your presence. You type, it
+responds, you watch. Everything it does happens in a window you are sitting in
+front of, so the throughput of the tool is bounded by your attention.
 
-There is one faithful open reimplementation, [`ColeMurray/background-agents`][oi],
-and it is a good piece of work. Several of its decisions are copied here more or
-less verbatim and credited where they appear. But it is built on Cloudflare
-Workers, Durable Objects, D1, KV, R2 and Queues, provisioned by Terraform, with
-Modal for sandboxes and Vercel for the web tier. You cannot run it on a VM, in
-your VPC, on-premises, or on a laptop. Evaluating it means four vendor accounts
-before the first prompt — which, for a company whose security review is the
-reason they wanted a self-hosted option, is not a deployment story.
+A background agent decouples them. You send a prompt, it runs in a sandbox against
+a real checkout, you read the result when you get back. The unit of work stops
+being a conversation and starts being an errand — which means you can have several
+in flight, and which means the interesting problems stop being about the model and
+start being about coordination, cost and blast radius.
 
-Harbor is the version any company can adopt.
+Three of those problems shape everything below.
 
-| | Open-Inspect | Harbor |
-|---|---|---|
-| Runs on | Cloudflare + Modal + Vercel + Terraform | Node + Postgres |
-| Evaluate it | four vendor accounts | `docker compose up` |
-| Sandbox | Modal (and four other paid providers) | **Docker by default**, Fly optional |
-| Coding agent | OpenCode only | Claude Code, Codex, OpenCode, Cursor, or your own |
-| Tenancy | single-tenant, one shared App install, no per-user repo check | org-scoped schema, per-user repo access check, tenant resolved from verified webhook payload |
-| Adding a connector | write and deploy another Worker | one file, one registry line |
-| Spend control | none | server-side accounting, atomic daily cap |
-| Timeouts | module constants | every one env-configurable and per-repo overridable, enforced by lint |
-| Duplicate work | nothing | claim-before-spawn: a duplicate never costs a container |
+**It has to be deployable where the code already lives.** A background agent holds
+source-control credentials, model keys and a shell on a checkout of your
+repository. The teams who most want one are the teams for whom that sentence
+triggers a security review. Harbor is a Node process and a Postgres database. It
+runs on a VM, in your VPC, on-premises, or on a laptop, and `docker compose up` is
+the entire evaluation.
 
-That last row is the thing Harbor has that nothing else does, and it is worth a
-paragraph. Harbor started as a coordination layer for fleets of agents — a lease
-table with a partial unique index guaranteeing exactly one holder per unit of
-work. The execution plane was built on top of it, which means **the lease is
-acquired before a sandbox is booted.** Two runners that pick up the same task
-produce one container and one token bill, not two, and the loser gets told who
-holds it and why. Every branch is named `harbor/lse_<claim_id>` and every pull
-request body carries the claim's stated intent, so six months later "why was this
-written" is answerable from the PR.
+**It must not do the same work twice.** Harbor started as a coordination layer for
+fleets of agents — a lease table with a partial unique index guaranteeing exactly
+one holder per unit of work. The execution plane was built on top of it, which
+means **the lease is acquired before a sandbox is booted.** Two runners that pick
+up the same task produce one container and one token bill, not two, and the loser
+is told who holds it and why. Every branch is named `harbor/lse_<claim_id>` and
+every pull request body carries the claim's stated intent, so six months later
+"why was this written" is answerable from the PR.
 
-[ramp]: https://builders.ramp.com/post/why-we-built-our-background-agent
-[oi]: https://github.com/ColeMurray/background-agents
+**Every loop needs a ceiling.** Scheduled automations, child sessions, connectors
+turning each new issue into a session, retries — a background agent platform is a
+collection of loops with no human in them. Spend is accounted server-side and
+capped atomically with lease admission, from the first migration rather than as a
+later feature.
 
 ---
 
@@ -115,13 +106,13 @@ Web /s/<key> ─┤        policy + budget gate                └ your coding a
 cron/webhook ─┘        git credential broker
 ```
 
-Three planes, and every Cloudflare primitive the reference design needs has a
-Postgres equivalent that was already here. A Durable Object's single-writer
-property is `pg_try_advisory_lock`. Its WebSocket hub is `LISTEN/NOTIFY` over SSE.
-Its per-session SQLite is a table with an index. See
-[ADR 0001](./docs/adr/0001-postgres-not-durable-objects.md), which answers the
-three real arguments for Durable Objects on their own terms and states what we
-give up.
+Three planes, and every property the control plane needs is one Postgres already
+has. Exactly-one-writer per session is `pg_try_advisory_lock`. Live fan-out to
+every open tab is `LISTEN/NOTIFY` over SSE. Exactly-one-holder per unit of work is
+a partial unique index. Nothing here is a queue service, a coordination service or
+an actor runtime, because the database is already all three. See
+[ADR 0001](./docs/adr/0001-postgres-as-the-only-dependency.md), which argues that
+on its own terms and states what it costs.
 
 ### Sessions
 
@@ -168,10 +159,10 @@ rest.
 
 The subscriber is registered *before* the snapshot is read, so an event landing
 during the read arrives on the live channel and the sequence number says whether
-the client already had it. Loss is impossible by construction. The alternative
-design — the one the reference implementation uses — depends on there being no
-`await` between the snapshot read and the socket registration, which is a rule a
-future refactor silently breaks.
+the client already had it. Loss is impossible by construction. The obvious
+alternative — read the snapshot, then subscribe — is correct only while there is
+no `await` between the two, and that is a rule a future refactor silently breaks
+rather than a property the code enforces.
 
 ### Chat
 
@@ -180,9 +171,9 @@ Where a session is a room with *work* in it, a channel is a room with a
 and agent↔agent, are the same primitive as human↔human because every participant
 is just a keypair. Every message is an Ed25519-signed event whose id is a hash of
 its own body, verified independently of the signature, so attribution is
-cryptographic rather than a server-stamped author. The full design, the study of
-`block/buzz` it came from, and its known limitations are in [`CHAT.md`](./CHAT.md);
-`npm run demo:chat` shows two agents holding a signed conversation.
+cryptographic rather than a server-stamped author. The full design and its known
+limitations are in [`CHAT.md`](./CHAT.md); `npm run demo:chat` shows two agents
+holding a signed conversation.
 
 ### Sandboxes
 
@@ -239,7 +230,17 @@ work.
 
 `AgentAdapter` covers invocation, stream format, stop-versus-cancel, where model
 credentials come from, who is authoritative for token counts, and crash recovery.
-Claude Code, Codex, OpenCode and Cursor ship; `custom` takes an argv template.
+**Claude Code, Codex and OpenCode ship**, and `custom` takes an argv template for
+anything else that can be driven from a command line.
+
+Two runtimes are supported without being drivable. Cursor has no supported
+headless mode, so it has no adapter — `runtime/adapters/index.ts` refuses it by
+name rather than pretending. Devin runs on its own infrastructure and is tracked
+by polling its API (`src/devin/`). Both report activity into Harbor through
+`src/activity/` — you see what they are doing on the dashboard and their work
+takes leases like anything else — but Harbor does not boot the sandbox or hold
+the process. That distinction is the difference between a runtime Harbor *runs*
+and one it *watches*, and it is worth keeping straight.
 
 `stop` and `cancel` are different verbs because they are different things. `stop`
 asks the agent to wind up and keep its work — the button a human presses on
@@ -344,8 +345,9 @@ tables the background agents use.
 
 Five, not six. Every tool is re-read by the model on every turn, so the tool list
 is a cost paid forever; when something new is needed it becomes a parameter on an
-existing tool. The whole surface is ~980 tokens and a test asserts it cannot
-quietly grow. Background-agent capability lives on a **separate** session-scoped
+existing tool. The whole surface is ~1,130 tokens and a test caps it just above
+that, so a sixth tool fails the build rather than quietly costing every agent on
+every turn. Background-agent capability lives on a **separate** session-scoped
 MCP endpoint injected into sandboxes, so it cannot leak into this budget.
 
 That second surface is `harbor-agent` — `report_progress`, `record_artifact`,
@@ -367,9 +369,14 @@ get no Harbor tools.
 The guarantee is one Postgres partial unique index:
 
 ```sql
-create unique index one_active_claim_per_task
-  on claims (task_id) where released_at is null;
+create unique index one_active_lease_per_scope
+  on claims (org_id, scope) where released_at is null;
 ```
+
+The unit is the **scope** — a slash-delimited path like `repo/api/task/482` — not
+a task row, so a lease can cover a task, a directory, a whole repository or a
+subtree of one, and the same index enforces all of them. It is scoped by `org_id`
+because the trust boundary is the organisation and two orgs must never contend.
 
 Two agents racing both INSERT; Postgres serialises them and exactly one lands. The
 loser is not an error — it is a `claim_conflict` row, and **that number is what
@@ -393,13 +400,14 @@ Harbor is judged by.** Every one is a duplicated day of work that did not happen
 ## Dashboard
 
 `/` live activity · `/channels` and `/c/<key>` chat · `/sessions` and `/s/<key>`
-rooms · `/automations` · `/connectors` · `/usage` · `/digest` · `/settings`
+rooms · `/runs` · `/automations` · `/connectors` · `/usage` · `/digest` ·
+`/settings`
 
-Repositories, environments and secrets are schema and API only — the tables and
-endpoints are there, the pages are not written yet. They are configured through
-`npm run db:seed` and the API until they are.
+Repositories, environments and secrets are **schema and seed script only** — the
+tables are there and `npm run db:seed` writes them, but there are no HTTP
+endpoints and no pages yet.
 
-The headline metric is Ramp's, and it is the right one: **sessions that resulted
+The headline metric: **sessions that resulted
 in a merged pull request.** Merged PRs are the only proof the agent produced
 value — an agent that opens forty pull requests nobody merges has produced none,
 which is why the number counts merges and not openings. `artifacts.merged_at` is
@@ -432,9 +440,10 @@ DATABASE_URL=postgres://harbor:harbor@localhost:5433/harbor npx vitest run
 are database indexes and how code reacts to them — a mock happily passes a
 read-then-write check that races.
 
-Pure modules get zero-mock suites at exact boundary values: 93 tests on sandbox
-decisions alone. Provider tests run against real Docker and **skip loudly** when
-it is absent rather than silently passing.
+Pure modules get zero-mock suites at exact boundary values: 99 cases on sandbox
+decisions alone (`npx vitest run src/sandbox/decisions.test.ts`). Provider tests
+run against real Docker and **skip loudly** when it is absent rather than
+silently passing.
 
 ---
 

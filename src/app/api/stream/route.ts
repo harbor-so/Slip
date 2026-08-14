@@ -1,7 +1,6 @@
 import { setting } from "../../../config.js";
-import { databaseUrl } from "../../../db/index.js";
+import { subscribe } from "../../../lib/bus.js";
 import { currentSession } from "../../../lib/session.js";
-import postgres from "postgres";
 
 /**
  * A live feed of changes for this org, over Server-Sent Events.
@@ -10,15 +9,11 @@ import postgres from "postgres";
  * the browser something moved — and SSE reconnects on its own, needs no protocol
  * upgrade through whatever proxy sits in front, and is about twenty lines.
  *
- * Postgres LISTEN/NOTIFY rather than Supabase Realtime or a socket service,
- * because it reuses the one piece of infrastructure Harbor already requires. The
- * same DATABASE_URL that runs the product runs the live layer; there is nothing
- * extra to deploy, nothing extra to pay for, and it works identically on hosted
- * Postgres.
- *
- * A dedicated connection is opened per stream, because LISTEN occupies a
- * connection for as long as it is listening — taking one from the request pool
- * would starve it. `max: 1` keeps that explicit.
+ * Fan-out goes through `src/lib/bus.ts` rather than reaching for a socket service,
+ * because the default backend reuses the one piece of infrastructure Harbor
+ * already requires: the same DATABASE_URL that runs the product runs the live
+ * layer. There is nothing extra to deploy and nothing extra to pay for, and the
+ * route does not know or care which backend is behind `subscribe`.
  */
 export const dynamic = "force-dynamic";
 
@@ -26,8 +21,6 @@ export async function GET(request: Request) {
 	const session = await currentSession();
 	if (!session) return new Response("Not signed in.", { status: 401 });
 
-	const url = databaseUrl();
-	const listener = postgres(url, { max: 1 });
 	const encoder = new TextEncoder();
 
 	const stream = new ReadableStream({
@@ -42,7 +35,7 @@ export async function GET(request: Request) {
 
 			send("ready", { orgId: session.orgId });
 
-			const subscription = await listener.listen("harbor_changes", (payload) => {
+			const unsubscribe = await subscribe("harbor_changes", (payload) => {
 				try {
 					const change = JSON.parse(payload) as { orgId?: string; verb?: string };
 					// Every org shares the one channel, so the filter happens here. A
@@ -68,8 +61,7 @@ export async function GET(request: Request) {
 
 			request.signal.addEventListener("abort", () => {
 				clearInterval(keepAlive);
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
+				void unsubscribe().catch(() => {});
 				try {
 					controller.close();
 				} catch {

@@ -26,6 +26,7 @@ import { db } from "../db/index.js";
 import { channelMembers, channels, chatEvents, principals } from "../db/schema.js";
 import type { Channel, ChannelMember, ChatEvent, Principal } from "../db/schema.js";
 import { setting } from "../config.js";
+import { publish } from "./bus.js";
 import { EVENT_KINDS, computeId, isEphemeral, verifyEvent } from "./signing.js";
 import type { EventKind, SignedEvent } from "./signing.js";
 import { HarborError } from "./work.js";
@@ -284,7 +285,7 @@ export async function memberOf(
  *     established: possession of the key is the grant, so anyone in the org who
  *     reached the URL may read.
  *   - `direct` channels are private, so a caller must present a pubkey that is a
- *     member. This is the buzz "check membership before you can subscribe" rule,
+ *     member. This is the "check membership before you can subscribe" rule,
  *     applied to the one channel kind where it matters.
  *
  * See Known Limitations in CHAT.md: for a `direct` channel this trusts the caller
@@ -527,7 +528,7 @@ export async function eventsOf(
 /**
  * Read a channel as a member, advancing that member's cursor.
  *
- * This is the batch primitive from buzz: an agent that was mentioned three times
+ * The batch primitive: an agent that was mentioned three times
  * while it was busy pulls all three at once here — everything past its cursor in
  * one call — instead of one event per turn. The cursor advances to the last event
  * returned, so the next read is only what is genuinely new.
@@ -574,7 +575,7 @@ export async function notifyChat(
 ): Promise<void> {
 	try {
 		const payload = JSON.stringify({ orgId, channelId, kind, seq, actor });
-		await db.execute(raw`select pg_notify('harbor_chat', ${payload})`);
+		await publish("harbor_chat", payload);
 	} catch (error) {
 		console.error("[chat notify] ignored:", error);
 	}

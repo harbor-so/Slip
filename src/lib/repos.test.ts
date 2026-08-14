@@ -1,9 +1,9 @@
 /**
  * Repository access, which is the multi-tenancy fix.
  *
- * The reference implementation has one shared App installation and no per-user
- * check at all, so any user of the deployment reaches any repository the App is
- * installed on. These tests are the assertion that Harbor does not do that — and
+ * With one shared App installation and no per-user check, any user of the
+ * deployment reaches any repository the App is installed on. These tests are the
+ * assertion that Harbor does not do that — and
  * in particular that the check fails CLOSED, because a check that fails open under
  * load is worse than none: it works in every test and grants access in exactly the
  * conditions somebody is looking for a way in.
