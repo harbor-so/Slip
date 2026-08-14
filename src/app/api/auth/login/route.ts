@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
+import { authorizeUrl, newState, signInScopes, stateCookieOptions } from "../../../../lib/github-oauth.js";
 import { oauthConfigured } from "../../../../lib/session.js";
 
 /**
@@ -10,6 +10,12 @@ import { oauthConfigured } from "../../../../lib/session.js";
  * API key they then minted landed in the attacker's org. The random value goes
  * into a short-lived httpOnly cookie and is compared in constant time on the way
  * back, so a callback that did not originate here is refused.
+ *
+ * The scopes come from `signInScopes()` and default to `read:user` — an identity
+ * to attach a session to and nothing else. An operator can widen them to include
+ * `repo` so that signing in also connects a pull-request authorship identity;
+ * the reason that is not the default, and the separate consent that exists
+ * instead, are in `src/lib/github-oauth.ts`.
  */
 export async function GET(request: Request) {
 	if (!oauthConfigured()) {
@@ -19,23 +25,14 @@ export async function GET(request: Request) {
 		);
 	}
 
-	const state = randomBytes(32).toString("base64url");
-	const callback = new URL("/api/auth/callback", request.url).toString();
-	const authorize = new URL("https://github.com/login/oauth/authorize");
-	authorize.searchParams.set("client_id", process.env.GITHUB_CLIENT_ID as string);
-	authorize.searchParams.set("redirect_uri", callback);
-	// `read:user` only. Harbor needs an identity to attach a session to and nothing
-	// else — it never reads repositories through a user token.
-	authorize.searchParams.set("scope", "read:user");
-	authorize.searchParams.set("state", state);
-
-	const response = NextResponse.redirect(authorize.toString());
-	response.cookies.set("harbor_oauth_state", state, {
-		httpOnly: true,
-		sameSite: "lax",
-		secure: process.env.NODE_ENV === "production",
-		path: "/",
-		maxAge: 600,
-	});
+	const state = newState();
+	const response = NextResponse.redirect(
+		authorizeUrl({
+			scopes: signInScopes(),
+			redirectUri: new URL("/api/auth/callback", request.url).toString(),
+			state,
+		}),
+	);
+	response.cookies.set("harbor_oauth_state", state, stateCookieOptions());
 	return response;
 }

@@ -1,8 +1,15 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { asc, eq } from "drizzle-orm";
 import { db } from "../../../../db/index.js";
 import { orgs, users } from "../../../../db/schema.js";
+import { storeUserScmToken } from "../../../../git/credentials.js";
+import {
+	exchangeCode,
+	grantsAuthorship,
+	readCookie,
+	readProfile,
+	statesMatch,
+} from "../../../../lib/github-oauth.js";
 import { oauthConfigured, sessionCookie, signSession } from "../../../../lib/session.js";
 
 /**
@@ -28,13 +35,6 @@ function allowedLogins(): Set<string> {
 	);
 }
 
-function statesMatch(a: string | undefined, b: string | undefined): boolean {
-	if (!a || !b) return false;
-	const left = Buffer.from(a);
-	const right = Buffer.from(b);
-	return left.length === right.length && timingSafeEqual(left, right);
-}
-
 export async function GET(request: Request) {
 	if (!oauthConfigured()) {
 		return NextResponse.json({ error: "GitHub OAuth is not configured." }, { status: 503 });
@@ -45,43 +45,25 @@ export async function GET(request: Request) {
 	if (!code) return NextResponse.redirect(new URL("/", request.url));
 
 	// Reject a callback that did not start at /api/auth/login.
-	const cookieHeader = request.headers.get("cookie") ?? "";
-	const cookieState = /(?:^|;\s*)harbor_oauth_state=([^;]+)/.exec(cookieHeader)?.[1];
+	const cookieState = readCookie(request.headers.get("cookie"), "harbor_oauth_state");
 	if (!statesMatch(url.searchParams.get("state") ?? undefined, cookieState)) {
 		return NextResponse.json({ error: "Invalid OAuth state." }, { status: 400 });
 	}
 
-	const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-		method: "POST",
-		headers: { accept: "application/json", "content-type": "application/json" },
-		body: JSON.stringify({
-			client_id: process.env.GITHUB_CLIENT_ID,
-			client_secret: process.env.GITHUB_CLIENT_SECRET,
-			code,
-		}),
+	const exchange = await exchangeCode({
+		code,
+		redirectUri: new URL("/api/auth/callback", request.url).toString(),
 	});
-	const { access_token: accessToken } = (await tokenResponse.json()) as {
-		access_token?: string;
-	};
-	if (!accessToken) {
-		return NextResponse.json({ error: "GitHub rejected the code." }, { status: 401 });
+	if (exchange.kind === "refused") {
+		return NextResponse.json({ error: exchange.message }, { status: 401 });
 	}
 
-	const profileResponse = await fetch("https://api.github.com/user", {
-		headers: { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json" },
-	});
-	const profile = (await profileResponse.json()) as {
-		id?: number;
-		login?: string;
-		name?: string;
-		email?: string;
-	};
-	if (!profile.id || !profile.login) {
+	const profile = await readProfile(exchange.token.access_token);
+	if (!profile) {
 		return NextResponse.json({ error: "Could not read GitHub profile." }, { status: 401 });
 	}
 
-	const githubId = String(profile.id);
-	let user = await db.query.users.findFirst({ where: eq(users.githubId, githubId) });
+	let user = await db.query.users.findFirst({ where: eq(users.githubId, profile.id) });
 
 	if (!user) {
 		const allowed = allowedLogins();
@@ -107,11 +89,28 @@ export async function GET(request: Request) {
 			.insert(users)
 			.values({
 				orgId: org.id,
-				githubId,
+				githubId: profile.id,
 				name: profile.name ?? profile.login,
 				email: profile.email ?? null,
 			})
 			.returning();
+	}
+
+	// The one-flow deployment: sign-in was configured to ask for `repo`, GitHub
+	// actually granted it, so the same token becomes this user's authorship
+	// identity. The check is on what came BACK, not on what was asked for — a
+	// user can decline an organisation on the consent screen and still complete
+	// sign-in, and storing that token as authorship-capable would produce a
+	// deployment that believes attribution holds when it does not.
+	if (grantsAuthorship(exchange.scopes)) {
+		await storeUserScmToken({
+			orgId: user!.orgId,
+			userId: user!.id,
+			login: profile.login,
+			email: profile.email,
+			scopes: exchange.scopes,
+			token: exchange.token,
+		});
 	}
 
 	const response = NextResponse.redirect(new URL("/", request.url));
