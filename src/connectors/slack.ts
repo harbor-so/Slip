@@ -27,6 +27,7 @@ import { db } from "../db/index.js";
 import { artifacts, sessions } from "../db/schema.js";
 import { createSession } from "../lib/sessions.js";
 import { enqueueSessionPrompt } from "../lib/session-runner.js";
+import { linkBaseUrl } from "../lib/urls.js";
 import { resolveTarget } from "./routing.js";
 import type {
 	Connector,
@@ -314,8 +315,10 @@ function channelNameFor(config: Record<string, unknown>, channelRef: string): st
 }
 
 function sessionUrl(key: string): string {
-	const base = process.env.HARBOR_PUBLIC_URL ?? "http://localhost:3000";
-	return `${base}/s/${key}`;
+	// `linkBaseUrl()` rather than reading the variable here: this used `??`, so a
+	// blank `HARBOR_PUBLIC_URL=` — the shape `.env.example` ships — produced the
+	// bare path `/s/<key>`, which Slack renders as text rather than a link.
+	return `${linkBaseUrl()}/s/${key}`;
 }
 
 // ---------------------------------------------------------------------------

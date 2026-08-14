@@ -6,11 +6,12 @@ You @-mention it in Slack, or assign it a Linear issue, or type into a shared
 room. It boots an isolated sandbox, runs the coding agent you already use against
 your repository, and streams what it is doing to anyone who opens the link.
 
-(Opening the pull request is the one advertised step that is not wired up yet —
-the attribution machinery is written and tested, nothing calls it. See
-[Pull requests](#pull-requests-are-authored-by-the-human).)
-
 One `docker compose up`. A Node process and a Postgres database, and nothing else.
+
+And when you outgrow one host, the cloud path is additive rather than a rewrite:
+a container image for the control plane, committed manifests for Fly, Render and
+Kubernetes, and twelve remote sandbox backends — none of which the laptop story
+depends on. See [Deploying](./DEPLOY.md).
 
 [Quick start](#quick-start) · [Why this exists](#why-this-exists) ·
 [How it works](#how-it-works) · [Deploying](./DEPLOY.md) ·
@@ -190,32 +191,31 @@ lowest-common-denominator interface loses the best property of each.
 
 | Provider | Isolation | Needs |
 |---|---|---|
-| `docker` **(default)** | container, kernel shared with the host | nothing |
-| `fly` | hardware VM | `FLY_API_TOKEN`, `FLY_APP_NAME` |
-| `e2b` | container | `E2B_API_KEY` |
-| `daytona` | container | `DAYTONA_API_KEY` |
-| `modal` | container | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` |
-| `runloop` | container | `RUNLOOP_API_KEY` |
-| `morph` | microVM | `MORPH_API_KEY` |
-| `blaxel` | microVM | `BL_API_KEY`, `BL_WORKSPACE` |
-| `codesandbox` | microVM | `CSB_API_KEY` |
-| `vercel` | microVM, ~45-minute ceiling | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` |
-| `cloudflare` | container, via a Worker shim you deploy | `CLOUDFLARE_SANDBOX_WORKER_URL`, `…_TOKEN` |
-| `northflank` | container | `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID` |
+| `docker` **(default)** | container | nothing |
+| `fly`, `morph`, `blaxel`, `codesandbox`, `vercel` | hardware VM / microVM | that vendor's account and key |
+| `modal`, `daytona`, `cloudflare`, `northflank` | container, in the vendor's cloud | that vendor's account and key |
+| `e2b`, `runloop` | the vendor advertises microVM; Harbor's integration does not record it | that vendor's account and key |
 | `local` | **none** — see below | opt-in flags |
 
-`docker` is the default because it is the one that lets somebody evaluate the
-whole product without a vendor relationship. Everything between it and `local` is
-a remote backend: pick the vendor you already have a contract with, set
-`HARBOR_SANDBOX_PROVIDER`, and fill in that vendor's credentials. **Every remote
-provider is an upgrade, never a prerequisite** — none of them is required for
-anything, and the full list is `SANDBOX_PROVIDER_NAMES` in
-`src/sandbox/registry.ts`, which contains no stubs.
+Twelve remote backends, and `docker` still needs nothing. The tiers come from what
+each provider module documents rather than from vendor marketing, and
+[docs/SECURITY.md](./docs/SECURITY.md) is where they are stated properly — that is
+the copy to trust, because this one is a summary and summaries drift.
 
-Every one of them is `ephemeral` by choice rather than by limitation. Several
-could technically stop and restart the same box — but a persistent resume with no
-box left to resume has nowhere to fall back to, and the rule is to advertise the
-capability you can honour on a bad day.
+The remote ones are `ephemeral` by choice rather than by limitation: several of
+them can stop and start a box, but a persistent resume with no box left to resume
+has nowhere to fall back to, and the rule is to advertise the capability you can
+honour on a bad day.
+
+Picking a remote provider is not purely an upgrade. The sandbox environment
+carries your repository secrets **decrypted** — that is the only way an agent can
+use them — so a remote box moves them across a vendor boundary Harbor can repeat
+claims about but not verify. `docker` on a dedicated host is the weaker isolation
+tier and the smaller trust surface; [docs/SECURITY.md](./docs/SECURITY.md) states
+the trade rather than implying one answer.
+
+Getting the image to a vendor is its own step, and only half a step for half of
+them: [docs/sandbox-images.md](./docs/sandbox-images.md).
 
 `local` runs the agent as the server user with no isolation. It is off unless
 `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are both set, the runtime must
@@ -271,17 +271,34 @@ Token counts come from the agent when it reports them and are marked
 number that disagrees with the real invoice is worse than a visible gap, because
 somebody makes a decision from it.
 
+A session is a conversation, and it survives its sandbox. The agent's own resume
+token is persisted on the session and re-injected — but **only into a box that
+restored the filesystem the transcript lives on**, because `--resume` reads a
+transcript from disk and handing that id to a fresh box makes the first turn die
+on a session that is not there. On a fresh boot the session says so on the
+timeline. A restart that silently drops the agent's memory is indistinguishable,
+from the room, from a model that has started ignoring you.
+
 ### Pull requests are authored by the human
 
-> **Not wired up yet.** Everything in this section is implemented in
-> `src/git/provider.ts` and covered by `src/git/attribution.test.ts`, and none of
-> it has a production caller: the sandbox does not report its push, so
-> `openPullRequest` is never invoked. The design below is what the code does when
-> something calls it, not what a deployment does today.
+The **supervisor** pushes the branch with short-lived brokered credentials once a
+turn commits anything, and reports it as `branch_pushed`. The control plane pins
+that branch to the session, records it, and opens the pull request **with the
+prompting user's own token**.
 
-The sandbox pushes a branch with short-lived brokered credentials and reports the
-name. The control plane opens the pull request **with the prompting user's own
-token**. GitHub does not let an author approve their own PR, so unreviewed agent
+Harbor pushes rather than asking the agent to, because "bring your own agent" goes
+down to an argv template: a generic model with tool access cannot be relied on to
+run `git push`, to use the right ref, or to push at all. A guarantee that holds
+only for the agents we tested is not one. Harbor does **not** commit on the
+agent's behalf — `GIT_AUTHOR_*` is the prompting human, so a commit Harbor made
+would carry their name on work they never wrote. Uncommitted leftovers are
+reported, not resolved.
+
+The branch is `harbor/lse_<claim_id>`, **pinned to the session on the first push**
+and reused after that. It has to be: `completeTurn` releases the lease whenever
+the queue drains, so a follow-up an hour later runs under a different claim id,
+and re-deriving would fork a second branch from base carrying none of the first
+turn's commits. GitHub does not let an author approve their own PR, so unreviewed agent
 code becomes structurally impossible rather than policy-prohibited.
 
 Author and committer are separate properties from separate mechanisms — the PR
@@ -418,12 +435,13 @@ Harbor is judged by.** Every one is a duplicated day of work that did not happen
 ## Dashboard
 
 `/` live activity · `/channels` and `/c/<key>` chat · `/sessions` and `/s/<key>`
-rooms · `/runs` · `/automations` · `/connectors` · `/usage` · `/digest` ·
-`/settings`
+rooms · `/repos` · `/runs` · `/automations` · `/connectors` · `/usage` ·
+`/digest` · `/settings`
 
-Repositories, environments and secrets are **schema and seed script only** — the
-tables are there and `npm run db:seed` writes them, but there are no HTTP
-endpoints and no pages yet.
+Environments and secrets are **schema and seed script only** — the tables are
+there and `npm run db:seed` writes them, but there is no HTTP endpoint and no page
+for either yet. Repositories have both: `/repos` and `GET/POST /api/repos`, plus
+per-repo archive and metadata routes.
 
 The headline metric: **sessions that resulted
 in a merged pull request.** Merged PRs are the only proof the agent produced
@@ -431,11 +449,11 @@ value — an agent that opens forty pull requests nobody merges has produced non
 which is why the number counts merges and not openings. `artifacts.merged_at` is
 written only from a verified source-control webhook; no agent can move it.
 
-**Known gap:** nothing opens the pull request yet. `openPullRequest` and the
-attribution rules above are implemented and tested, but no production caller
-reaches them — the sandbox never reports a push, so no `pull_request` artifact is
-created and this metric reads `0/n` on every deployment. The plumbing behind it
-is real; the trigger is not written.
+The chain behind it runs end to end: a turn that commits is pushed by the
+supervisor, the push pins the session's branch and inserts a `branch` artifact,
+the pull request is opened as the prompting human, and its `html_url` is what a
+later merge webhook joins on. A session that pushes six times has one pull
+request, not six.
 
 ---
 

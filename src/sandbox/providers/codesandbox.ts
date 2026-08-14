@@ -46,7 +46,6 @@
  * `CSB_API_KEY` is set.
  */
 
-import { CodeSandbox } from "@codesandbox/sdk";
 import type { ProviderErrorType, SandboxCapabilities } from "../../contracts/index.js";
 import {
 	SandboxProviderError,
@@ -264,7 +263,7 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 	 * `invalid_config` at the call site rather than at import. An injected client
 	 * (tests, and the contract suite's live wiring) bypasses credential resolution.
 	 */
-	private resolveClient(operation: SandboxOperation): CodeSandboxClient {
+	private async resolveClient(operation: SandboxOperation): Promise<CodeSandboxClient> {
 		if (this.options.client) return this.options.client;
 		if (this.built) return this.built;
 		const key = this.options.apiKey ?? process.env.CSB_API_KEY;
@@ -279,7 +278,13 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 				operation,
 			});
 		}
-		this.built = new CodeSandbox(key);
+		// Imported here rather than at module scope. `@codesandbox/sdk` drags in
+		// `blessed`, which loads its widgets by computed `require(path)` — unfollowable
+		// by webpack, and `registry.ts` imports every provider eagerly, so a static
+		// import would put it in the Next.js server bundle. Deferring it also means a
+		// deployment on any other provider never pays to load a terminal UI library.
+		const { CodeSandbox } = await import("@codesandbox/sdk");
+		this.built = new CodeSandbox(key) as unknown as CodeSandboxClient;
 		return this.built;
 	}
 
@@ -308,7 +313,7 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 	async create(config: CreateSandboxConfig): Promise<CreatedSandbox> {
 		assertFeaturesSupported(this, config, "create");
 
-		const client = this.resolveClient("create");
+		const client = await this.resolveClient("create");
 		// A self-hoster can raise the auto-hibernate backstop without forking; read inline,
 		// never a module constant (see the provider checklist / lint-config rule).
 		const hibernationTimeoutSeconds = Number(process.env.CSB_HIBERNATION_TIMEOUT_SEC ?? "1800");
@@ -385,7 +390,7 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 	}
 
 	async inspect(externalId: string): Promise<SandboxInspection | null> {
-		const client = this.resolveClient("inspect");
+		const client = await this.resolveClient("inspect");
 		let info: CodeSandboxInfo;
 		try {
 			info = await client.sandboxes.get(externalId);
@@ -413,16 +418,23 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 	}
 
 	/**
-	 * Reconciliation. `null` means CodeSandbox answered and has no *running* box carrying
-	 * this attempt tag; an unreachable backend throws (via `run`), per the authority rule —
+	 * Reconciliation. `null` means CodeSandbox answered and has no box carrying this
+	 * attempt tag; an unreachable backend throws (via `run`), per the authority rule —
 	 * returning `null` on a lost connection starts a second box on the same branch.
+	 *
+	 * Deliberately NOT filtered on `status: "running"`, which it was. `create` here
+	 * is two-phase — fork the template, then `connect` a session to deliver env and
+	 * launch the boot command — so a create whose response was lost can leave a box
+	 * that is forked but not yet running. Narrowing to running made exactly that box
+	 * invisible, and the retry forked a second one. Liveness is derived below the
+	 * same way `inspect` does it, which is the honest answer for a `SandboxInfo`
+	 * that carries no run-state.
 	 */
 	async findByAttemptId(attemptId: string): Promise<SandboxInspection | null> {
-		const client = this.resolveClient("find_by_attempt");
+		const client = await this.resolveClient("find_by_attempt");
 		const limit = Number(process.env.CSB_LIST_LIMIT ?? "200");
 		const { sandboxes } = await this.run("find_by_attempt", () =>
 			client.sandboxes.list({
-				status: "running",
 				tags: [metaTag(META.managed, "true"), metaTag(META.attempt, attemptId)],
 				limit,
 			}),
@@ -437,12 +449,25 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 					+ `${boxes.map((b) => b.id).join(", ")}. Adopting one; the rest are orphans and must be stopped.`,
 			);
 		}
-		// The `status: "running"` filter already constrained the result to live boxes.
-		return this.toInspection(boxes[0]!, "running");
+		// Liveness from the running-VM list, exactly as `inspect` derives it. A box
+		// found by tag but absent from that list maps to `unknown`, which the shared
+		// liveness rule treats as live — the fail-OPEN direction, and the correct one
+		// here: the box provably exists, so reporting it dead would have the caller
+		// start another.
+		const box = boxes[0]!;
+		let raw = "unknown";
+		try {
+			const running = await client.sandboxes.listRunning();
+			if (running.vms.some((vm) => vm.id === box.id)) raw = "running";
+		} catch {
+			// keep `unknown` — a liveness blip must not turn an existing box into an
+			// absent one, and authority (does it exist?) was already answered above.
+		}
+		return this.toInspection(box, raw);
 	}
 
 	async stop(externalId: string, _options?: StopOptions): Promise<StopOutcome> {
-		const client = this.resolveClient("stop");
+		const client = await this.resolveClient("stop");
 		try {
 			// Hibernate/shutdown reclaims the VM's compute; reconciliation only adopts running
 			// boxes, so a stopped box reads as gone — the ephemeral contract.
@@ -469,7 +494,7 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 	 * that lets a stranded VM bill until someone notices the invoice.
 	 */
 	async listManaged(): Promise<SandboxInspection[]> {
-		const client = this.resolveClient("list_managed");
+		const client = await this.resolveClient("list_managed");
 		const limit = Number(process.env.CSB_LIST_LIMIT ?? "200");
 		const { sandboxes } = await this.run("list_managed", () =>
 			client.sandboxes.list({

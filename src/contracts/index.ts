@@ -374,6 +374,26 @@ export interface BridgeCommand {
 		 * `author_email` was always null and no mode said that was deliberate.
 		 */
 		mode?: "agent-only" | "attributed-user";
+		/**
+		 * Where this turn's commits are pushed, resolved **per turn** rather than
+		 * baked into the box's environment at spawn.
+		 *
+		 * Per turn because the branch is derived from a lease, and a box outlives
+		 * the lease that booted it: `completeTurn` hands the lease back whenever the
+		 * queue drains, so a session's third prompt runs under a claim id its
+		 * sandbox has never heard of. A spawn-time variable would still name the
+		 * first lease, and a spawn *retried* under a new lease would push to the old
+		 * lease's branch — the failure `harborBranchName` warns about in its own
+		 * docstring.
+		 *
+		 * Resolved as `session_repos.working_branch ?? harborBranchName(claim)`, so
+		 * the first push names the lease the work began under and every later turn
+		 * reuses it. Null means this deployment has no branch to push to; the turn
+		 * runs, and nothing is pushed.
+		 */
+		push_branch?: string | null;
+		/** What the branch was cut from. For the PR's base and the compare URL. */
+		base_branch?: string | null;
 	};
 }
 

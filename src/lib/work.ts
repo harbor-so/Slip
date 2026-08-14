@@ -24,6 +24,7 @@ import type { Task } from "../db/schema.js";
 import type { TaskLine } from "./format.js";
 import { publish } from "./bus.js";
 import { DEFAULT_RIGHTS } from "./rights.js";
+import { linkBaseUrl } from "./urls.js";
 
 export class HarborError extends Error {}
 
@@ -46,7 +47,7 @@ export function scopeForTask(task: Pick<Task, "id" | "source" | "sourceRef">): s
 }
 
 function publicBaseUrl(): string {
-	return process.env.HARBOR_PUBLIC_URL?.trim() || "http://localhost:3000";
+	return linkBaseUrl();
 }
 
 /**

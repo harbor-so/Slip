@@ -29,14 +29,7 @@
  *      because a caller reading empty starts a second box on the same branch.
  */
 
-import { ModalClient } from "modal";
-import {
-	AlreadyExistsError,
-	ClientClosedError,
-	InternalFailure,
-	InvalidError,
-	NotFoundError,
-} from "modal";
+import type { ModalClient } from "modal";
 import type { ProviderErrorType, SandboxCapabilities } from "../../contracts/index.js";
 import {
 	SandboxProviderError,
@@ -97,6 +90,40 @@ function modalState(raw: string): ProviderSandboxState {
 }
 
 /**
+ * The Modal SDK, loaded on first use rather than at import.
+ *
+ * `modal` pulls in `nice-grpc`, `@grpc/grpc-js` and `protobufjs`, all three of
+ * which resolve modules by computed expression. A static import here reaches the
+ * Next.js server bundle — `registry.ts` imports every provider eagerly so that a
+ * missing case is a compile error — and webpack cannot follow a computed require,
+ * so the build either warns or emits something that throws at runtime. Deferring
+ * the import means a self-hoster on the `docker` default never loads a gRPC stack
+ * they are not using, and the bundler never sees it at all.
+ *
+ * `import type` above is erased, so the type-level use of `ModalClient` is free.
+ */
+let modalSdk: typeof import("modal") | undefined;
+
+async function loadModalSdk(): Promise<typeof import("modal")> {
+	modalSdk ??= await import("modal");
+	return modalSdk;
+}
+
+/**
+ * `err instanceof <the SDK's class>`, safe before the SDK has loaded.
+ *
+ * Every call site sits downstream of `client()`, which loads the SDK first, so in
+ * practice the module is always present by the time anything is classified. The
+ * `undefined` branch is not dead code though: it keeps classification a total
+ * function, and a `false` here simply falls through to the message sniff below —
+ * a slightly less precise answer, never a crash while handling someone else's error.
+ */
+function isModalError(err: unknown, name: keyof typeof import("modal")): boolean {
+	const ctor = modalSdk?.[name];
+	return typeof ctor === "function" && err instanceof (ctor as new (...args: never[]) => Error);
+}
+
+/**
  * Modal SDK error → the circuit breaker's vocabulary. The gRPC transport has no
  * HTTP status, so this is an `instanceof` ladder over Modal's exported error
  * classes plus a message sniff for the auth/connection cases the SDK folds into a
@@ -107,12 +134,12 @@ function modalState(raw: string): ProviderSandboxState {
  * real outage behind a config typo.
  */
 function classifyModalError(err: unknown): ProviderErrorType {
-	if (err instanceof NotFoundError) return "not_found";
-	if (err instanceof InvalidError) return "invalid_config";
+	if (isModalError(err, "NotFoundError")) return "not_found";
+	if (isModalError(err, "InvalidError")) return "invalid_config";
 	// A retryable internal error, or the client being torn down under us: both are
 	// "try again", which is exactly what `transient` means to the breaker.
-	if (err instanceof InternalFailure) return "transient";
-	if (err instanceof ClientClosedError) return "transient";
+	if (isModalError(err, "InternalFailure")) return "transient";
+	if (isModalError(err, "ClientClosedError")) return "transient";
 
 	const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
 	// gRPC UNAUTHENTICATED / PERMISSION_DENIED surface as a plain error with these
@@ -157,8 +184,16 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	 * `invalid_config` and throws with an actionable message — NEVER a `transient`
 	 * error, which would open the circuit on a deployment that simply forgot to set
 	 * its credentials.
+	 *
+	 * The SDK is loaded even when a client is injected, which looks redundant and is
+	 * not: `classifyModalError` and the `NotFoundError` checks in `inspect` and
+	 * `stop` need the SDK's error *classes*, and a test that injects a fake client
+	 * still throws real `NotFoundError`s at us. Loading here — the one call every
+	 * operation makes first — is what keeps those `instanceof` checks meaningful
+	 * without a static import.
 	 */
-	private client(operation: SandboxOperation): ModalClient {
+	private async client(operation: SandboxOperation): Promise<ModalClient> {
+		const sdk = await loadModalSdk();
 		if (this.options.client) return this.options.client;
 		if (this.cachedClient) return this.cachedClient;
 
@@ -176,7 +211,7 @@ export class ModalSandboxProvider implements EphemeralProvider {
 				operation,
 			});
 		}
-		this.cachedClient = new ModalClient({ tokenId, tokenSecret });
+		this.cachedClient = new sdk.ModalClient({ tokenId, tokenSecret });
 		return this.cachedClient;
 	}
 
@@ -205,7 +240,7 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	async create(config: CreateSandboxConfig): Promise<CreatedSandbox> {
 		assertFeaturesSupported(this, config, "create");
 
-		const client = this.client("create");
+		const client = await this.client("create");
 		// Modal's per-sandbox lifetime backstop (its own default of 5 min is too
 		// short for an agent turn). Distinct from `config.timeoutMs`, the caller's
 		// boot ceiling, which the gRPC client's own request timeout governs.
@@ -251,14 +286,14 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	}
 
 	async inspect(externalId: string): Promise<SandboxInspection | null> {
-		const client = this.client("inspect");
+		const client = await this.client("inspect");
 		let sandbox;
 		try {
 			sandbox = await client.sandboxes.fromId(externalId);
 		} catch (err) {
 			// A NotFoundError is the one outcome that is an *answer*: Modal replied and
 			// has no such sandbox. Everything else is rethrown (and classified).
-			if (err instanceof NotFoundError) return null;
+			if (isModalError(err, "NotFoundError")) return null;
 			throw this.wrap(err, "inspect");
 		}
 
@@ -281,7 +316,7 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	 * the async generator (or the per-box poll/getTags) is rethrown, never swallowed.
 	 */
 	async findByAttemptId(attemptId: string): Promise<SandboxInspection | null> {
-		const client = this.client("find_by_attempt");
+		const client = await this.client("find_by_attempt");
 		const found: SandboxInspection[] = [];
 		try {
 			for await (const sandbox of client.sandboxes.list({ tags: { [TAG.attempt]: attemptId } })) {
@@ -314,7 +349,7 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	 * orphans anywhere", the exact conclusion that lets a stranded box bill forever.
 	 */
 	async listManaged(): Promise<SandboxInspection[]> {
-		const client = this.client("list_managed");
+		const client = await this.client("list_managed");
 		const out: SandboxInspection[] = [];
 		try {
 			for await (const sandbox of client.sandboxes.list({ tags: { [TAG.managed]: "true" } })) {
@@ -329,13 +364,13 @@ export class ModalSandboxProvider implements EphemeralProvider {
 	}
 
 	async stop(externalId: string, _options?: StopOptions): Promise<StopOutcome> {
-		const client = this.client("stop");
+		const client = await this.client("stop");
 		let sandbox;
 		try {
 			sandbox = await client.sandboxes.fromId(externalId);
 		} catch (err) {
 			// The box is gone entirely: nothing to do, and not an error on a retry path.
-			if (err instanceof NotFoundError) return "absent";
+			if (isModalError(err, "NotFoundError")) return "absent";
 			throw this.wrap(err, "stop");
 		}
 
@@ -346,9 +381,9 @@ export class ModalSandboxProvider implements EphemeralProvider {
 			// Idempotency: stop is called from retrying paths (a sweep, a double-press, a
 			// reconciler). A box that vanished between fromId and terminate is `absent`; one
 			// Modal reports as already finished is `already_stopped`. Neither throws.
-			if (err instanceof NotFoundError) return "absent";
+			if (isModalError(err, "NotFoundError")) return "absent";
 			const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
-			if (err instanceof AlreadyExistsError || /already|terminated|not running|finished|stopped/.test(message)) {
+			if (isModalError(err, "AlreadyExistsError") || /already|terminated|not running|finished|stopped/.test(message)) {
 				return "already_stopped";
 			}
 			throw this.wrap(err, "stop");

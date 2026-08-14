@@ -371,6 +371,64 @@ export type RepoAccess =
 			detail: string;
 	  };
 
+// ---------------------------------------------------------------------------
+// Listing repositories — a capability, not a fifth interface member
+// ---------------------------------------------------------------------------
+
+/**
+ * One repository as a picker needs it.
+ *
+ * `permission` is nullable and that nullability is load-bearing: GitHub omits
+ * the `permissions` object on some listing responses, and inventing `read` for a
+ * missing one would offer a repository the user cannot push to. A null renders
+ * as "permission not reported" and the real check still happens at connect time
+ * against `verifyRepoAccess`, which fails closed. The list is a convenience; it
+ * is never the authority.
+ */
+export interface RepoSummary {
+	owner: string;
+	name: string;
+	default_branch: string;
+	description: string | null;
+	private: boolean;
+	permission: RepoPermission | null;
+}
+
+export type RepoListing =
+	| {
+			kind: "listed";
+			repositories: RepoSummary[];
+			/**
+			 * True when the host had more than Harbor asked for. Stated rather than
+			 * hidden: a silently truncated list reads as "these are all my repos",
+			 * and the person whose repository is missing concludes Harbor cannot see
+			 * it and gives up.
+			 */
+			truncated: boolean;
+	  }
+	| { kind: "unavailable"; reason: RepoAccessIndeterminacy | RepoAccessDenial; detail: string };
+
+/**
+ * Providers that can enumerate what a user can see.
+ *
+ * A separate interface discovered by a type guard, not a sixth member of
+ * `ScmProvider` and emphatically not a `capabilities.canList` boolean. Nothing
+ * ties a boolean to a method: a provider that sets the flag and forgets the
+ * function compiles, and the picker comes back empty on a deployment that has no
+ * idea why. Here, `listRepositories` does not exist on the type unless
+ * `listsRepositories` is `true`, so the compiler is what enforces the pairing.
+ */
+export interface RepoListingProvider {
+	readonly listsRepositories: true;
+	listRepositories(userToken: string, options?: { limit?: number }): Promise<RepoListing>;
+}
+
+export function listsRepositories(
+	provider: ScmProvider,
+): provider is ScmProvider & RepoListingProvider {
+	return (provider as Partial<RepoListingProvider>).listsRepositories === true;
+}
+
 export type RepoAuthorisation =
 	| { decision: "allow"; permission: RepoPermission }
 	| {

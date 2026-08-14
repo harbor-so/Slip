@@ -43,6 +43,7 @@ import type {
 import { classifyDockerFailure, dockerProvider, volumeName } from "./docker.js";
 import { flyProvider } from "./fly.js";
 import { localProvider } from "./local.js";
+import { SANDBOX_PROVIDER_NAMES } from "../registry.js";
 import { blaxelProvider } from "./blaxel.js";
 import { cloudflareProvider } from "./cloudflare.js";
 import { codesandboxProvider } from "./codesandbox.js";
@@ -956,3 +957,52 @@ const REMOTE_CONTRACTS: RemoteContractSpec[] = [
 for (const contract of REMOTE_CONTRACTS) {
 	describeRemoteProvider(contract);
 }
+
+// ---------------------------------------------------------------------------
+// The meta-test: every registered provider must have a contract block
+// ---------------------------------------------------------------------------
+//
+// `src/sandbox/registry.ts` says, in its opening comment, that adding a backend
+// is three edits and that the third — running the contract suite against it —
+// "is not optional". Nothing enforced that. A provider could be added to
+// `SANDBOX_PROVIDER_NAMES`, ship, and be reachable by `HARBOR_SANDBOX_PROVIDER`
+// with no contract coverage at all, and the suite would stay green.
+//
+// This closes it. The list below is the set of labels that have a block in this
+// file; if it stops matching the registry, one of the two is wrong and the build
+// says which. It costs one line per new provider, which is the point — the cost
+// is what makes the omission visible.
+
+describe("contract coverage", () => {
+	const covered = new Set<string>([
+		// The three with bespoke blocks earlier in this file, each needing local
+		// infrastructure rather than a vendor credential.
+		"docker",
+		"local",
+		"fly",
+		...REMOTE_CONTRACTS.map((contract) => contract.label),
+	]);
+
+	test("every provider in the registry has a contract block here", () => {
+		const missing = SANDBOX_PROVIDER_NAMES.filter((name) => !covered.has(name));
+		expect(
+			missing,
+			`These providers are registered but have no contract block: ${missing.join(", ")}. `
+				+ "registry.ts promises the contract suite runs against every backend. Add a "
+				+ "RemoteContractSpec entry (or a bespoke describe, for a backend that needs "
+				+ "local infrastructure rather than a vendor credential).",
+		).toEqual([]);
+	});
+
+	test("no contract block names a provider the registry does not have", () => {
+		const registered = new Set<string>(SANDBOX_PROVIDER_NAMES);
+		const orphaned = [...covered].filter((label) => !registered.has(label));
+		expect(
+			orphaned,
+			`These contract blocks name providers that are not in SANDBOX_PROVIDER_NAMES: `
+				+ `${orphaned.join(", ")}. Either the provider was removed and its block was `
+				+ "left behind, or the label is misspelled — a misspelling means the block is "
+				+ "silently testing nothing anybody can select.",
+		).toEqual([]);
+	});
+});

@@ -5,6 +5,7 @@ import type { BridgeCommand } from "../../../../../contracts/index.js";
 import { db } from "../../../../../db/index.js";
 import { subscribe } from "../../../../../lib/bus.js";
 import { sandboxes, sessionPrompts, sessions } from "../../../../../db/schema.js";
+import { resolvePushBranch } from "../../../../../git/working-branch.js";
 import { isReconnectBlockedStatus } from "../../../../../sandbox/decisions.js";
 import { validateFence } from "../../../../../sandbox/manager.js";
 import {
@@ -224,6 +225,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 							.orderBy(asc(sessionPrompts.deliveredAt), asc(sessionPrompts.seq))
 							.limit(setting("maxQueueDepth"));
 
+						// Resolved once per drain rather than once per prompt: it is two
+						// indexed reads, and every prompt in this batch belongs to the same
+						// session and therefore the same branch.
+						const target = delivered.length > 0
+							? await resolvePushBranch(orgId, sessionId)
+							: null;
+
 						for (const prompt of delivered) {
 							if (sent.has(prompt.id)) continue;
 							sent.add(prompt.id);
@@ -248,6 +256,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 									author: prompt.author,
 									author_email: attributed ? prompt.authorEmail : null,
 									mode: attributed ? "attributed-user" : "agent-only",
+									// Sent per turn for the same reason `mode` is: only the control
+									// plane knows the answer, and the answer changes between turns
+									// of one session. Null is a statement — "nothing to push to" —
+									// not an omission the sandbox should fill in.
+									push_branch: target?.branch ?? null,
+									base_branch: target?.base ?? null,
 								},
 							};
 							send("command", command);

@@ -1,0 +1,101 @@
+# Harbor on Render.
+#
+# ---------------------------------------------------------------------------
+# This is a TEMPLATE. Copy it to the repository root.
+# ---------------------------------------------------------------------------
+#
+# Render only reads a Blueprint at `./render.yaml`. It lives here so the repo root
+# stays free of vendor files — which is the point of the whole `deploy/` directory
+# — but Render will not find it at this path:
+#
+#   cp deploy/render/render.yaml render.yaml
+#
+# ---------------------------------------------------------------------------
+# Both services must be always-on
+# ---------------------------------------------------------------------------
+#
+# Free and starter instances spin down when idle, and that breaks Harbor the same
+# way Fly's auto-stop does: live updates are Postgres LISTEN/NOTIFY held open by
+# the web process, and every background sweep lives in the worker. A spun-down
+# worker means expired leases are never reclaimed and sandboxes outlive their
+# deadlines, with no request arriving to wake it. Use a paid instance type for
+# both, or accept that the product silently stops maintaining itself.
+
+services:
+
+  - type: web
+    name: harbor
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: web
+    plan: standard
+    healthCheckPath: /api/health
+    # Runs after the image is built and before traffic shifts. Migrations are not
+    # run on boot — drizzle's migrator takes no advisory lock, so replicas
+    # starting together would race.
+    preDeployCommand: /usr/local/bin/harbor-entrypoint migrate
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: harbor-postgres
+          # `connectionString`, NOT a pooled one. Harbor needs session state —
+          # LISTEN/NOTIFY and pg_try_advisory_lock — and a transaction pooler
+          # breaks both silently: queries keep working, the dashboard just stops
+          # updating and the sweeps stop running.
+          property: connectionString
+      - key: HARBOR_ENCRYPTION_KEY
+        generateValue: true
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: HARBOR_PUBLIC_URL
+        # Must be reachable from inside a sandbox. On any remote provider that
+        # means this exact public origin; a private address hangs until the boot
+        # timeout.
+        fromService:
+          type: web
+          name: harbor
+          property: host
+      - key: HARBOR_SANDBOX_PROVIDER
+        value: fly
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: HARBOR_ALLOWED_GITHUB_LOGINS
+        sync: false
+
+  - type: worker
+    name: harbor-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: mcp
+    plan: standard
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: harbor-postgres
+          property: connectionString
+      # Must match the web service's key exactly — it decrypts the same rows.
+      # Render generates per-service, so this is copied deliberately rather than
+      # generated again.
+      - key: HARBOR_ENCRYPTION_KEY
+        fromService:
+          type: web
+          name: harbor
+          envVarKey: HARBOR_ENCRYPTION_KEY
+      - key: HARBOR_PUBLIC_URL
+        fromService:
+          type: web
+          name: harbor
+          property: host
+      # Render injects PORT into every service. The MCP server reads
+      # HARBOR_MCP_PORT first precisely so this worker does not bind the web port.
+      - key: HARBOR_MCP_PORT
+        value: 8788
+      - key: HARBOR_SANDBOX_PROVIDER
+        value: fly
+
+databases:
+  - name: harbor-postgres
+    plan: standard
+    postgresMajorVersion: "17"

@@ -1,0 +1,32 @@
+# Everything the image builds for itself, plus everything that must never enter it.
+#
+# `.env` is the important line. Without it a `docker build` in a configured
+# working tree bakes the operator's HARBOR_ENCRYPTION_KEY into an image layer,
+# where it survives every `docker push` and is readable by anyone who can pull.
+
+node_modules
+.next
+dist
+.git
+.github
+.context
+
+.env
+.env.*
+!.env.example
+
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# Not needed at build or run time. `docs/` and `deploy/` are for humans reading
+# the repository; the sandbox worker builds from its own directory.
+docs
+deploy
+integrations/*/node_modules
+
+# The build compiles TypeScript from `src/`, so the sources stay — but the tests
+# and their fixtures are dead weight in a production image.
+**/*.test.ts
+**/*.test.tsx
+**/*.test.mts

@@ -86,9 +86,10 @@ import { db } from "../db/index.js";
 import { claims, events, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
 import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
+import { PUBLIC_URL_MISSING_MESSAGE, agentMcpUrl, publicUrl } from "../lib/urls.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
-import { buildSandboxEnv } from "./env.js";
+import { buildSandboxEnv, resumeTokenForBoot } from "./env.js";
 import {
 	type DestructionAuthority,
 	type LeaseState,
@@ -137,36 +138,15 @@ function sha256Hex(value: string): string {
  * emits is dropped, its heartbeat never arrives, and the connecting watchdog reaps
  * it. The symptom is "sandboxes always time out", which is a very long way from
  * "an environment variable is unset".
+ *
+ * Resolution and the wording both live in `src/lib/urls.ts`, which is the single
+ * place that decides what any Harbor address is; only the error *type* is local,
+ * because callers here catch `HarborError` specifically.
  */
 function controlPlaneUrl(): string {
-	const url = process.env.HARBOR_PUBLIC_URL?.trim();
-	if (!url) {
-		throw new HarborError(
-			"HARBOR_PUBLIC_URL is not set, so a sandbox would have no address to call back "
-				+ "on. It must be a URL reachable FROM INSIDE a sandbox — on Docker that is "
-				+ "usually http://host.docker.internal:3000, not http://localhost:3000, which "
-				+ "from inside a container resolves to the container itself.",
-		);
-	}
-	return url.replace(/\/+$/, "");
-}
-
-/**
- * Where the `harbor-agent` MCP surface is reachable from inside a sandbox.
- *
- * Separate from `controlPlaneUrl()` because they are genuinely different
- * processes on different ports — the dashboard is Next.js, `harbor-agent` is the
- * Express MCP server — and a deployment may run one without the other.
- *
- * Unset returns null rather than throwing, unlike `controlPlaneUrl`. A sandbox
- * with no control-plane address cannot report anything and is a deployment fault;
- * a sandbox with no MCP address simply has no Harbor tools, which is a smaller
- * product with no broken part in it. Read at call time, not at import, for the
- * reason given in src/config.ts.
- */
-function agentMcpUrl(): string | null {
-	const url = process.env.HARBOR_AGENT_MCP_URL?.trim();
-	return url ? url.replace(/\/+$/, "") : null;
+	const url = publicUrl();
+	if (!url) throw new HarborError(PUBLIC_URL_MISSING_MESSAGE);
+	return url;
 }
 
 type SandboxRow = typeof sandboxes.$inferSelect;
@@ -910,6 +890,53 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
  * would read as an attempt in flight and block the session for a boot timeout over
  * a spend cap that will still be reached a second later.
  */
+/**
+ * `HARBOR_RESUME_TOKEN`, or nothing, plus the timeline note when it is nothing.
+ *
+ * The decision is `resumeTokenForBoot`; this is the query and the effects. The
+ * notice is emitted as a `log`-shaped session event rather than being swallowed,
+ * because a sandbox replacement that quietly resets the agent's memory is
+ * indistinguishable, from the room, from a model that has started ignoring the
+ * conversation.
+ */
+async function resumeEnvFor(sessionId: string, bootMode: string): Promise<Record<string, string>> {
+	const [session] = await db
+		.select({
+			orgId: sessions.orgId,
+			runtime: sessions.runtime,
+			token: sessions.agentResumeToken,
+			mintedBy: sessions.agentResumeRuntime,
+		})
+		.from(sessions)
+		.where(eq(sessions.id, sessionId))
+		.limit(1);
+	if (!session) return {};
+
+	const verdict = resumeTokenForBoot({
+		storedToken: session.token,
+		storedRuntime: session.mintedBy,
+		sessionRuntime: session.runtime,
+		bootMode,
+	});
+	if (verdict.resume) return { HARBOR_RESUME_TOKEN: verdict.token };
+
+	if (verdict.notice !== null) {
+		await appendEvent({
+			orgId: session.orgId,
+			sessionId,
+			type: "session_error",
+			actor: "harbor",
+			payload: {
+				kind: "agent_context_lost",
+				reason: verdict.reason,
+				boot_mode: bootMode,
+				message: verdict.notice,
+			},
+		});
+	}
+	return {};
+}
+
 async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise<SpawnOutcome> {
 	// Integer micro-USD, never a float. A fractional estimate would make `spent +
 	// estimate > cap` true for a rounding artefact, and worse, would accumulate
@@ -983,6 +1010,12 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			// attacker's control plane, which it would then hand its token to.
 			env: {
 				...(ctx.env ?? {}),
+				// The agent's own conversation id from the box this one replaces, and
+				// ONLY when this boot restored the filesystem its transcript lives on.
+				// Inside the Harbor-controlled spread rather than in `buildSandboxEnv`
+				// because the boot mode is not known until here — and a repository
+				// secret must not be able to hand the agent an arbitrary session id.
+				...(await resumeEnvFor(ctx.sessionId, boot.mode)),
 				HARBOR_CONTROL_URL: controlPlaneUrl(),
 				HARBOR_SANDBOX_ID: row.id,
 				HARBOR_SESSION_ID: ctx.sessionId,

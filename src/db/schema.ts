@@ -299,6 +299,31 @@ export const sessions = pgTable(
 		runtime: text("runtime"),
 		/** Paused sessions stop consuming the queue. Set by a budget or by a human. */
 		pausedReason: text("paused_reason"),
+		/**
+		 * The agent's own conversation id, so a replaced sandbox can carry on rather
+		 * than silently starting over.
+		 *
+		 * A session outlives its sandboxes: a box is stopped on inactivity, reaped on
+		 * a stale heartbeat, or killed by an execution timeout, and the next prompt
+		 * boots a new one. The supervisor holds the resume token in a closure, so
+		 * before this column every one of those events reset the agent's context
+		 * while Harbor's transcript carried on looking unbroken — which reads to the
+		 * user as the model having got worse, not as a restart.
+		 *
+		 * Written only from a verified `agent_finished` payload on the fenced ingest
+		 * path, and re-injected only when the boot restored the filesystem the
+		 * transcript lives on. See `resumeTokenForBoot`.
+		 */
+		agentResumeToken: text("agent_resume_token"),
+		/**
+		 * Which runtime minted that token. Not decoration: a token is adapter-
+		 * specific — a Claude Code session id means nothing to OpenCode's `--session`
+		 * — and `sessions.runtime` is editable, so the two can legitimately disagree.
+		 * Storing the minting runtime is what lets the mismatch be detected instead
+		 * of handing one agent another's identifier and getting an opaque failure on
+		 * the first turn after a reboot.
+		 */
+		agentResumeRuntime: text("agent_resume_runtime"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 		lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
 	},
@@ -369,6 +394,22 @@ export const sessionPrompts = pgTable(
 		 * attributed turn in the product.
 		 */
 		authorEmail: text("author_email"),
+		/**
+		 * The signed-in user who wrote this prompt, when there was one.
+		 *
+		 * The pull request for this session's work is opened with **this person's**
+		 * OAuth token — that is what makes them the PR author, and what makes GitHub
+		 * refuse to let them approve it. `prAuthorityForUser` takes a user id, so
+		 * without this column the only route from a prompt to an identity is
+		 * matching `author_email` against `users.email`, which is nullable and not
+		 * unique. A near-miss there does not fail; it opens a pull request in
+		 * somebody else's name.
+		 *
+		 * Nullable because a prompt can legitimately have no user behind it — an
+		 * automation, a connector, an agent's `spawn_child`. Those sessions push a
+		 * branch and hand back a compare URL rather than opening a PR as the bot.
+		 */
+		authorUserId: uuid("author_user_id").references(() => users.id),
 		body: text("body").notNull(),
 		status: text("status").notNull().default("queued"),
 		/** Monotonic within a session, so ordering never depends on timestamps. */

@@ -252,6 +252,8 @@ export async function enqueueSessionPrompt(input: {
 	authorKind?: PromptAuthorKind;
 	/** Forwarded to the stored prompt; see `queuePrompt`. */
 	authorEmail?: string | null;
+	/** Forwarded likewise. The PR for this work is opened with this user's token. */
+	authorUserId?: string | null;
 	body: string;
 	repoOverrides?: RepoOverrides;
 }): Promise<EnqueueOutcome> {
@@ -307,6 +309,7 @@ export async function enqueueSessionPrompt(input: {
 			author: input.author,
 			authorKind: input.authorKind ?? "human",
 			authorEmail: input.authorEmail ?? null,
+			authorUserId: input.authorUserId ?? null,
 			body: input.body,
 		});
 		return {

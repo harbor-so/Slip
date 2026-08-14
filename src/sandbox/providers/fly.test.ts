@@ -143,6 +143,81 @@ describe("fly.findByAttemptId — fails closed", () => {
 	});
 });
 
+/**
+ * A Fly stand-in that STORES what `create` sent and serves `listManaged` from it,
+ * honouring the `?metadata.<key>=<value>` filter in the URL.
+ *
+ * This shape, rather than a canned list fixture, is the whole point. A canned
+ * fixture is written by the same person reading the same file, so they hand-write
+ * `harbor_managed: "true"` into the response and the test passes whatever the
+ * provider's read side actually filters on. That is exactly how `listManaged`
+ * shipped writing `"true"` and querying `"1"` — returning `[]` for every Machine
+ * Harbor had ever created — with a green suite. A store that only echoes back what
+ * it was given cannot be fooled that way: if the two sides disagree, nothing comes
+ * back, which is the real bug rather than a restatement of it.
+ */
+function statefulFly() {
+	const machines: Array<{ id: string; state: string; config: Record<string, unknown> }> = [];
+	let next = 1;
+	const handler: Handler = (url, init) => {
+		if ((init.method ?? "GET") === "POST") {
+			const body = JSON.parse(init.body ?? "{}") as { config: Record<string, unknown> };
+			const machine = { id: `m-${next++}`, state: "started", config: body.config };
+			machines.push(machine);
+			return { status: 200, body: machine };
+		}
+		// `?metadata.<key>=<value>` — apply it exactly as Fly would, so a provider
+		// whose server-side query disagrees with its write side gets nothing back.
+		const query = url.includes("?") ? new URLSearchParams(url.slice(url.indexOf("?") + 1)) : null;
+		let matching = machines;
+		for (const [key, value] of query ?? []) {
+			if (!key.startsWith("metadata.")) continue;
+			const metaKey = key.slice("metadata.".length);
+			matching = matching.filter(
+				(m) => (m.config.metadata as Record<string, string> | undefined)?.[metaKey] === value,
+			);
+		}
+		return { status: 200, body: matching };
+	};
+	return provider(handler);
+}
+
+describe("fly.listManaged", () => {
+	it("finds a Machine it just created — the write and read sides must agree", async () => {
+		const { fly } = statefulFly();
+		const created = await fly.create(config());
+
+		const managed = await fly.listManaged();
+		expect(managed.map((m) => m.externalId)).toEqual([created.externalId]);
+		expect(managed[0]?.attemptId).toBe("att-1");
+	});
+
+	it("does not report a Machine some other tool created in the same app", async () => {
+		const { fly } = provider(() => ({
+			status: 200,
+			body: [{ id: "not-ours", state: "started", config: { metadata: {} } }],
+		}));
+		expect(await fly.listManaged()).toEqual([]);
+	});
+
+	it("THROWS rather than returning [] when Fly is unreachable", async () => {
+		const throwing = flyProvider({
+			token: "t",
+			appName: "a",
+			fetch: (async () => {
+				throw new Error("ECONNREFUSED");
+			}) as unknown as typeof fetch,
+		});
+		await expect(throwing.listManaged()).rejects.toMatchObject({ errorType: "transient" });
+	});
+
+	it("THROWS rather than returning [] on a 500", async () => {
+		await expect(provider(() => ({ status: 500, body: {} })).fly.listManaged()).rejects.toMatchObject({
+			errorType: "transient",
+		});
+	});
+});
+
 describe("fly.stop — idempotent", () => {
 	it("reports stopped, absent and already_stopped without throwing", async () => {
 		expect(await provider(() => ({ status: 200, body: {} })).fly.stop("m1")).toBe("stopped");

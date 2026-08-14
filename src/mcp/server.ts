@@ -60,15 +60,33 @@ function rpcError(res: Response, status: number, code: number, message: string):
 }
 
 /**
- * The port every doc, the Settings page and scripts/agents.ts already name.
+ * `HARBOR_MCP_PORT` before `PORT`, and the order is load-bearing.
  *
- * This was 8787 while six other references said 8788 and nothing set PORT, so
- * the documented happy path — `npm run mcp`, paste the Settings snippet — was
- * ECONNREFUSED on the first tool call. Exported so the other call sites derive
- * from it instead of restating it.
+ * Render and Railway inject `PORT` into every service they run, and Fly's `[env]`
+ * block is shared across all `[processes]`. On any of the three, a worker that
+ * reads `PORT` first binds the *web* port — so it either collides with the web
+ * process or answers health checks meant for the dashboard, and the failure
+ * reads as "the MCP server is down" with nothing in the logs about why.
+ * `HARBOR_MCP_PORT` is the escape hatch that lets one shared environment address
+ * two processes; `PORT` stays supported so a single-process deployment still
+ * works with no extra configuration.
  */
 export const DEFAULT_MCP_PORT = 8788;
-const PORT = Number(process.env.PORT ?? DEFAULT_MCP_PORT);
+const PORT = Number(process.env.HARBOR_MCP_PORT ?? process.env.PORT ?? DEFAULT_MCP_PORT);
+
+/**
+ * Loopback by default. `listen(PORT)` alone bound every interface, which on a
+ * laptop on a shared network exposes an endpoint whose only auth is a bearer
+ * token to anyone who can reach the host.
+ *
+ * The container case is handled by the image (`ENV HOST=0.0.0.0` in the
+ * Dockerfile), not by changing this default — inside a container `0.0.0.0` binds
+ * only that container's network namespace, and what is actually reachable is
+ * decided by which ports are published. So the safe default and the working
+ * container are both available, and neither is traded for the other.
+ * `HARBOR_MCP_HOST` exists for the same shared-environment reason as the port.
+ */
+const HOST = process.env.HARBOR_MCP_HOST ?? process.env.HOST ?? "127.0.0.1";
 
 
 
@@ -192,12 +210,11 @@ app.all("/agent/:sandboxId/mcp", async (req: Request, res: Response) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-	// Loopback by default. The previous `listen(PORT)` bound every interface, which
-	// on a laptop on a shared network exposes an endpoint whose only auth is a
-	// bearer token, to anyone who can reach the host. Set HOST=0.0.0.0 to publish
-	// it deliberately.
-	app.listen(PORT, process.env.HOST ?? "127.0.0.1", () => {
-		console.log(`harbor mcp on http://localhost:${PORT}/mcp`);
+	app.listen(PORT, HOST, () => {
+		// The bind address, not a hardcoded `localhost`. An operator who forgot
+		// HOST in a container needs the log to say `127.0.0.1` — that one line is
+		// the difference between "why is nothing reaching my MCP server" and a fix.
+		console.log(`harbor mcp on http://${HOST}:${PORT}/mcp`);
 		console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
 	});
 
@@ -208,7 +225,11 @@ if (process.env.NODE_ENV !== "test") {
 	// Failing loudly at startup with both variable names is much kinder. The same
 	// call emits the SCM-attribution warning ADR 0004 promises at deploy time.
 	try {
-		runStartupChecks();
+		// The addressing and database-TLS warnings are returned rather than logged by
+		// the checks themselves, so that a test can assert their text without
+		// capturing stdout. Printing them is therefore the caller's job.
+		const { warnings } = runStartupChecks();
+		for (const warning of warnings) console.warn(`\nharbor: ${warning}\n`);
 	} catch (error) {
 		console.error(`\n${(error as Error).message}\n`);
 		process.exit(1);

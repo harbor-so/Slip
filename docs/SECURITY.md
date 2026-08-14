@@ -191,32 +191,53 @@ cannot be resolved is refused rather than guessed at.
 Harbor's provider abstraction spans a real range of isolation, and the range is
 wide enough that it must be stated rather than implied.
 
-The thirteen providers fall into three groups, and the group is what matters for
-a security review — not the vendor's name.
+| Tier | Providers | Boundary | Safe for |
+|---|---|---|---|
+| None | `local` | The agent runs as the server user, on the server's filesystem and network. | Your own laptop, your own repo. Nothing else. |
+| Container | `docker`, `modal`, `daytona`, `cloudflare`, `northflank` | Kernel shared with the host or the vendor's node. `modal` is gVisor-isolated, a stronger container boundary than the default — but still not a VM. | A single-tenant deployment; for the hosted four, whatever the vendor's own multi-tenancy is worth. |
+| VM / microVM | `fly`, `morph`, `blaxel`, `codesandbox`, `vercel` | Hardware virtualisation — a VM or microVM per sandbox. | The strongest boundary Harbor can offer. |
+| Unrecorded | `e2b`, `runloop` | Both vendors advertise microVM isolation, and Harbor's integration neither states nor verifies it. | Treat it as the vendor's claim until somebody confirms it. |
 
-| Provider | Boundary | Runs on |
-|---|---|---|
-| `local` | **None.** The agent runs as the server user, on the server's filesystem and network. | Your host |
-| `docker` | Container. Kernel shared with the host. | Your host |
-| `e2b`, `daytona`, `modal`, `runloop`, `northflank`, `cloudflare` | Container, in the vendor's cloud. | The vendor's infrastructure |
-| `fly`, `morph`, `blaxel`, `codesandbox`, `vercel` | Hardware virtualisation — a VM or microVM per sandbox. | The vendor's infrastructure |
+Each tier comes from what the provider module itself documents
+(`src/sandbox/providers/*.ts`), because that is the only claim this repository can
+be held to. **Do not infer a tier from the vendor's marketing.** An earlier version
+of this table put `modal` and `daytona` in the VM row and `codesandbox` in the
+container row; `modal.ts` says "a real, gVisor-isolated container", `daytona.ts`
+says "containers booted from a snapshot", and `codesandbox.ts` says "a hosted
+micro-VM sandbox". All three were backwards, in the document a reviewer reads to
+decide whether the boundary is good enough.
 
-The authoritative list is `SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`,
-which contains no stubs.
+The authoritative list is `SANDBOX_PROVIDER_NAMES` in
+`src/sandbox/registry.ts` — a second list in prose is a list that rots, and this
+table said "`local` and `docker` are the ONLY shipped providers" for three
+releases after that stopped being true.
 
-Two things follow, and they are in tension. Every provider with a hardware
-virtualisation boundary buys it by running your source code on somebody else's
-hardware — which is the opposite of the trade a self-hosted deployment is usually
-making. **A provider that gives a VM boundary inside your own infrastructure does
-not exist yet.** If that is your requirement, the honest answer today is `docker`
-on a dedicated host, and the contract test suite in
-`src/sandbox/providers/provider-contract.test.ts` is what would prove a
-contributed Kubernetes or Firecracker backend correct.
+One thing follows that the tiers alone do not say. Every provider with a hardware
+virtualisation boundary buys it by running your source on somebody else's
+hardware, which is the opposite of the trade a self-hosted deployment is usually
+making. **A VM boundary inside your own infrastructure does not exist yet.** If
+that is the requirement, the honest answer today is `docker` on a dedicated host,
+and the contract suite in `src/sandbox/providers/provider-contract.test.ts` is
+what would prove a contributed Kubernetes or Firecracker backend correct.
 
-Choosing a remote provider is a decision about where your code and your
-credentials go, so make it deliberately rather than by copying a config. Each one
-also brings a vendor's own tenancy model, which Harbor does not audit and cannot
-compensate for.
+**Choosing a remote provider moves your secrets across a vendor boundary.** This
+is the sentence this document most needed and did not contain. `buildSandboxEnv`
+(`src/sandbox/env.ts`) resolves repository secrets and injects them **decrypted**
+into the box's environment, because that is the only way an agent can use them.
+On `docker` those plaintext values never leave your host. On any remote provider
+they are transmitted to, and held in memory by, a third party — and Harbor cannot
+verify a vendor's isolation claim, only repeat it. A stronger *isolation* tier and
+a smaller *trust* surface are not the same axis, and for some deployments `docker`
+on a dedicated host is the right answer precisely because it is the weaker one.
+
+**The `cloudflare` provider's reconciliation is weaker than the other ten.** Its
+attempt index is a Cloudflare KV lookup
+(`integrations/cloudflare-sandbox-worker/src/index.ts`), and KV reads are
+eventually consistent with edge-cached negative results. A `findByAttemptId`
+issued shortly after `create` can therefore miss a box that genuinely exists,
+which is the fail-open direction: the caller may start a second sandbox on the
+same branch. Every other provider answers that question from a strongly
+consistent list.
 
 `local` is off unless `HARBOR_ENABLE_RUNNER=1` and `HARBOR_WORKSPACE_DIR` are
 both set, the runtime must be one of a known set of binaries, and the prompt is
@@ -229,6 +250,29 @@ on top.
 whole product without a vendor relationship. It is a container, not a VM: a
 kernel escape reaches the host. For a single-tenant deployment on a dedicated
 host that is a reasonable trade, and for anything else it is not.
+
+### Running Harbor itself in a container with the docker socket
+
+`docker-compose.prod.yml` and `deploy/k8s/` run the control plane in a container,
+and the `docker` provider needs the daemon. Mounting `/var/run/docker.sock` into
+the Harbor container **is root on that host**, laundered through a process that
+executes attacker-influenced text as instructions. The socket has no scopes: a
+process that can reach it can start a privileged container with the host root
+filesystem bind-mounted.
+
+Both files ship with that mount commented out, deliberately. If you uncomment it:
+
+- run Harbor on a host or node pool that does nothing else;
+- do not run it as root to reach the socket — the image runs as uid 10001, and the
+  supported route is `group_add` with the host's docker gid;
+- prefer a remote provider, which is why `deploy/k8s/configmap.yaml` defaults to
+  one. Letting a vendor own the isolation boundary is the trade this whole section
+  is about.
+
+On Kubernetes specifically: do not mount the node's socket into the Harbor pod.
+A first-class Kubernetes Job provider does not exist yet, and the provider
+contract suite (`src/sandbox/providers/provider-contract.test.ts`) is what would
+prove one correct.
 
 ---
 

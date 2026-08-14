@@ -57,6 +57,80 @@ function runtimeFor(value: string | null | undefined): string {
 	return value && (AGENT_RUNTIMES as readonly string[]).includes(value) ? value : DEFAULT_RUNTIME;
 }
 
+export type ResumeVerdict =
+	| { resume: true; token: string }
+	| {
+			resume: false;
+			reason: "no_token" | "fresh_boot" | "runtime_changed";
+			/** Non-null when the user should be told their agent lost its context. */
+			notice: string | null;
+	  };
+
+/**
+ * Whether a new box may be handed the previous box's conversation id.
+ *
+ * Pure, and separated from the query for it, because the wrong answer here is
+ * silent in both directions and the boundary is not obvious.
+ *
+ * **`--resume` reads a transcript from the sandbox's own disk.** The adapters say
+ * so — see the note on `replay` versus `reattach` in `adapters/claude-code.ts`.
+ * A `fresh` boot has never seen that file, so handing it an id makes the agent
+ * fail to start on a session that does not exist there: the first turn after
+ * every reboot dies, and the error names a session id nobody recognises. That is
+ * strictly worse than starting a new conversation, which at least works.
+ *
+ * A `snapshot_restore` boot brought the filesystem back, transcript included, so
+ * the id resolves and the conversation genuinely continues. That is the one case
+ * where re-injecting is correct.
+ *
+ * The runtime check is the third case and the easiest to miss: `sessions.runtime`
+ * is editable, so a session switched from Claude Code to OpenCode has a stored
+ * token its new agent cannot interpret.
+ *
+ * When the answer is no and a token existed, a **notice** comes back. A restart
+ * that silently drops the agent's context reads to the user as the model having
+ * got worse — which is the failure mode `transcript_gap` exists to make visible
+ * rather than leave somebody to infer.
+ */
+export function resumeTokenForBoot(input: {
+	storedToken: string | null;
+	storedRuntime: string | null;
+	sessionRuntime: string | null;
+	bootMode: string;
+}): ResumeVerdict {
+	const token = (input.storedToken ?? "").trim();
+	if (token === "") return { resume: false, reason: "no_token", notice: null };
+
+	if (input.bootMode !== "snapshot_restore") {
+		return {
+			resume: false,
+			reason: "fresh_boot",
+			notice:
+				"This session's previous sandbox was replaced and its filesystem did not come "
+				+ "with it, so the agent is starting a new conversation. Harbor's transcript above "
+				+ "is complete; the agent's own memory of it is not. Anything it needs to know "
+				+ "should be restated in the next prompt.",
+		};
+	}
+
+	// Compared against the runtime that minted it, not against a default. Absent
+	// on both sides means an older row from before the column existed; treating
+	// that as a match would hand an unknown agent somebody else's session id.
+	const minted = runtimeFor(input.storedRuntime);
+	if (minted !== runtimeFor(input.sessionRuntime)) {
+		return {
+			resume: false,
+			reason: "runtime_changed",
+			notice:
+				`This session's agent was changed to ${runtimeFor(input.sessionRuntime)}, and the `
+				+ `stored conversation belongs to ${minted}. The new agent starts fresh rather than `
+				+ "being handed an identifier from a different tool.",
+		};
+	}
+
+	return { resume: true, token };
+}
+
 /**
  * Build the injected environment for a session's sandbox.
  *
