@@ -150,30 +150,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker-container
 
+      # Plain `docker build` rather than buildx via build-push-action, and that is
+      # the point of this job rather than an oversight. The shim's first stage is
+      # `FROM ${HARBOR_SANDBOX_IMAGE_REF}`, and the default buildx builder runs in
+      # its own container with its own image store — it cannot see an image
+      # `load`ed into the host daemon, so it tries to PULL `harbor-sandbox:ci`
+      # from Docker Hub and fails with `pull access denied`. The host daemon
+      # resolves local tags, which is what makes chaining these two builds work.
       - name: Build the sandbox image locally
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: sandbox/Dockerfile
-          push: false
-          load: true
-          tags: harbor-sandbox:ci
-          cache-from: type=gha,scope=harbor-sandbox
+        run: docker build -f sandbox/Dockerfile -t harbor-sandbox:ci .
 
       - name: Build the Cloudflare shim on top of it
-        uses: docker/build-push-action@v6
-        with:
-          context: integrations/cloudflare-sandbox-worker
-          file: integrations/cloudflare-sandbox-worker/Dockerfile
-          push: false
-          load: true
-          tags: harbor-cloudflare-sandbox:ci
-          build-args: |
-            HARBOR_SANDBOX_IMAGE_REF=harbor-sandbox:ci
+        run: |
+          docker build \
+            --build-arg HARBOR_SANDBOX_IMAGE_REF=harbor-sandbox:ci \
+            -t harbor-cloudflare-sandbox:ci \
+            integrations/cloudflare-sandbox-worker
 
       # The Dockerfile asserts node and the supervisor at build time; this asserts
       # the one thing it cannot — that the path the Worker execs is executable.
