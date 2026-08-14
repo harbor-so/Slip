@@ -67,4 +67,7 @@ CLOUDFLARE_SANDBOX_WORKER_TOKEN=<the AUTH_TOKEN you set>
   write KV after starting a box (a create that dies mid-flight), that box is not
   discoverable. The index is written immediately after `startProcess`, keeping the
   window small, but it is not the atomic label-on-the-box that Fly/Docker get.
+  `findByAttemptId` is a direct keyed lookup (an `attempt:<id>` → external-id
+  entry), not a scan of the whole fleet, and a KV failure surfaces as a 5xx so the
+  Harbor side fails closed.
 - **No snapshot/resume.** Advertised `ephemeral`; a stopped box is gone.

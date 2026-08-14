@@ -24,6 +24,8 @@ interface Overrides {
 	get?: (id: string) => Promise<Box>;
 	list?: (opts: unknown) => Promise<{ sandboxes: Box[] }>;
 	listRunning?: () => Promise<{ vms: Array<{ id?: string }> }>;
+	/** Force the data-plane connect (env delivery) to fail. */
+	connect?: () => Promise<never>;
 }
 
 function fakeClient(over: Overrides = {}) {
@@ -32,14 +34,33 @@ function fakeClient(over: Overrides = {}) {
 		shutdown: [] as string[],
 		get: [] as string[],
 		list: [] as unknown[],
+		// Records the session env and the launched boot command — the env-delivery path.
+		boot: [] as Array<{ sessionEnv?: Record<string, string>; command: unknown; opts: unknown }>,
 	};
+	/** Decorate a fake box with the `connect` seam the provider uses to boot the agent. */
+	const withConnect = (box: Box) => ({
+		...box,
+		connect: async (session?: { env?: Record<string, string> }) => {
+			if (over.connect) await over.connect();
+			return {
+				commands: {
+					runBackground: async (command: unknown, opts: unknown) => {
+						calls.boot.push({ sessionEnv: session?.env, command, opts });
+						return { status: "RUNNING" };
+					},
+				},
+			};
+		},
+	});
 	const client: CodeSandboxClient = {
 		sandboxes: {
 			create: async (opts) => {
 				calls.create.push(opts);
-				return over.create ? over.create(opts) : { id: "sbx-new", tags: [], bootupType: "FORK" };
+				return withConnect(
+					over.create ? await over.create(opts) : { id: "sbx-new", tags: [], bootupType: "FORK" },
+				);
 			},
-			resume: async (id) => ({ id, bootupType: "RESUME" }),
+			resume: async (id) => withConnect({ id, tags: [], bootupType: "RESUME" }),
 			hibernate: async () => {},
 			shutdown: async (id) => {
 				calls.shutdown.push(id);
@@ -91,6 +112,45 @@ describe("codesandbox.create", () => {
 		expect(opts.tags).toContain("harbor_attempt:att-1");
 		expect(opts.tags).toContain("harbor_managed:true");
 		expect(opts.tags).toContain("harbor_session:sess-1");
+	});
+
+	it("delivers config.env by connecting a session and launching the boot command", async () => {
+		const { csb, calls } = provider();
+		await csb.create(config({ env: { HARBOR_CONTROL_URL: "https://cp.example", TOKEN: "t" } }));
+
+		expect(calls.boot).toHaveLength(1);
+		const boot = calls.boot[0]!;
+		// The env reaches the VM through the session AND the launched command.
+		expect(boot.sessionEnv).toMatchObject({ HARBOR_CONTROL_URL: "https://cp.example", TOKEN: "t" });
+		expect(boot.opts).toMatchObject({
+			env: { HARBOR_CONTROL_URL: "https://cp.example", TOKEN: "t" },
+			asGlobalSession: true,
+		});
+		expect(boot.command).toBe("/harbor/boot");
+	});
+
+	it("uses config.command as the boot command when the caller supplies one", async () => {
+		const { csb, calls } = provider();
+		await csb.create(config({ command: ["/usr/bin/agent", "--serve"] }));
+		expect(calls.boot[0]!.command).toEqual(["/usr/bin/agent", "--serve"]);
+	});
+
+	it("does not touch the data plane when there is no env and no command", async () => {
+		const { csb, calls } = provider();
+		await csb.create(config({ env: {} }));
+		expect(calls.boot).toHaveLength(0);
+	});
+
+	it("fails the create when env delivery cannot connect", async () => {
+		const broken = provider({
+			connect: async () => {
+				throw new Error("fetch failed");
+			},
+		});
+		await expect(broken.csb.create(config())).rejects.toMatchObject({
+			name: "SandboxProviderError",
+			errorType: "transient",
+		});
 	});
 
 	it("maps a bad template to invalid_config and an auth failure to unauthorized", async () => {

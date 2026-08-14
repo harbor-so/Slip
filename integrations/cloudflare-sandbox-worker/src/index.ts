@@ -107,9 +107,22 @@ function authorized(request: Request, env: Env): boolean {
 	return Boolean(env.AUTH_TOKEN) && token === env.AUTH_TOKEN;
 }
 
+/** Record keys are the external id (`harbor-<sandboxId>`); the attempt index is separate. */
+const RECORD_PREFIX = "harbor-";
+
 /** `harbor-<sandboxId>` is the DO name and the external id Harbor tracks. */
 function externalIdFor(sandboxId: string): string {
-	return `harbor-${sandboxId}`;
+	return `${RECORD_PREFIX}${sandboxId}`;
+}
+
+/**
+ * The direct attempt→externalId index key. Reconciliation asks "does a box for
+ * this attempt exist?" on the hot path, so it must be a keyed lookup, not a scan
+ * of every managed box. Namespaced away from the `harbor-` record keys so
+ * `listManaged`'s prefix scan never trips over it.
+ */
+function attemptKey(attemptId: string): string {
+	return `attempt:${attemptId}`;
 }
 
 async function readRecord(env: Env, externalId: string): Promise<IndexRecord | null> {
@@ -179,8 +192,12 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
 	// Written AFTER the box is starting, so a record always corresponds to a box
 	// that was at least asked to boot — never a phantom the sweep would chase.
 	await env.HARBOR_SANDBOX_INDEX.put(externalId, JSON.stringify(record));
+	// The direct attempt index, so findByAttemptId is a single keyed get. Written
+	// last; if a create dies before this, the box is still discoverable via the
+	// record (listManaged) even if not via the attempt index.
+	await env.HARBOR_SANDBOX_INDEX.put(attemptKey(body.attemptId), externalId);
 
-	return json({ ...inspectionFrom(record, "starting") }, 201);
+	return json(inspectionFrom(record, "starting"), 201);
 }
 
 async function handleInspect(env: Env, externalId: string): Promise<Response> {
@@ -202,19 +219,27 @@ async function handleStop(env: Env, externalId: string): Promise<Response> {
 		// already gone still means the box is reclaimed. Record the reason but do
 		// not fail the stop, which is called from retrying paths.
 		console.warn(`[cloudflare-shim] destroy(${externalId}) failed: ${(error as Error).message}`);
-		await env.HARBOR_SANDBOX_INDEX.delete(externalId);
+		await forget(env, record);
 		return json({ outcome: "already_stopped" });
 	}
-	await env.HARBOR_SANDBOX_INDEX.delete(externalId);
+	await forget(env, record);
 	return json({ outcome: "stopped" });
+}
+
+/** Remove both the record and its attempt index so no dangling key survives a stop. */
+async function forget(env: Env, record: IndexRecord): Promise<void> {
+	await env.HARBOR_SANDBOX_INDEX.delete(record.externalId);
+	await env.HARBOR_SANDBOX_INDEX.delete(attemptKey(record.attemptId));
 }
 
 async function listRecords(env: Env): Promise<IndexRecord[]> {
 	const records: IndexRecord[] = [];
 	let cursor: string | undefined;
 	// KV list is paginated; walk every page so a large fleet is fully enumerated.
+	// Scoped to the record prefix so the `attempt:` index keys are never parsed as
+	// records.
 	do {
-		const page = await env.HARBOR_SANDBOX_INDEX.list({ cursor });
+		const page = await env.HARBOR_SANDBOX_INDEX.list({ prefix: RECORD_PREFIX, cursor });
 		for (const key of page.keys) {
 			const record = await readRecord(env, key.name);
 			if (record) records.push(record);
@@ -225,11 +250,16 @@ async function listRecords(env: Env): Promise<IndexRecord[]> {
 }
 
 async function handleFindByAttempt(env: Env, attemptId: string): Promise<Response> {
-	const records = await listRecords(env);
-	const match = records.find((r) => r.attemptId === attemptId);
-	if (!match) return json({ sandbox: null });
-	const state = await probeState(env, match.externalId);
-	return json({ sandbox: inspectionFrom(match, state) });
+	// A direct keyed lookup, not a scan: the attempt index maps straight to the
+	// external id. A KV failure throws and becomes a 5xx, so the Harbor side fails
+	// CLOSED (throws `transient`) rather than reading a miss as "no such box".
+	const externalId = await env.HARBOR_SANDBOX_INDEX.get(attemptKey(attemptId));
+	if (!externalId) return json({ sandbox: null });
+	const record = await readRecord(env, externalId);
+	// A dangling attempt index whose record is already gone reads as absent.
+	if (!record) return json({ sandbox: null });
+	const state = await probeState(env, externalId);
+	return json({ sandbox: inspectionFrom(record, state) });
 }
 
 async function handleListManaged(env: Env): Promise<Response> {

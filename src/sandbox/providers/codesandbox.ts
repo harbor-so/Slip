@@ -31,12 +31,13 @@
  *      filters server-side, so reconciliation is a real query; we still re-match the tag
  *      client-side because the server-side tag filter's AND/OR semantics are unspecified.
  *
- *   2. **No env injection at create.** The SDK only accepts environment variables when
- *      *connecting a session* on the data plane (`sandbox.createSession({ env })`), which
- *      Harbor deliberately never touches. `config.env` therefore cannot be stamped onto
- *      the VM through the create/fork call — the box's own entrypoint must obtain the
- *      Harbor control-plane URL another way. **This is the one gap the orchestrator must
- *      double-check before wiring CodeSandbox into a live control loop.**
+ *   2. **Env is delivered through a session, not the create call.** Unlike a container
+ *      backend, CodeSandbox does not accept environment variables on the fork/create
+ *      call — env only reaches the VM through a data-plane session. So `create` forks the
+ *      template, then `connect`s a session carrying `config.env` and launches the box's
+ *      boot command in the background (`asGlobalSession`, so the variables are visible to
+ *      every process, not just that shell). See `boot` below. This is the one place the
+ *      provider touches the data plane; every other operation is pure control plane.
  *
  * `SandboxInfo` from the SDK carries no per-box VM run-state, so liveness for `inspect`
  * is derived best-effort from `listRunning()`; `find`/`list` lean on the server-side
@@ -78,6 +79,27 @@ const META = {
 	managed: "harbor_managed",
 } as const;
 
+/**
+ * A created/resumed sandbox handle — enough of the SDK's `Sandbox` to boot it.
+ * `connect` opens a data-plane session whose `env` reaches the running VM.
+ */
+export interface CodeSandboxHandle {
+	id: string;
+	bootupType?: string;
+	connect(session?: { env?: Record<string, string> }): Promise<CodeSandboxConnection>;
+}
+
+/** The data-plane surface Harbor uses to start the agent inside the VM. */
+export interface CodeSandboxConnection {
+	readonly commands: {
+		/** Non-blocking: starts a long-lived process and returns a handle immediately. */
+		runBackground(
+			command: string | string[],
+			opts?: { env?: Record<string, string>; asGlobalSession?: boolean },
+		): Promise<unknown>;
+	};
+}
+
 /** The slice of the `@codesandbox/sdk` surface Harbor uses, so a fake can be injected. */
 export interface CodeSandboxClient {
 	readonly sandboxes: {
@@ -86,8 +108,8 @@ export interface CodeSandboxClient {
 			tags?: string[];
 			hibernationTimeoutSeconds?: number;
 			title?: string;
-		}): Promise<{ id: string; bootupType?: string }>;
-		resume(id: string): Promise<{ id: string; bootupType?: string }>;
+		}): Promise<CodeSandboxHandle>;
+		resume(id: string): Promise<CodeSandboxHandle>;
 		hibernate(id: string): Promise<void>;
 		shutdown(id: string): Promise<void>;
 		get(id: string): Promise<CodeSandboxInfo>;
@@ -195,6 +217,18 @@ function classifyCodeSandboxError(err: unknown): ProviderErrorType {
 
 function metaTag(key: string, value: string): string {
 	return `${key}:${value}`;
+}
+
+/**
+ * The command that starts the Harbor agent inside a forked CodeSandbox template.
+ *
+ * The template must ship the Harbor agent; the default matches the entrypoint the
+ * other providers boot. Read inline from `process.env` so a self-hoster whose
+ * template starts the agent differently can override it without forking — never a
+ * module-level constant (the lint-config rule).
+ */
+function bootCommand(): string {
+	return process.env.CSB_BOOT_COMMAND?.trim() || "/harbor/boot";
 }
 
 /** Reads a Harbor value back out of the flat tag list, or `null` if absent. */
@@ -305,6 +339,10 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 			});
 		}
 
+		// Deliver env + start the agent. This is the data-plane step forced by the SDK:
+		// env does not travel on the create call, only on a session (see the header).
+		await this.boot(box, config);
+
 		return {
 			externalId: box.id,
 			provider: PROVIDER_NAME,
@@ -312,6 +350,38 @@ export class CodeSandboxSandboxProvider implements EphemeralProvider {
 			state: codesandboxState(box.bootupType ?? "running"),
 			createdAt: new Date().toISOString(),
 		};
+	}
+
+	/**
+	 * Connect a session carrying `config.env` and launch the box's boot command in
+	 * the background, so the forked VM actually receives `HARBOR_CONTROL_URL` and the
+	 * rest of the injected environment and starts its agent.
+	 *
+	 * `asGlobalSession` makes the variables visible to every process in the VM, not
+	 * just this shell. `runBackground` returns immediately — the agent is long-lived,
+	 * so create must not block on it.
+	 *
+	 * Skipped only when there is nothing to inject and no explicit command (the
+	 * contract suite's throwaway boxes), where the template's own entrypoint suffices.
+	 * A boot failure throws: the box carries the attempt tag and the orphan sweep will
+	 * reap it, and the spawn saga must not treat a box whose agent never started as a
+	 * healthy sandbox.
+	 */
+	private async boot(box: CodeSandboxHandle, config: CreateSandboxConfig): Promise<void> {
+		const hasEnv = Object.keys(config.env).length > 0;
+		const hasCommand = Boolean(config.command && config.command.length > 0);
+		if (!hasEnv && !hasCommand) return;
+
+		const command: string | string[] = hasCommand ? config.command! : bootCommand();
+		try {
+			const connection = await box.connect({ env: config.env });
+			await connection.commands.runBackground(command, {
+				env: config.env,
+				asGlobalSession: true,
+			});
+		} catch (cause) {
+			throw this.wrap("create", cause);
+		}
 	}
 
 	async inspect(externalId: string): Promise<SandboxInspection | null> {
