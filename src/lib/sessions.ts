@@ -143,6 +143,14 @@ export async function queuePrompt(input: {
 	 * refused by the sandbox's identity check.
 	 */
 	authorEmail?: string | null;
+	/**
+	 * The signed-in user behind the prompt, when there is one. This is the
+	 * identity whose OAuth token opens the pull request for the resulting work,
+	 * which is why it is stored rather than re-derived from `authorEmail` later:
+	 * `users.email` is nullable and not unique, and a near-miss there would open a
+	 * pull request in the wrong person's name.
+	 */
+	authorUserId?: string | null;
 	body: string;
 }) {
 	const body = input.body.trim();
@@ -168,6 +176,7 @@ export async function queuePrompt(input: {
 				author: input.author,
 				authorKind: input.authorKind ?? "human",
 				authorEmail: input.authorEmail ?? null,
+				authorUserId: input.authorUserId ?? null,
 				body,
 				seq,
 			})

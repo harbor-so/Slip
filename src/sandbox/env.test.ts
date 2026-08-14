@@ -14,7 +14,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { db, sql } from "../db/index.js";
 import { orgs, repos, secrets, sessionRepos, sessions } from "../db/schema.js";
 import { encrypt } from "../lib/crypto.js";
-import { buildSandboxEnv } from "./env.js";
+import { buildSandboxEnv, resumeTokenForBoot } from "./env.js";
 
 let orgId: string;
 
@@ -78,5 +78,76 @@ describe("buildSandboxEnv", () => {
 		const env = await buildSandboxEnv(session);
 		expect(env.DATABASE_URL).toBe("postgres://x");
 		expect(JSON.parse(env.HARBOR_REPOS!)).toHaveLength(2); // the real list, not the secret's "[]"
+	});
+});
+
+/**
+ * The rule: an agent's conversation may only be resumed into a box that still
+ * has the transcript on disk.
+ *
+ * Both wrong answers are silent. Withhold a token that would have worked and the
+ * agent quietly forgets a long conversation; hand one to a box that has never
+ * seen the transcript and its first turn dies on a session id nobody recognises.
+ */
+describe("resumeTokenForBoot", () => {
+	const stored = { storedToken: "sess_a91", storedRuntime: "claude-code", sessionRuntime: "claude-code" };
+
+	it("resumes on a snapshot restore, which is the only boot that brings the disk back", () => {
+		expect(resumeTokenForBoot({ ...stored, bootMode: "snapshot_restore" })).toEqual({
+			resume: true,
+			token: "sess_a91",
+		});
+	});
+
+	it("withholds on a fresh boot and says so, rather than failing the first turn", () => {
+		// `--resume` reads a transcript from the sandbox's own filesystem. On a fresh
+		// box that file has never existed, so passing the id makes the agent fail to
+		// start on a session that is not there.
+		const verdict = resumeTokenForBoot({ ...stored, bootMode: "fresh" });
+		expect(verdict.resume).toBe(false);
+		if (verdict.resume) throw new Error("unreachable");
+		expect(verdict.reason).toBe("fresh_boot");
+		// And the user is told. A silent reset reads as the model having got worse.
+		expect(verdict.notice).toContain("new conversation");
+	});
+
+	it("withholds when the session's agent was changed after the token was minted", () => {
+		const verdict = resumeTokenForBoot({
+			...stored,
+			sessionRuntime: "opencode",
+			bootMode: "snapshot_restore",
+		});
+		expect(verdict.resume).toBe(false);
+		if (verdict.resume) throw new Error("unreachable");
+		expect(verdict.reason).toBe("runtime_changed");
+		expect(verdict.notice).toContain("opencode");
+	});
+
+	it("says nothing at all when there was never a token to lose", () => {
+		// The ordinary first boot of every session. A notice here would put a scary
+		// line on the timeline of a session that has lost nothing.
+		for (const storedToken of [null, "", "   "]) {
+			const verdict = resumeTokenForBoot({ ...stored, storedToken, bootMode: "fresh" });
+			expect(verdict.resume).toBe(false);
+			if (verdict.resume) throw new Error("unreachable");
+			expect(verdict.reason).toBe("no_token");
+			expect(verdict.notice).toBeNull();
+		}
+	});
+
+	it("treats an unset stored runtime as the default rather than as a match for anything", () => {
+		// Rows written before the column existed. Absent must resolve to the same
+		// default `runtimeFor` uses, so it matches claude-code and nothing else.
+		expect(
+			resumeTokenForBoot({ ...stored, storedRuntime: null, bootMode: "snapshot_restore" }).resume,
+		).toBe(true);
+		expect(
+			resumeTokenForBoot({
+				...stored,
+				storedRuntime: null,
+				sessionRuntime: "codex",
+				bootMode: "snapshot_restore",
+			}).resume,
+		).toBe(false);
 	});
 });

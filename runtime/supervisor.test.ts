@@ -25,6 +25,7 @@ import type { OutboundEvent } from "./bridge.js";
 import {
 	configureGit,
 	createResumeTokenAccumulator,
+	pushWorkingBranch,
 	parseRepos,
 	readSupervisorConfig,
 	runCommand,
@@ -717,5 +718,172 @@ describe("configureGit", () => {
 		const env = gitEnv();
 		await configureGit(supervisorConfig({ repos: [{ name: "app", url: "not a url" }] }), env);
 		expect(env.HARBOR_SCM_HOST).toBeUndefined();
+	});
+});
+
+/**
+ * The push, against real git repositories on disk.
+ *
+ * A fake here would prove nothing: the properties worth asserting are that the
+ * commits actually arrive on the named branch of the actual remote, that the
+ * remote's other branches are untouched, and that a rejected push is reported
+ * rather than forced through. All three are properties of git, so git runs.
+ *
+ * No network and no credential helper: the "remote" is a bare repository in a
+ * temp directory, reached over a filesystem path.
+ */
+describe("pushWorkingBranch", () => {
+	function gitEnv(home: string): NodeJS.ProcessEnv {
+		return {
+			NODE_ENV: "test",
+			PATH: process.env.PATH,
+			HOME: home,
+			GIT_CONFIG_GLOBAL: join(home, "gitconfig"),
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_AUTHOR_NAME: "Rin",
+			GIT_AUTHOR_EMAIL: "rin@acme.test",
+			GIT_COMMITTER_NAME: "Harbor",
+			GIT_COMMITTER_EMAIL: "bot@harbor.test",
+		};
+	}
+
+	const run = (cwd: string, env: NodeJS.ProcessEnv, args: string[]) =>
+		runCommand("git", args, { cwd, env, timeoutMs: 20_000 });
+
+	/** A bare remote with one commit on `main`, and a clone of it with the agent's work. */
+	async function workspace(options: { commits?: number } = {}) {
+		const home = tempDir("harbor-push-home-");
+		const env = gitEnv(home);
+		const remote = tempDir("harbor-push-remote-");
+		const seed = tempDir("harbor-push-seed-");
+		const clone = tempDir("harbor-push-clone-");
+
+		await run(remote, env, ["init", "--bare", "--initial-branch=main", "."]);
+
+		await run(seed, env, ["init", "--initial-branch=main", "."]);
+		writeFileSync(join(seed, "README.md"), "base\n");
+		await run(seed, env, ["add", "."]);
+		await run(seed, env, ["commit", "-m", "base"]);
+		await run(seed, env, ["remote", "add", "origin", remote]);
+		await run(seed, env, ["push", "origin", "main"]);
+
+		await run(clone, env, ["clone", remote, "."]);
+		for (let index = 0; index < (options.commits ?? 1); index += 1) {
+			writeFileSync(join(clone, `fix-${index}.txt`), `work ${index}\n`);
+			await run(clone, env, ["add", "."]);
+			await run(clone, env, ["commit", "-m", `agent commit ${index}`]);
+		}
+
+		return { env, remote, clone };
+	}
+
+	const invocation = (pushBranch: string | null) => ({
+		promptId: "11111111-1111-4111-8111-111111111111",
+		seq: 1,
+		body: "do the thing",
+		identity: { mode: "agent-only" } as const,
+		timeoutMs: 10_000,
+		pushBranch,
+		baseBranch: "main",
+	});
+
+	const remoteBranches = async (remote: string, env: NodeJS.ProcessEnv) =>
+		(await run(remote, env, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).output
+			.trim()
+			.split("\n")
+			.filter(Boolean);
+
+	it("pushes the agent's commits to the named branch and reports the sha", async () => {
+		const { env, remote, clone } = await workspace({ commits: 2 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(await remoteBranches(remote, env)).toEqual(
+			expect.arrayContaining(["main", "harbor/lse_7f3a"]),
+		);
+
+		const pushed = bridge.events.find((event) => event.type === "branch_pushed");
+		expect(pushed).toBeDefined();
+		const payload = pushed!.payload as Record<string, unknown>;
+		expect(payload.branch).toBe("harbor/lse_7f3a");
+		expect(payload.commits).toBe(2);
+		expect(payload.uncommitted_changes).toBe(false);
+		expect(String(payload.commit_sha)).toMatch(/^[0-9a-f]{40}$/);
+
+		// The base is untouched. A push that moved `main` would be the worst
+		// possible outcome of a background agent.
+		const mainTip = await run(remote, env, ["rev-parse", "main"]);
+		const seedTip = await run(clone, env, ["rev-parse", "origin/main"]);
+		expect(mainTip.output.trim()).toBe(seedTip.output.trim());
+	});
+
+	it("emits nothing when the agent committed nothing", async () => {
+		const { env, remote, clone } = await workspace({ commits: 0 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		expect(await remoteBranches(remote, env)).toEqual(["main"]);
+	});
+
+	it("pushes committed work and flags the edits the agent left behind", async () => {
+		const { env, clone } = await workspace({ commits: 1 });
+		writeFileSync(join(clone, "half-done.txt"), "not committed\n");
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		const pushed = bridge.events.find((event) => event.type === "branch_pushed");
+		expect((pushed!.payload as Record<string, unknown>).uncommitted_changes).toBe(true);
+	});
+
+	it("does nothing at all when no branch was sent with the prompt", async () => {
+		const { env, remote, clone } = await workspace({ commits: 1 });
+		const bridge = sink();
+
+		await pushWorkingBranch(invocation(null), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		expect(await remoteBranches(remote, env)).toEqual(["main"]);
+	});
+
+	it("reports a rejected push instead of forcing it", async () => {
+		// A non-fast-forward means something else wrote to this branch, which the
+		// fencing token is supposed to have made impossible. Overwriting somebody's
+		// commits is not an acceptable response to a violated guarantee.
+		const { env, remote, clone } = await workspace({ commits: 1 });
+		const other = tempDir("harbor-push-other-");
+		await run(other, env, ["clone", remote, "."]);
+		writeFileSync(join(other, "theirs.txt"), "someone else\n");
+		await run(other, env, ["add", "."]);
+		await run(other, env, ["commit", "-m", "theirs"]);
+		await run(other, env, ["push", "origin", "HEAD:refs/heads/harbor/lse_7f3a"]);
+		const theirTip = (await run(remote, env, ["rev-parse", "harbor/lse_7f3a"])).output.trim();
+
+		const bridge = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, bridge);
+
+		expect(bridge.events.some((event) => event.type === "branch_pushed")).toBe(false);
+		const failure = bridge.events.find(
+			(event) => (event.payload as { code?: string } | undefined)?.code === "push.failed",
+		);
+		expect(failure).toBeDefined();
+		// Their commit is still the tip.
+		expect((await run(remote, env, ["rev-parse", "harbor/lse_7f3a"])).output.trim()).toBe(theirTip);
+	});
+
+	it("does not push twice when nothing new was committed between turns", async () => {
+		const { env, clone } = await workspace({ commits: 1 });
+		const first = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, first);
+		expect(first.events.some((event) => event.type === "branch_pushed")).toBe(true);
+
+		// `HEAD --not --remotes` returns to zero once the branch exists on the
+		// remote, so an idle second turn is silent rather than re-reporting a push.
+		const second = sink();
+		await pushWorkingBranch(invocation("harbor/lse_7f3a"), clone, env, second);
+		expect(second.events.some((event) => event.type === "branch_pushed")).toBe(false);
 	});
 });

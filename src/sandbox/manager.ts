@@ -89,7 +89,7 @@ import { type Executor, appendEvent } from "../lib/session-events.js";
 import { PUBLIC_URL_MISSING_MESSAGE, agentMcpUrl, publicUrl } from "../lib/urls.js";
 import { HarborError, notifyChange } from "../lib/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
-import { buildSandboxEnv } from "./env.js";
+import { buildSandboxEnv, resumeTokenForBoot } from "./env.js";
 import {
 	type DestructionAuthority,
 	type LeaseState,
@@ -890,6 +890,53 @@ async function reconcile(ctx: SpawnContext, row: SandboxRow, token: number): Pro
  * would read as an attempt in flight and block the session for a boot timeout over
  * a spend cap that will still be reached a second later.
  */
+/**
+ * `HARBOR_RESUME_TOKEN`, or nothing, plus the timeline note when it is nothing.
+ *
+ * The decision is `resumeTokenForBoot`; this is the query and the effects. The
+ * notice is emitted as a `log`-shaped session event rather than being swallowed,
+ * because a sandbox replacement that quietly resets the agent's memory is
+ * indistinguishable, from the room, from a model that has started ignoring the
+ * conversation.
+ */
+async function resumeEnvFor(sessionId: string, bootMode: string): Promise<Record<string, string>> {
+	const [session] = await db
+		.select({
+			orgId: sessions.orgId,
+			runtime: sessions.runtime,
+			token: sessions.agentResumeToken,
+			mintedBy: sessions.agentResumeRuntime,
+		})
+		.from(sessions)
+		.where(eq(sessions.id, sessionId))
+		.limit(1);
+	if (!session) return {};
+
+	const verdict = resumeTokenForBoot({
+		storedToken: session.token,
+		storedRuntime: session.mintedBy,
+		sessionRuntime: session.runtime,
+		bootMode,
+	});
+	if (verdict.resume) return { HARBOR_RESUME_TOKEN: verdict.token };
+
+	if (verdict.notice !== null) {
+		await appendEvent({
+			orgId: session.orgId,
+			sessionId,
+			type: "session_error",
+			actor: "harbor",
+			payload: {
+				kind: "agent_context_lost",
+				reason: verdict.reason,
+				boot_mode: bootMode,
+				message: verdict.notice,
+			},
+		});
+	}
+	return {};
+}
+
 async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise<SpawnOutcome> {
 	// Integer micro-USD, never a float. A fractional estimate would make `spent +
 	// estimate > cap` true for a rounding artefact, and worse, would accumulate
@@ -963,6 +1010,12 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			// attacker's control plane, which it would then hand its token to.
 			env: {
 				...(ctx.env ?? {}),
+				// The agent's own conversation id from the box this one replaces, and
+				// ONLY when this boot restored the filesystem its transcript lives on.
+				// Inside the Harbor-controlled spread rather than in `buildSandboxEnv`
+				// because the boot mode is not known until here — and a repository
+				// secret must not be able to hand the agent an arbitrary session id.
+				...(await resumeEnvFor(ctx.sessionId, boot.mode)),
 				HARBOR_CONTROL_URL: controlPlaneUrl(),
 				HARBOR_SANDBOX_ID: row.id,
 				HARBOR_SESSION_ID: ctx.sessionId,

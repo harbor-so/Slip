@@ -137,6 +137,9 @@ export interface TurnInvocation {
 	identity: GitIdentity;
 	traceId?: string;
 	timeoutMs: number;
+	/** Where to push what this turn commits. Null disables the push for this turn. */
+	pushBranch: string | null;
+	baseBranch: string | null;
 }
 
 /**
@@ -657,6 +660,11 @@ export class Bridge {
 				body: prompt.body,
 				identity,
 				timeoutMs: setting("agentTurnTimeoutMs"),
+				// Absent and explicitly null mean the same thing here — no branch — so a
+				// control plane too old to send the field degrades to "runs, pushes
+				// nothing" rather than to a crash or to a guessed branch name.
+				pushBranch: prompt.push_branch ?? null,
+				baseBranch: prompt.base_branch ?? null,
 			};
 			if (command.trace_id !== undefined) invocation.traceId = command.trace_id;
 
@@ -721,6 +729,15 @@ export function asCommand(value: unknown): BridgeCommand | null {
 			author: typeof fields.author === "string" ? fields.author : "",
 			author_email: typeof fields.author_email === "string" ? fields.author_email : null,
 			...(typeof fields.mode === "string" ? { mode: fields.mode } : {}),
+			// Anything that is not a non-empty string becomes null rather than being
+			// passed through. A branch of `""`, `0` or an object reaching the push
+			// would be a ref built from junk; null is the documented "do not push".
+			push_branch: typeof fields.push_branch === "string" && fields.push_branch !== ""
+				? fields.push_branch
+				: null,
+			base_branch: typeof fields.base_branch === "string" && fields.base_branch !== ""
+				? fields.base_branch
+				: null,
 		} as BridgeCommand["prompt"];
 	}
 	return command;

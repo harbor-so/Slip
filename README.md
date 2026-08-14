@@ -6,10 +6,6 @@ You @-mention it in Slack, or assign it a Linear issue, or type into a shared
 room. It boots an isolated sandbox, runs the coding agent you already use against
 your repository, and streams what it is doing to anyone who opens the link.
 
-(Opening the pull request is the one advertised step that is not wired up yet —
-the attribution machinery is written and tested, nothing calls it. See
-[Pull requests](#pull-requests-are-authored-by-the-human).)
-
 One `docker compose up`. No Cloudflare account, no Terraform, no sandbox vendor.
 
 And when you outgrow one host, the cloud path is additive rather than a rewrite:
@@ -268,17 +264,34 @@ Token counts come from the agent when it reports them and are marked
 number that disagrees with the real invoice is worse than a visible gap, because
 somebody makes a decision from it.
 
+A session is a conversation, and it survives its sandbox. The agent's own resume
+token is persisted on the session and re-injected — but **only into a box that
+restored the filesystem the transcript lives on**, because `--resume` reads a
+transcript from disk and handing that id to a fresh box makes the first turn die
+on a session that is not there. On a fresh boot the session says so on the
+timeline. A restart that silently drops the agent's memory is indistinguishable,
+from the room, from a model that has started ignoring you.
+
 ### Pull requests are authored by the human
 
-> **Not wired up yet.** Everything in this section is implemented in
-> `src/git/provider.ts` and covered by `src/git/attribution.test.ts`, and none of
-> it has a production caller: the sandbox does not report its push, so
-> `openPullRequest` is never invoked. The design below is what the code does when
-> something calls it, not what a deployment does today.
+The **supervisor** pushes the branch with short-lived brokered credentials once a
+turn commits anything, and reports it as `branch_pushed`. The control plane pins
+that branch to the session, records it, and opens the pull request **with the
+prompting user's own token**.
 
-The sandbox pushes a branch with short-lived brokered credentials and reports the
-name. The control plane opens the pull request **with the prompting user's own
-token**. GitHub does not let an author approve their own PR, so unreviewed agent
+Harbor pushes rather than asking the agent to, because "bring your own agent" goes
+down to an argv template: a generic model with tool access cannot be relied on to
+run `git push`, to use the right ref, or to push at all. A guarantee that holds
+only for the agents we tested is not one. Harbor does **not** commit on the
+agent's behalf — `GIT_AUTHOR_*` is the prompting human, so a commit Harbor made
+would carry their name on work they never wrote. Uncommitted leftovers are
+reported, not resolved.
+
+The branch is `harbor/lse_<claim_id>`, **pinned to the session on the first push**
+and reused after that. It has to be: `completeTurn` releases the lease whenever
+the queue drains, so a follow-up an hour later runs under a different claim id,
+and re-deriving would fork a second branch from base carrying none of the first
+turn's commits. GitHub does not let an author approve their own PR, so unreviewed agent
 code becomes structurally impossible rather than policy-prohibited.
 
 Author and committer are separate properties from separate mechanisms — the PR
@@ -383,8 +396,8 @@ get no Harbor tools.
 The guarantee is one Postgres partial unique index:
 
 ```sql
-create unique index one_active_claim_per_task
-  on claims (task_id) where released_at is null;
+create unique index one_active_lease_per_scope
+  on claims (org_id, scope) where released_at is null;
 ```
 
 Two agents racing both INSERT; Postgres serialises them and exactly one lands. The
@@ -421,11 +434,11 @@ value — an agent that opens forty pull requests nobody merges has produced non
 which is why the number counts merges and not openings. `artifacts.merged_at` is
 written only from a verified source-control webhook; no agent can move it.
 
-**Known gap:** nothing opens the pull request yet. `openPullRequest` and the
-attribution rules above are implemented and tested, but no production caller
-reaches them — the sandbox never reports a push, so no `pull_request` artifact is
-created and this metric reads `0/n` on every deployment. The plumbing behind it
-is real; the trigger is not written.
+The chain behind it runs end to end: a turn that commits is pushed by the
+supervisor, the push pins the session's branch and inserts a `branch` artifact,
+the pull request is opened as the prompting human, and its `html_url` is what a
+later merge webhook joins on. A session that pushes six times has one pull
+request, not six.
 
 ---
 

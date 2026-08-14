@@ -130,6 +130,7 @@ describe("what a tick actually does", () => {
 			"deadlines",
 			"devin",
 			"orphans",
+			"pull_requests",
 			"sessions",
 		]);
 	});

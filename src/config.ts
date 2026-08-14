@@ -132,6 +132,19 @@ export const SETTINGS = {
 		parse: asInt,
 	} satisfies Setting<number>,
 
+	gitPushTimeoutMs: {
+		env: "HARBOR_GIT_PUSH_TIMEOUT_MS",
+		fallback: 120_000,
+		derivation:
+			"Two minutes, and it bounds the local inspections as well as the push itself. "
+			+ "A push runs after the agent has already finished, so the user is watching a "
+			+ "turn that looks complete — a hang here reads as the product being stuck at "
+			+ "the very last step. Two minutes covers a first push of a large branch over a "
+			+ "slow link; beyond that the honest answer is to report the failure and leave "
+			+ "the commits in the box rather than to keep a finished turn open.",
+		parse: asInt,
+	} satisfies Setting<number>,
+
 	// -- Leases ----------------------------------------------------------------
 
 	leaseMinutes: {

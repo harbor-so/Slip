@@ -29,6 +29,7 @@ import { databaseUrl } from "../db/index.js";
 import { describeDatabaseTls } from "../db/tls.js";
 import { tickDevinPoll } from "../devin/poll.js";
 import { warnScmAttributionAtStartup } from "../git/credentials.js";
+import { sweepDeferredPullRequests } from "../git/pull-request.js";
 import { sweepProviderOrphans } from "../sandbox/orphans.js";
 import { sweepDeadlines } from "../sandbox/manager.js";
 import { tickAutomations } from "../triggers/automations.js";
@@ -48,6 +49,7 @@ export const LOOP_NAMES = [
 	"deadlines",
 	"sessions",
 	"compaction",
+	"pull_requests",
 	"orphans",
 	"devin",
 ] as const;
@@ -104,6 +106,18 @@ export function backgroundLoops(): LoopSpec[] {
 			name: "compaction",
 			intervalSetting: "compactionSweepIntervalMs",
 			run: (now) => compactEligibleSessions(now),
+		},
+		{
+			// Pull requests whose identity lookup was INDETERMINATE — the source-
+			// control host was unreachable, not the user unknown. That distinction is
+			// the whole reason `openPullRequest` has a `deferred` outcome, and it buys
+			// nothing unless something tries again: without this loop a ten-second
+			// blip permanently costs a session its pull request, and the branch sits
+			// pushed with nobody told to look at it. Refusals are NOT retried here;
+			// `sweepDeferredPullRequests` marks those terminal.
+			name: "pull_requests",
+			intervalSetting: "claimSweepIntervalMs",
+			run: () => sweepDeferredPullRequests(),
 		},
 		{
 			// The backstop for crash windows the saga cannot close on its own: a

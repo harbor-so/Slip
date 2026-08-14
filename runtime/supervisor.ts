@@ -48,6 +48,7 @@ import {
 	TUNNEL_ENV_PATH,
 	assertNever,
 	hookPolicy,
+	pushDecision,
 	resolveBootMode,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
@@ -90,6 +91,16 @@ export interface SupervisorConfig {
 	workspaceRoot: string;
 	repos: RepoSpec[];
 	requestedBootMode: string | null;
+	/**
+	 * The agent's own conversation id from a previous box, when one carries over.
+	 *
+	 * Injected **only** when this boot restored the filesystem that the agent's
+	 * transcript lives on — see `resumeTokenForBoot` in `src/sandbox/env.ts`.
+	 * `--resume <id>` reads a transcript from disk; handing an id to a box whose
+	 * disk has never seen it makes the agent fail to start on a session that is
+	 * not there, which is a worse outcome than starting fresh.
+	 */
+	resumeToken?: string;
 	/**
 	 * Base URL of the MCP server that serves `harbor-agent`, if this deployment
 	 * runs one.
@@ -185,6 +196,8 @@ export function readSupervisorConfig(env: NodeJS.ProcessEnv): ConfigResolution {
 	}
 	const agentMcpUrl = (env.HARBOR_AGENT_MCP_URL ?? "").trim().replace(/\/+$/, "");
 	if (agentMcpUrl !== "") config.agentMcpUrl = agentMcpUrl;
+	const resumeToken = (env.HARBOR_RESUME_TOKEN ?? "").trim();
+	if (resumeToken !== "") config.resumeToken = resumeToken;
 	return { kind: "ok", config };
 }
 
@@ -690,6 +703,116 @@ export function createResumeTokenAccumulator(
 }
 
 /**
+ * Push what the turn committed, and tell the control plane the branch.
+ *
+ * This is the producer of `branch_pushed`, and therefore the first half of the
+ * only path by which a session ever becomes a pull request. It lives in the
+ * supervisor rather than in the agent for one reason: **an agent that was never
+ * told about git must still produce a branch.** Harbor supports "bring your own
+ * agent" down to an argv template, and a generic model with tool access cannot be
+ * relied upon to run `git push`, to push to the right ref, or to push at all.
+ * Making the product's central guarantee contingent on that is how it becomes a
+ * guarantee that holds for the agents you tested and not for the one an adopter
+ * actually runs.
+ *
+ * Every fact the decision needs is gathered first and the decision is made in one
+ * pure call, so the reasoning is testable without a git binary. What happens here
+ * is only the effects.
+ *
+ * The push is **not forced**. A non-fast-forward rejection means something else
+ * has written to this branch — which the fencing token is supposed to have made
+ * impossible — and the correct response to a guarantee being violated is to stop
+ * and report, not to overwrite somebody's commits with `--force`.
+ */
+export async function pushWorkingBranch(
+	invocation: TurnInvocation,
+	workspace: string,
+	env: NodeJS.ProcessEnv,
+	bridge: BridgeSink,
+): Promise<void> {
+	const timeoutMs = setting("gitPushTimeoutMs");
+	const git = (args: string[]): Promise<RunResult> =>
+		runCommand("git", args, {
+			cwd: workspace,
+			// Stated, not inferred. Everything here but the push itself is local and
+			// needs no credential; the broker mints a write-scoped one only for the
+			// operation that actually writes, and validates the fencing token when it
+			// does — which is what stops a superseded box pushing at all.
+			env: { ...env, HARBOR_GIT_OPERATION: "push" },
+			timeoutMs,
+		});
+
+	const inRepo = await git(["rev-parse", "--is-inside-work-tree"]);
+	// `HEAD --not --remotes` is "committed here and on no remote". It needs no base
+	// branch, so it cannot be wrong about one; it returns to zero once pushed, so a
+	// second turn that commits nothing is silent; and after a snapshot restore it
+	// still counts what the previous box committed and never managed to send.
+	const ahead = await git(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+	const status = await git(["status", "--porcelain"]);
+
+	const verdict = pushDecision({
+		branch: invocation.pushBranch,
+		commits: Number.parseInt(ahead.output.trim(), 10),
+		dirty: status.output.trim() !== "",
+		repoPresent: inRepo.code === 0 && inRepo.output.trim() === "true",
+	});
+
+	if (!verdict.push) {
+		// A skip is a log, not a timeline event. "The agent made no commits" is the
+		// ordinary outcome of a question-answering turn, and putting it on the
+		// transcript would train everybody to ignore the line that matters.
+		bridge.emit({
+			type: "log",
+			payload: {
+				level: verdict.reason === "branch_malformed" ? "warning" : "info",
+				source: "supervisor",
+				code: "push.skipped",
+				reason: verdict.reason,
+				message: verdict.detail,
+				prompt_id: invocation.promptId,
+			},
+		});
+		return;
+	}
+
+	const result = await git(["push", "origin", `HEAD:refs/heads/${verdict.branch}`]);
+	if (result.code !== 0) {
+		// Loud, and on the timeline. A push that failed is work the user believes is
+		// safe and is not — the one failure here that must never be quiet.
+		bridge.emit({
+			type: "log",
+			payload: {
+				level: "error",
+				source: "supervisor",
+				code: "push.failed",
+				branch: verdict.branch,
+				timed_out: result.timedOut,
+				message: tail(result.output),
+				prompt_id: invocation.promptId,
+			},
+		});
+		return;
+	}
+
+	const head = await git(["rev-parse", "HEAD"]);
+	bridge.emit({
+		type: "branch_pushed",
+		payload: {
+			branch: verdict.branch,
+			base: invocation.baseBranch,
+			commit_sha: head.code === 0 ? head.output.trim() : null,
+			commits: verdict.commits,
+			// Reported rather than resolved. The control plane surfaces it so a human
+			// can see that the agent stopped mid-edit; Harbor does not commit on the
+			// agent's behalf, because a commit Harbor authored would carry the
+			// prompting human's name on work they never wrote.
+			uncommitted_changes: verdict.dirty,
+			prompt_id: invocation.promptId,
+		},
+	});
+}
+
+/**
  * Drive one turn through the adapter, translating its stdout into session events.
  *
  * The adapter owns the argv, the parsing and the interrupt signal; this owns the
@@ -706,7 +829,12 @@ export function createTurnRunner(
 ): { run: (invocation: TurnInvocation) => Promise<void>; interrupt: (kind: AgentInterrupt) => void } {
 	let active: ReturnType<typeof spawn> | null = null;
 	const workspace = join(config.workspaceRoot, config.repos[0]?.name ?? "");
-	let resumeToken: string | null = null;
+	// Seeded from the control plane rather than starting at null. Before this, the
+	// closure was the *only* home for the token, so every box replacement — an
+	// inactivity stop, a stale heartbeat, an execution timeout — silently started
+	// the agent's conversation over while Harbor's own transcript carried on
+	// looking continuous. The user reads that as the model having forgotten.
+	let resumeToken: string | null = config.resumeToken ?? null;
 
 	return {
 		interrupt(kind) {
@@ -821,6 +949,28 @@ export function createTurnRunner(
 			active = null;
 
 			resumeToken = resumeTokens.finish(resumeToken);
+
+			// Before `agent_finished`, deliberately. That event is what closes the
+			// turn — `completeTurn` runs on it, and when the queue is empty it hands
+			// the lease back. Pushing afterwards would race the next turn for the
+			// workspace and, worse, would report a branch under a lease that had
+			// already been released. A push that throws must not lose the turn's
+			// completion, so it is caught here rather than allowed to escape.
+			try {
+				await pushWorkingBranch(invocation, workspace, env, bridge);
+			} catch (error) {
+				bridge.emit({
+					type: "log",
+					payload: {
+						level: "error",
+						source: "supervisor",
+						code: "push.threw",
+						message: (error as Error).message,
+						prompt_id: invocation.promptId,
+					},
+				});
+			}
+
 			bridge.emit({
 				type: timedOut || code !== 0 ? "agent_failed" : "agent_finished",
 				payload: {
