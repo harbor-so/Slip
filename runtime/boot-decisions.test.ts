@@ -18,6 +18,7 @@ import { BOOT_MODES } from "../src/contracts/index.js";
 import {
 	TUNNEL_ENV_PATH,
 	TUNNEL_SANDBOX_ID_KEY,
+	pushDecision,
 	formatDotenv,
 	hookPolicy,
 	parseDotenv,
@@ -491,6 +492,102 @@ describe("reconnectDelayMs", () => {
 			const delay = reconnectDelayMs(input);
 			expect(Number.isFinite(delay)).toBe(true);
 			expect(delay).toBeGreaterThan(0);
+		}
+	});
+});
+
+describe("pushDecision", () => {
+	const base = { branch: "harbor/lse_7f3a", commits: 1, dirty: false, repoPresent: true };
+
+	it("pushes exactly when there is at least one commit not on a remote", () => {
+		// The whole product turns on this boundary: zero is a session that produces
+		// no pull request, one is a session that does.
+		expect(pushDecision({ ...base, commits: 0 }).push).toBe(false);
+		expect(pushDecision({ ...base, commits: 1 }).push).toBe(true);
+	});
+
+	it("names the branch it was given rather than deriving one", () => {
+		const verdict = pushDecision({ ...base, branch: "harbor/lse_c204" });
+		expect(verdict).toEqual({ push: true, branch: "harbor/lse_c204", commits: 1, dirty: false });
+	});
+
+	it("pushes committed work even when the agent left the tree dirty", () => {
+		// Harbor does NOT commit on the agent's behalf: `GIT_AUTHOR_*` is the
+		// prompting human, so a commit Harbor made would carry their name on work
+		// they never wrote. The dirt is reported, not resolved.
+		const verdict = pushDecision({ ...base, commits: 2, dirty: true });
+		expect(verdict).toEqual({ push: true, branch: base.branch, commits: 2, dirty: true });
+	});
+
+	it("distinguishes 'nothing committed' from 'nothing changed' in the reason it gives", () => {
+		const clean = pushDecision({ ...base, commits: 0, dirty: false });
+		const dirty = pushDecision({ ...base, commits: 0, dirty: true });
+		expect(clean.push).toBe(false);
+		expect(dirty.push).toBe(false);
+		if (clean.push || dirty.push) throw new Error("unreachable");
+		expect(clean.reason).toBe("nothing_to_push");
+		expect(dirty.reason).toBe("nothing_to_push");
+		// Same verdict, different sentence: "made no commits" sends somebody to the
+		// agent, "changed files but committed nothing" sends them to the diff.
+		expect(dirty.detail).toContain("committed nothing");
+		expect(clean.detail).not.toContain("committed nothing");
+	});
+
+	it("treats a missing branch as 'the feature is off', not as an error", () => {
+		for (const branch of [null, "", "   "]) {
+			const verdict = pushDecision({ ...base, branch });
+			expect(verdict.push).toBe(false);
+			if (verdict.push) throw new Error("unreachable");
+			expect(verdict.reason).toBe("no_branch");
+		}
+	});
+
+	it("refuses a branch that would not be a safe git ref", () => {
+		// The value reaches `git push origin HEAD:refs/heads/<branch>`. It arrives
+		// from the Harbor-controlled region of the prompt command, so this is defence
+		// in depth — but a ref built from junk is a failure nobody can read.
+		for (const branch of [
+			"-delete-everything",
+			"has space",
+			"harbor/lse_a..b",
+			"harbor//double",
+			"trailing/",
+			"branch.lock",
+			"ends.",
+			"../../etc/passwd",
+			"emoji🙂",
+		]) {
+			const verdict = pushDecision({ ...base, branch });
+			expect(verdict.push, branch).toBe(false);
+			if (verdict.push) throw new Error("unreachable");
+			expect(verdict.reason, branch).toBe("branch_malformed");
+		}
+	});
+
+	it("accepts the branch shapes Harbor actually produces", () => {
+		for (const branch of ["harbor/lse_7f3a", "harbor/lse_0f8c1d2e-3a4b-5c6d-7e8f-9a0b1c2d3e4f", "main"]) {
+			expect(pushDecision({ ...base, branch }).push, branch).toBe(true);
+		}
+	});
+
+	it("refuses before anything else when there is no repository", () => {
+		// Ordered first deliberately: with no work tree the commit count is
+		// meaningless, and reporting `nothing_to_push` would send somebody looking
+		// at the agent instead of at the clone that failed.
+		const verdict = pushDecision({ ...base, repoPresent: false, commits: 0, branch: null });
+		expect(verdict.push).toBe(false);
+		if (verdict.push) throw new Error("unreachable");
+		expect(verdict.reason).toBe("no_repo");
+	});
+
+	it("survives a commit count that could not be parsed rather than pushing on NaN", () => {
+		// `git rev-list --count` output goes through parseInt, and a failed git
+		// invocation yields NaN. NaN must not read as "some commits".
+		for (const commits of [Number.NaN, Number.POSITIVE_INFINITY, -3]) {
+			const verdict = pushDecision({ ...base, commits });
+			expect(verdict.push, String(commits)).toBe(false);
+			if (verdict.push) throw new Error("unreachable");
+			expect(verdict.reason, String(commits)).toBe("nothing_to_push");
 		}
 	});
 });

@@ -4,7 +4,9 @@ import { setting } from "../../../../../config.js";
 import type { SandboxEvent, SandboxEventType, SessionEventType } from "../../../../../contracts/index.js";
 import { SANDBOX_EVENT_TYPES } from "../../../../../contracts/index.js";
 import { db } from "../../../../../db/index.js";
-import { claims, sandboxes, sessions } from "../../../../../db/schema.js";
+import { artifacts, claims, sandboxes, sessions } from "../../../../../db/schema.js";
+import { openPullRequestForBranch } from "../../../../../git/pull-request.js";
+import { pinWorkingBranch, resolvePushBranch } from "../../../../../git/working-branch.js";
 import { assertNever } from "../../../../../sandbox/decisions.js";
 import { markSandboxReady, validateFence } from "../../../../../sandbox/manager.js";
 import { recordAgentUsage } from "../../../../../lib/cost.js";
@@ -265,6 +267,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 	let ignored = 0;
 	const finishes: Array<{ outcome: "completed" | "failed"; payload: Record<string, unknown> }> = [];
 	let readyReport: { bootMode: string | null } | null = null;
+	const pushes: Array<Record<string, unknown>> = [];
 
 	for (const event of events) {
 		// An unrecognised type is counted and skipped rather than failing the batch.
@@ -332,6 +335,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 			readyReport = { bootMode: typeof mode === "string" ? mode : null };
 		}
 
+		// `branch_pushed` is the third event that carries a STATE TRANSITION and not
+		// merely a timeline entry — alongside `boot_ready` above and `agent_finished`
+		// below. Before this, it mapped to an `artifact_created` row and stopped
+		// there: no branch was pinned, no artifact was inserted, and nothing ever
+		// called `openPullRequest`. The whole pull-request half of the product was
+		// unreachable because of the four lines that are now here.
+		if (event.type === "branch_pushed") pushes.push(payload);
+
 		if (event.type === "agent_finished" || event.type === "agent_failed") {
 			finishes.push({
 				outcome: event.type === "agent_finished" ? "completed" : "failed",
@@ -358,6 +369,25 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		events: appendable,
 	});
 
+	// Pushes are handled BEFORE the turn is closed, so the pull request link is on
+	// the timeline while the person who asked is still watching the turn run —
+	// rather than arriving after the room has already said the agent finished.
+	//
+	// A failure here never fails the ingest. The branch is pushed either way; the
+	// transcript is the priority; and `sweepDeferredPullRequests` picks up anything
+	// this pass could not finish.
+	for (const push of pushes) {
+		try {
+			await recordBranchPush({
+				orgId: auth.sandbox.orgId,
+				sessionId: auth.sandbox.sessionId,
+				payload: push,
+			});
+		} catch (error) {
+			console.error("[ingest] branch push recorded on the timeline but not opened:", error);
+		}
+	}
+
 	// The turn is closed *after* its events are on the timeline. The other order
 	// puts `prompt_finished` at a lower seq than the agent's last sentence, so a
 	// client that stops rendering at the finish marker loses the end of the answer.
@@ -377,6 +407,19 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		// uuid` and turn an authenticated caller's typo into a 500. A malformed id
 		// falls back to the oldest in-flight prompt, which is what this endpoint did
 		// for every event before this change.
+		// Recorded whether the turn completed or failed: a failed turn still advanced
+		// the agent's conversation, and resuming it is what lets the next prompt say
+		// "that didn't work, try the other way" and be understood.
+		try {
+			await rememberResumeToken({
+				orgId: auth.sandbox.orgId,
+				sessionId: auth.sandbox.sessionId,
+				payload: finish.payload,
+			});
+		} catch (error) {
+			console.error("[ingest] resume token not persisted (the turn is recorded):", error);
+		}
+
 		const promptId = finish.payload.prompt_id;
 		const namedPrompt = typeof promptId === "string" && PROMPT_UUID.test(promptId);
 		const completion = await completeTurn({
@@ -425,6 +468,143 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 		ignored,
 		through_seq: appended.length > 0 ? appended[appended.length - 1]!.seq : null,
 	});
+}
+
+/**
+ * A reported push becomes a pinned branch, an artifact, and a pull request.
+ *
+ * The order is the recovery story. The branch is pinned first, so a crash after
+ * this point cannot leave a later turn deriving a *second* branch from a newer
+ * lease. The artifact is written second, so the work is findable in the room even
+ * if the pull request never opens. The pull request is last, because it is the
+ * only step that depends on an external host and therefore the only one that can
+ * be slow or unavailable.
+ *
+ * Every field is read out of the payload by name and shape-checked. The sandbox
+ * wrote this object and the sandbox is not trusted — spreading it into a database
+ * row would let a compromised bridge choose its own branch, or its own repo.
+ */
+async function recordBranchPush(input: {
+	orgId: string;
+	sessionId: string;
+	payload: Record<string, unknown>;
+}): Promise<void> {
+	const reported = typeof input.payload.branch === "string" ? input.payload.branch.trim() : "";
+	if (reported === "") return;
+
+	// The repository is resolved from the session, never from the payload. A box
+	// that could name its own repo could have Harbor open a pull request against
+	// any repository the installation can reach.
+	const target = await resolvePushBranch(input.orgId, input.sessionId);
+	if (!target.repoId) return;
+
+	// AND SO IS THE BRANCH. The sandbox is told where to push on the prompt
+	// command; what it reports back is only an acknowledgement, and it is checked
+	// against the answer rather than believed. A box that could name its own
+	// branch could report `main`, and Harbor would pin `main` as the session's
+	// working branch — after which every later boot checks `main` out as the
+	// working branch and every later push from this session targets it. The
+	// credential broker cannot stop that: pushing to `main` is inside the scope of
+	// a legitimately minted write token. Only this comparison stops it.
+	//
+	// Once pinned, `target.branch` IS the pin, so a second push is checked against
+	// the same value the first one established.
+	if (target.branch === null || reported !== target.branch) {
+		console.error(
+			`[ingest] session ${input.sessionId} reported a push to ${JSON.stringify(reported)}, `
+				+ `which is not the branch it was given (${JSON.stringify(target.branch)}). Nothing was `
+				+ "pinned and no pull request was opened.",
+		);
+		return;
+	}
+
+	const pinned = await pinWorkingBranch({
+		sessionId: input.sessionId,
+		repoId: target.repoId,
+		branch: reported,
+	});
+
+	// The branch artifact is inserted once. A second push to the same branch — the
+	// ordinary case for a multi-turn session — updates a pull request that already
+	// exists and needs no new row.
+	const existing = await db
+		.select({ id: artifacts.id, payload: artifacts.payload })
+		.from(artifacts)
+		.where(
+			and(
+				eq(artifacts.orgId, input.orgId),
+				eq(artifacts.sessionId, input.sessionId),
+				eq(artifacts.kind, "branch"),
+			),
+		);
+	const already = existing.some(
+		(row) => (row.payload as { branch?: unknown } | null)?.branch === pinned,
+	);
+
+	if (!already) {
+		await db.insert(artifacts).values({
+			orgId: input.orgId,
+			sessionId: input.sessionId,
+			repoId: target.repoId,
+			kind: "branch",
+			title: pinned,
+			url: null,
+			payload: {
+				branch: pinned,
+				base: target.base,
+				commit_sha: typeof input.payload.commit_sha === "string" ? input.payload.commit_sha : null,
+				commits: typeof input.payload.commits === "number" ? input.payload.commits : null,
+				// Surfaced rather than silently dropped: the agent stopped with edits it
+				// never committed, and those edits are not in the branch.
+				uncommitted_changes: input.payload.uncommitted_changes === true,
+			},
+		});
+	}
+
+	await openPullRequestForBranch({
+		orgId: input.orgId,
+		sessionId: input.sessionId,
+		repoId: target.repoId,
+		branch: pinned,
+		base: target.base,
+		promptId: typeof input.payload.prompt_id === "string" ? input.payload.prompt_id : null,
+	});
+}
+
+/**
+ * Carry the agent's own conversation id across a sandbox replacement.
+ *
+ * Written from `agent_finished` on the fenced ingest path — the same payload this
+ * route already reads `prompt_id` out of — and read back by `resumeTokenForBoot`,
+ * which hands it to a new box **only** when that box restored the filesystem the
+ * transcript lives on.
+ *
+ * Stored with the runtime that minted it. A session's `runtime` column is
+ * editable, and a Claude Code session id handed to OpenCode's `--session` is an
+ * opaque first-turn failure rather than a useful resume.
+ */
+async function rememberResumeToken(input: {
+	orgId: string;
+	sessionId: string;
+	payload: Record<string, unknown>;
+}): Promise<void> {
+	const token = input.payload.resume_token;
+	// Null is meaningful and is NOT written: an adapter that reported no id this
+	// turn has not forgotten the thread, and overwriting a good token with null
+	// would lose the conversation on the next reboot. `createResumeTokenAccumulator`
+	// applies the same rule inside the box.
+	if (typeof token !== "string" || token.trim() === "") return;
+
+	const [session] = await db
+		.select({ runtime: sessions.runtime })
+		.from(sessions)
+		.where(and(eq(sessions.id, input.sessionId), eq(sessions.orgId, input.orgId)))
+		.limit(1);
+
+	await db
+		.update(sessions)
+		.set({ agentResumeToken: token.trim(), agentResumeRuntime: session?.runtime ?? null })
+		.where(and(eq(sessions.id, input.sessionId), eq(sessions.orgId, input.orgId)));
 }
 
 /**
