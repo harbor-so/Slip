@@ -26,6 +26,7 @@
 
 import { type SettingKey, setting, validateConfig } from "../config.js";
 import { warnScmAttributionAtStartup } from "../git/credentials.js";
+import { tickImageBuilds } from "../images/scheduler.js";
 import { sweepProviderOrphans } from "../sandbox/orphans.js";
 import { sweepDeadlines } from "../sandbox/manager.js";
 import { tickAutomations } from "../triggers/automations.js";
@@ -45,6 +46,7 @@ export const LOOP_NAMES = [
 	"sessions",
 	"compaction",
 	"orphans",
+	"images",
 ] as const;
 export type LoopName = (typeof LOOP_NAMES)[number];
 
@@ -106,6 +108,15 @@ export function backgroundLoops(): LoopSpec[] {
 			name: "orphans",
 			intervalSetting: "orphanSweepIntervalMs",
 			run: (now) => sweepProviderOrphans(now),
+		},
+		{
+			// Rebuilds per-repo prebuilt images on a cadence so sessions boot from a
+			// warm image with dependencies baked in. Off unless a repo opts in, and a
+			// no-op tick is one indexed scan, so it is cheap to run frequently. The
+			// advisory lock inside makes it safe on every replica.
+			name: "images",
+			intervalSetting: "imageTickIntervalMs",
+			run: (now) => tickImageBuilds(now),
 		},
 	];
 }

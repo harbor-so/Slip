@@ -9,7 +9,7 @@
 
 import { and, desc, eq, gte } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { apiKeys, connectors, digests, events, projects, tasks } from "../db/schema.js";
+import { apiKeys, connectors, digests, events, projects, repoImages, repos, tasks } from "../db/schema.js";
 
 export async function recentEvents(orgId: string, limit = 40) {
 	return db
@@ -89,4 +89,32 @@ export async function listApiKeys(orgId: string) {
 
 export async function listProjects(orgId: string) {
 	return db.select().from(projects).where(eq(projects.orgId, orgId)).orderBy(projects.name);
+}
+
+/**
+ * Prebuilt-image status per repo — the "last built" surface, the image analogue of a
+ * connector's `lastSyncedAt`.
+ *
+ * `imageRef` is null until the first success and `pausedReason` non-null when the repo
+ * auto-paused, so a page can derive a status pill without a separate query: paused if
+ * `pausedReason`, healthy if `imageRef`, otherwise pending its first build.
+ */
+export async function listRepoImages(orgId: string) {
+	return db
+		.select({
+			repoId: repoImages.repoId,
+			owner: repos.owner,
+			name: repos.name,
+			imageRef: repoImages.imageRef,
+			builtFromSha: repoImages.builtFromSha,
+			builtAt: repoImages.builtAt,
+			builtByProvider: repoImages.builtByProvider,
+			nextBuildAt: repoImages.nextBuildAt,
+			consecutiveFailures: repoImages.consecutiveFailures,
+			pausedReason: repoImages.pausedReason,
+		})
+		.from(repoImages)
+		.innerJoin(repos, eq(repoImages.repoId, repos.id))
+		.where(eq(repoImages.orgId, orgId))
+		.orderBy(desc(repoImages.builtAt));
 }

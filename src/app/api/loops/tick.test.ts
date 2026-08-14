@@ -128,6 +128,7 @@ describe("what a tick actually does", () => {
 			"claims",
 			"compaction",
 			"deadlines",
+			"images",
 			"orphans",
 			"sessions",
 		]);

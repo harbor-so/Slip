@@ -99,6 +99,20 @@ describe("validateConfig on the shipped defaults", () => {
 			);
 		});
 	});
+
+	it("image freshness cutoff default is at least the build interval it is derived from", () => {
+		withScrubbedEnv({}, () => {
+			expect(setting("imageMaxAgeMs")).toBeGreaterThanOrEqual(setting("imageBuildIntervalMs"));
+		});
+	});
+
+	it("image build timeout default covers a plain boot", () => {
+		withScrubbedEnv({}, () => {
+			expect(setting("imageBuildTimeoutMs")).toBeGreaterThanOrEqual(
+				setting("sandboxBootTimeoutMs"),
+			);
+		});
+	});
 });
 
 describe("each coherence rule fires on its own violation, by name", () => {
@@ -193,6 +207,31 @@ describe("each coherence rule fires on its own violation, by name", () => {
 		);
 	});
 
+	it("image freshness cutoff below the build interval — the silently-disabled feature", () => {
+		expectProblem(
+			{ HARBOR_IMAGE_MAX_AGE_MS: "60000", HARBOR_IMAGE_BUILD_INTERVAL_MS: "1800000" },
+			"HARBOR_IMAGE_MAX_AGE_MS",
+			"HARBOR_IMAGE_BUILD_INTERVAL_MS",
+			"the moment it is published",
+		);
+	});
+
+	it("image build timeout below a plain boot", () => {
+		expectProblem(
+			{ HARBOR_IMAGE_BUILD_TIMEOUT_MS: "10000" },
+			"HARBOR_IMAGE_BUILD_TIMEOUT_MS",
+			"HARBOR_SANDBOX_BOOT_TIMEOUT_MS",
+		);
+	});
+
+	it("image retention below one", () => {
+		expectProblem(
+			{ HARBOR_IMAGE_RETENTION_COUNT: "0" },
+			"HARBOR_IMAGE_RETENTION_COUNT",
+			"at least 1",
+		);
+	});
+
 	it("aggregates several problems into one error rather than reporting the first", () => {
 		withScrubbedEnv(
 			{
@@ -235,6 +274,23 @@ describe("setting() resolution", () => {
 	it("an empty environment value falls through to the default", () => {
 		withScrubbedEnv({ HARBOR_LEASE_MINUTES: "" }, () => {
 			expect(setting("leaseMinutes")).toBe(SETTINGS.leaseMinutes.fallback);
+		});
+	});
+
+	it("image building is off by default and enabled per repo through repos.config", () => {
+		withScrubbedEnv({}, () => {
+			// Off for the fleet unless an operator opts in.
+			expect(setting("imageBuildEnabled")).toBe(false);
+			// A single repo turns it on via its config jsonb, without an env change.
+			expect(setting("imageBuildEnabled", { imageBuildEnabled: true })).toBe(true);
+		});
+	});
+
+	it("the empty imageBaseImage default means 'use sandboxImage', resolved by the caller", () => {
+		withScrubbedEnv({}, () => {
+			// The empty string is the sentinel the builder reads as "fall back to sandboxImage".
+			expect(setting("imageBaseImage")).toBe("");
+			expect(setting("imageBaseImage", { imageBaseImage: "acme/base:1" })).toBe("acme/base:1");
 		});
 	});
 });

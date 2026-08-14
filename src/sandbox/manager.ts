@@ -83,7 +83,8 @@ import {
 	type SpawnRefusal,
 } from "../contracts/index.js";
 import { db } from "../db/index.js";
-import { claims, events, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
+import { claims, events, repoImages, repos, sandboxes, sessionPrompts, sessions } from "../db/schema.js";
+import { evaluateImageFreshness } from "../images/decisions.js";
 import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
 import { HarborError, notifyChange } from "../lib/work.js";
@@ -112,6 +113,7 @@ import {
 	type SnapshotRef,
 	type StopOutcome,
 	SandboxProviderError,
+	isImageBuildingProvider,
 	isLive,
 	isSnapshotProvider,
 } from "./provider.js";
@@ -975,7 +977,10 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
 			sessionId: ctx.sessionId,
 			sandboxId: row.id,
 			attemptId: row.id,
-			image: ctx.image ?? setting("sandboxImage", ctx.overrides),
+			// A repo_image boot swaps in the published per-repo image; otherwise the
+			// caller's explicit image, otherwise the global default. `boot.image` is only
+			// set when resolveBoot chose repo_image, so this never shadows a snapshot.
+			image: boot.image ?? ctx.image ?? setting("sandboxImage", ctx.overrides),
 			workspace: ctx.workspace ?? "/workspace",
 			// Caller-supplied secrets first, so nothing a repository configures can
 			// shadow the four variables the supervisor needs to reach us. A repo
@@ -1103,8 +1108,10 @@ async function spawn(ctx: SpawnContext, row: SandboxRow, token: number): Promise
  * symptom of getting it wrong is dependencies silently missing.
  */
 async function resolveBoot(ctx: SpawnContext): Promise<{
-	mode: "fresh" | "snapshot_restore";
+	mode: "fresh" | "snapshot_restore" | "repo_image";
 	restoredFrom: string | null;
+	/** An image reference to boot from, overriding the global default. Only set for repo_image. */
+	image: string | null;
 	create: (config: Parameters<SandboxProvider["create"]>[0]) => Promise<{ externalId: string }>;
 }> {
 	const previous = await db
@@ -1115,8 +1122,11 @@ async function resolveBoot(ctx: SpawnContext): Promise<{
 		.limit(1);
 
 	const stored = previous[0]?.snapshotRef ?? null;
+	const repoImageRef = await resolveRepoImageRef(ctx);
+
 	const resolution = resolveBootMode({
 		snapshotRef: stored,
+		repoImageRef,
 		capabilities: ctx.provider.capabilities,
 		overrides: ctx.overrides,
 	});
@@ -1127,12 +1137,62 @@ async function resolveBoot(ctx: SpawnContext): Promise<{
 		return {
 			mode: "snapshot_restore",
 			restoredFrom: ref.handle,
+			image: null,
 			create: (config) => snapshotProvider.restoreFromSnapshot(ref, config),
 		};
 	}
 
 	const provider = ctx.provider;
-	return { mode: "fresh", restoredFrom: null, create: (config) => provider.create(config) };
+	if (resolution.mode === "repo_image" && repoImageRef !== null) {
+		// The provider boots the image the same way it boots any other — the image is
+		// swapped in at the spawn's `create` config below. `restoredFrom` records the
+		// image ref for provenance, mirroring what a snapshot restore records.
+		return {
+			mode: "repo_image",
+			restoredFrom: repoImageRef,
+			image: repoImageRef,
+			create: (config) => provider.create(config),
+		};
+	}
+
+	return { mode: "fresh", restoredFrom: null, image: null, create: (config) => provider.create(config) };
+}
+
+/**
+ * The published prebuilt image to boot this session from, or null.
+ *
+ * Two gates, and both are type/decision gates rather than capability booleans. The
+ * provider must be an `ImageBuildingProvider` — the capability to boot a per-repo
+ * image is co-located with the capability to build one, so a provider that cannot
+ * build them (the `local` provider, whose `create` image is a runtime id, not an
+ * image reference) is never handed one to boot. And the pointer must be fresh by
+ * `evaluateImageFreshness`, so a stalled pipeline degrades to a cold boot rather than
+ * booting an ever-staler image. Everything time- and config-dependent is in that pure
+ * decision; this function only reads the row and applies it.
+ */
+async function resolveRepoImageRef(ctx: SpawnContext): Promise<string | null> {
+	if (ctx.repoId === null || !isImageBuildingProvider(ctx.provider)) return null;
+
+	const [pointer] = await db
+		.select({ imageRef: repoImages.imageRef, builtAt: repoImages.builtAt })
+		.from(repoImages)
+		.where(eq(repoImages.repoId, ctx.repoId))
+		.limit(1);
+	if (!pointer) return null;
+
+	const freshness = evaluateImageFreshness(
+		{
+			imageRef: pointer.imageRef,
+			builtFromSha: null,
+			builtAt: pointer.builtAt,
+			nextBuildAt: null,
+			consecutiveFailures: 0,
+			pausedReason: null,
+		},
+		ctx.now,
+		ctx.overrides,
+	);
+	return freshness.bootable ? pointer.imageRef : null;
 }
 
 /** A `SnapshotRef` stored as JSON in a `text` column, or null if it is not one. */

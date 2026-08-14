@@ -822,9 +822,16 @@ describe("evaluateExecutionTimeout", () => {
 
 describe("resolveBootMode", () => {
 	const capable = { supportsSandboxTimeout: true, supportsSnapshots: true, supportsRestore: true };
+	/** A BootModeInput with the two fast-path inputs absent unless a test sets them. */
+	const input = (over: Partial<Parameters<typeof resolveBootMode>[0]> = {}) => ({
+		snapshotRef: null,
+		repoImageRef: null,
+		capabilities: capable,
+		...over,
+	});
 
-	it("is fresh by default, because snapshots are off by default", () => {
-		expect(resolveBootMode({ snapshotRef: "snap-1", capabilities: capable })).toEqual({
+	it("is fresh by default, because both fast paths are off by default", () => {
+		expect(resolveBootMode(input({ snapshotRef: "snap-1" }))).toEqual({
 			mode: "fresh",
 			reason: "snapshots_disabled",
 		});
@@ -832,31 +839,51 @@ describe("resolveBootMode", () => {
 
 	it("restores only with the flag, a ref and a capable provider", () => {
 		const overrides: RepoOverrides = { enableSnapshots: true };
-		expect(resolveBootMode({ snapshotRef: "snap-1", capabilities: capable, overrides })).toEqual({
+		expect(resolveBootMode(input({ snapshotRef: "snap-1", overrides }))).toEqual({
 			mode: "snapshot_restore",
 			reason: "snapshot_available",
 		});
-		expect(resolveBootMode({ snapshotRef: null, capabilities: capable, overrides })).toEqual({
+		expect(resolveBootMode(input({ snapshotRef: null, overrides }))).toEqual({
 			mode: "fresh",
 			reason: "no_snapshot_ref",
 		});
 		expect(
-			resolveBootMode({
-				snapshotRef: "snap-1",
-				capabilities: { ...capable, supportsRestore: false },
-				overrides,
-			}),
+			resolveBootMode(
+				input({ snapshotRef: "snap-1", capabilities: { ...capable, supportsRestore: false }, overrides }),
+			),
 		).toEqual({ mode: "fresh", reason: "provider_cannot_restore" });
 	});
 
-	it("never returns a mode that is unreachable in v1", () => {
+	it("boots a fresh repo image even with snapshots off — it is an independent optimisation", () => {
+		expect(resolveBootMode(input({ repoImageRef: "harbor-repo-x:sha" }))).toEqual({
+			mode: "repo_image",
+			reason: "repo_image_fresh",
+		});
+	});
+
+	it("prefers a session's own snapshot over a generic repo image when both are usable", () => {
+		const overrides: RepoOverrides = { enableSnapshots: true };
+		expect(
+			resolveBootMode(input({ snapshotRef: "snap-1", repoImageRef: "harbor-repo-x:sha", overrides })),
+		).toEqual({ mode: "snapshot_restore", reason: "snapshot_available" });
+	});
+
+	it("falls back to the repo image when a restore is requested but not usable", () => {
+		const overrides: RepoOverrides = { enableSnapshots: true };
+		// Snapshots on but no ref: the repo image is the next-best warm start.
+		expect(
+			resolveBootMode(input({ snapshotRef: null, repoImageRef: "harbor-repo-x:sha", overrides })),
+		).toEqual({ mode: "repo_image", reason: "repo_image_fresh" });
+	});
+
+	it("resolves only the modes the caller pre-gated — never build", () => {
 		const overrides: RepoOverrides = { enableSnapshots: true };
 		const modes = [
-			resolveBootMode({ snapshotRef: "snap-1", capabilities: capable, overrides }).mode,
-			resolveBootMode({ snapshotRef: null, capabilities: capable, overrides }).mode,
-			resolveBootMode({ snapshotRef: "snap-1", capabilities: capable }).mode,
+			resolveBootMode(input({ snapshotRef: "snap-1", overrides })).mode,
+			resolveBootMode(input({ repoImageRef: "harbor-repo-x:sha" })).mode,
+			resolveBootMode(input({ snapshotRef: "snap-1" })).mode,
 		];
-		for (const mode of modes) expect(["fresh", "snapshot_restore"]).toContain(mode);
+		for (const mode of modes) expect(["fresh", "snapshot_restore", "repo_image"]).toContain(mode);
 	});
 });
 

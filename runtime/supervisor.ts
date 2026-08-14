@@ -49,6 +49,7 @@ import {
 	assertNever,
 	hookPolicy,
 	resolveBootMode,
+	shouldClone,
 	tunnelFileDecision,
 	tunnelWaitVerdict,
 	type BootWarning,
@@ -320,7 +321,7 @@ export async function boot(
 
 	await configureGit(config, env);
 
-	if (mode === "fresh") {
+	if (shouldClone(mode)) {
 		const cloned = await cloneRepos(config, bridge, env);
 		if (cloned !== null) {
 			return finish({ kind: "failed", stage: "clone", message: cloned, warnings });
@@ -333,8 +334,13 @@ export async function boot(
 	}
 	if (setupResult.kind === "degraded") warn(setupResult.warning);
 
-	const tunnels = await waitForTunnels(config, bridge, env);
-	if (tunnels !== null) warn(tunnels);
+	// A build has no agent and no start.sh (see hookPolicy), so there is nothing that
+	// consumes a tunnel URL. Waiting for one would burn the whole tunnel budget on
+	// every image build for a service no build ever starts.
+	if (mode !== "build") {
+		const tunnels = await waitForTunnels(config, bridge, env);
+		if (tunnels !== null) warn(tunnels);
+	}
 
 	const startResult = await runHook("start", config, mode, bridge, env, primary);
 	if (startResult.kind === "failed") {

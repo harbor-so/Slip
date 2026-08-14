@@ -1352,3 +1352,131 @@ export type Principal = typeof principals.$inferSelect;
 export type Channel = typeof channels.$inferSelect;
 export type ChannelMember = typeof channelMembers.$inferSelect;
 export type ChatEvent = typeof chatEvents.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Prebuilt repo images — the producer of `repo_image` boots
+// ---------------------------------------------------------------------------
+
+/**
+ * The outcomes an image build attempt can end in. Closed set, same discipline as
+ * every other status in this file: consumers switch on these with no `default`
+ * arm, so adding one is a compile error at each decision site rather than a string
+ * a normalizer quietly invents.
+ *
+ * `running` is the only non-terminal value, and it is load-bearing: the partial
+ * unique index `one_active_build_per_repo` keys on `finished_at is null`, so a
+ * `running` row IS the "one build in flight" claim. `skipped` records a tick that
+ * declined to build — a concurrency loser, an unchanged HEAD, or a refused budget
+ * reservation — as data rather than as a silent no-op, so the schedule is auditable.
+ */
+export const IMAGE_BUILD_STATUSES = ["running", "success", "failed", "skipped"] as const;
+export type ImageBuildStatus = (typeof IMAGE_BUILD_STATUSES)[number];
+
+/**
+ * The published prebuilt-image pointer for one repo, and the schedule that feeds it.
+ *
+ * One row per image-building repo, carrying two things that a naive design would
+ * split into two tables and then have to keep consistent across a crash: the
+ * *pointer* a spawn reads (`imageRef`/`builtFromSha`/`builtAt`), and the *schedule*
+ * a tick advances (`nextBuildAt`/`consecutiveFailures`/`pausedReason`). It is the
+ * single-table `automations` model (see that table) applied to image builds, for
+ * the same reason: the auto-pause after repeated failures is the whole point, and
+ * splitting the counter from the pointer buys nothing but a second thing to get
+ * wrong.
+ *
+ * The invisibility of build time depends on one rule this shape enforces: the
+ * pointer columns advance ONLY inside the transaction that finalises a `success`.
+ * A build that fails, times out, or is still running touches the schedule columns
+ * and leaves the pointer exactly as the last good build left it — so a session
+ * spawned mid-build boots the previous image, never a half-built one and never a
+ * cold boot it would not otherwise have paid. The columns are nullable because a
+ * repo that has opted in but never built successfully has a schedule and no pointer
+ * yet; a spawn reading a null `imageRef` simply falls through to today's behaviour.
+ *
+ * Whether image building is enabled, how stale it may get, and which base image to
+ * build from are per-repo *config*, not columns — they live in `repos.config` and
+ * resolve through `setting()`. Only mutable per-repo *state* lives here.
+ */
+export const repoImages = pgTable(
+	"repo_images",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		repoId: uuid("repo_id")
+			.notNull()
+			.references(() => repos.id),
+		/** The provider handle to boot from. Null until the first successful build. */
+		imageRef: text("image_ref"),
+		/** The default-branch commit the current image was built at. Drives the unchanged-HEAD skip. */
+		builtFromSha: text("built_from_sha"),
+		/** When the current image was published. Drives the freshness cutoff at spawn. */
+		builtAt: timestamp("built_at", { withTimezone: true }),
+		/** The provider `kind` that built it, for display and for the health endpoint. */
+		builtByProvider: text("built_by_provider"),
+		/** Advanced BEFORE a build runs, so a crash mid-build does not leave the repo perpetually due. */
+		nextBuildAt: timestamp("next_build_at", { withTimezone: true }),
+		consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+		/** Set when consecutive failures cross the threshold; non-null excludes the repo from the tick. */
+		pausedReason: text("paused_reason"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(table) => [
+		// One pointer per repo. The tick upserts against this.
+		uniqueIndex("repo_images_repo_idx").on(table.repoId),
+		// The scheduler reads exactly this: repos whose next build is due.
+		index("repo_images_due_idx").on(table.nextBuildAt),
+	],
+);
+
+/**
+ * One image build attempt.
+ *
+ * The append-only ledger behind `repo_images`: every tick that decides to build
+ * writes a `running` row here first, and the `one_active_build_per_repo` partial
+ * unique index is what makes "two concurrent ticks for one repo must not both
+ * build" a database guarantee rather than a hope. Two racing ticks both INSERT a
+ * `running` row; Postgres serialises them on the index; exactly one lands and the
+ * loser's INSERT conflicts, at which point the loser records a `skipped` row and
+ * moves on. This is the same coordination `one_active_lease_per_scope` provides for
+ * claims — a partial index, not a read-then-write check, because the latter races
+ * under READ COMMITTED and a mock passes it every time.
+ *
+ * `finishedAt is null` IS the predicate the index is partial on, so a terminal
+ * status must always be written together with `finishedAt`, and a crash that leaves
+ * a `running` row with a null `finishedAt` correctly blocks new builds until the
+ * stuck row is swept — the safe direction to fail.
+ */
+export const imageBuilds = pgTable(
+	"image_builds",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		orgId: uuid("org_id")
+			.notNull()
+			.references(() => orgs.id),
+		repoId: uuid("repo_id")
+			.notNull()
+			.references(() => repos.id),
+		status: text("status").notNull().default("running"),
+		/** The default-branch HEAD this attempt built (or would have built) at. */
+		commitSha: text("commit_sha"),
+		startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+		/** Null while running. Written together with a terminal status; the index depends on it. */
+		finishedAt: timestamp("finished_at", { withTimezone: true }),
+		failureReason: text("failure_reason"),
+		/** Where the build log was written, for the human debugging a `failed` row. */
+		logLocation: text("log_location"),
+	},
+	(table) => [
+		index("image_builds_repo_idx").on(table.repoId, table.startedAt),
+		// One in-flight build per repo. Partial on the running predicate, so terminal
+		// rows do not collapse into a single row and history is preserved.
+		uniqueIndex("one_active_build_per_repo")
+			.on(table.repoId)
+			.where(sql`${table.finishedAt} is null`),
+	],
+);
+
+export type RepoImage = typeof repoImages.$inferSelect;
+export type ImageBuild = typeof imageBuilds.$inferSelect;
