@@ -9,9 +9,10 @@
  * boundary here — the child gets the server process's user, filesystem and
  * network. That is a reasonable thing to run on your own laptop or a single
  * dedicated box against your own repository, and a completely unreasonable thing
- * to expose to another tenant. Multi-tenant execution needs a real boundary
- * bought from Modal or Daytona; shipping `spawn()` and calling it a platform is
- * how you ship a remote code execution vulnerability with a dashboard on top.
+ * to expose to another tenant. Multi-tenant execution needs a real isolation
+ * boundary — a container or a VM, which is what the sandbox providers are for.
+ * Shipping `spawn()` and calling it a platform is how you ship a remote code
+ * execution vulnerability with a dashboard on top.
  *
  * The guards below reflect that: launching is off unless explicitly enabled, the
  * runtime must be one of two known binaries, the working directory must be

@@ -80,6 +80,69 @@ describe(".env.example drift", () => {
 		).toEqual([]);
 	});
 
+	/**
+	 * The reverse direction, which was the missing half.
+	 *
+	 * The check above catches a variable in the file that nothing reads. It cannot
+	 * catch the opposite — a variable the code reads that the file never mentions —
+	 * and that is the one an operator pays for, because there is no way to find it
+	 * short of grepping the source.
+	 *
+	 * The line this draws is between a tunable read through `setting()` and one read
+	 * through a bare `process.env`. A `setting()` is self-documenting: it appears in
+	 * `SETTINGS`, it is rendered with its derivation at `GET /api/health/config` on
+	 * a running deployment, and .env.example deliberately lists only the subset a
+	 * typical deployment trips over rather than all forty-odd. A bare `process.env`
+	 * read has none of that — it is invisible everywhere except the line that reads
+	 * it — so .env.example is its only discovery surface and it must be there.
+	 *
+	 * The audit found five: HARBOR_ROUTER_MODEL, HARBOR_DOCKER_BIN, FLY_REGION,
+	 * FLY_VM_CPU_KIND and HOST — the last of which governs whether a
+	 * token-authenticated MCP endpoint is published to the local network.
+	 */
+	it("every bare process.env tunable is declared in the file", () => {
+		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
+
+		// Tests set env vars to drive behaviour under test; that is not an operator
+		// knob and does not belong in an example file.
+		const source = ["src", "runtime", "scripts", "integrations", "sandbox"]
+			.map((dir) => join(ROOT, dir))
+			.filter((dir) => {
+				try {
+					return statSync(dir).isDirectory();
+				} catch {
+					return false;
+				}
+			})
+			.flatMap((dir) => walk(dir))
+			.filter((file) => !/\.test\.(ts|tsx|mts)$/.test(file))
+			.map((file) => readFileSync(file, "utf8"))
+			.join("\n");
+
+		const read = new Set<string>();
+		for (const match of source.matchAll(/process\.env\.((?:HARBOR|FLY)_[A-Z0-9_]+)/g)) {
+			read.add(match[1]!);
+		}
+
+		// Set BY Harbor rather than FOR it: injected into a sandbox's environment or
+		// exported by a demo script. An operator never sets these, and listing them
+		// as if they could would be its own kind of wrong instruction.
+		const setByHarbor = new Set(["HARBOR_AGENT_ID", "HARBOR_DEMO_ROUNDS", "HARBOR_URL"]);
+
+		const undocumented = [...read]
+			.filter((name) => !setByHarbor.has(name))
+			.filter((name) => !example.includes(name))
+			.sort();
+		expect(
+			undocumented,
+			"Variables the code reads through a bare process.env that .env.example never "
+				+ "mentions. These appear in no other discovery surface — not SETTINGS, not "
+				+ `/api/health/config — so an operator cannot find them:\n  ${undocumented.join(
+					"\n  ",
+				)}`,
+		).toEqual([]);
+	});
+
 	it("the knobs a real deployment trips over are documented in the file", () => {
 		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
 		// Each of these was found missing by the audit while being the exact knob

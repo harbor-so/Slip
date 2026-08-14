@@ -1,11 +1,11 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import postgres from "postgres";
 import { setting } from "../../../../../config.js";
 import type { SessionEvent, SessionEventType } from "../../../../../contracts/index.js";
-import { databaseUrl, db } from "../../../../../db/index.js";
+import { db } from "../../../../../db/index.js";
 import { sessionEvents } from "../../../../../db/schema.js";
 import { orgIdForKey } from "../../../../../lib/auth.js";
+import { subscribe } from "../../../../../lib/bus.js";
 import { currentSession } from "../../../../../lib/session.js";
 import { retainedFromSeq, snapshotSession } from "../../../../../lib/session-events.js";
 import { sessionByKey } from "../../../../../lib/sessions.js";
@@ -118,7 +118,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 		: ((await currentSession())?.orgId ?? null);
 	if (!orgId) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
-	const listener = postgres(databaseUrl(), { max: 1 });
 	const encoder = new TextEncoder();
 	const pageSize = setting("maxSnapshotEvents");
 	const resumeCursor = resumeCursorFrom(request);
@@ -267,7 +266,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 			};
 
 			// ---- STEP 1: subscribe, before anything is read. ----------------------
-			const subscription = await listener.listen("harbor_changes", (payload) => {
+			//
+			// `subscribe` resolves only once the subscription is live — that is part of
+			// the bus interface, not an accident of the Postgres backend, precisely so
+			// this step cannot silently stop being step 1.
+			const unsubscribe = await subscribe("harbor_changes", (payload) => {
 				try {
 					const change = JSON.parse(payload) as { orgId?: string };
 					// Every org shares the one channel, so the filter happens here. A
@@ -280,8 +283,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 			});
 
 			const cleanupAndFinish = () => {
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
+				void unsubscribe().catch(() => {});
 				finish();
 			};
 
@@ -379,9 +381,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 
 			request.signal.addEventListener("abort", () => {
 				clearInterval(keepAlive);
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
-				finish();
+				cleanupAndFinish();
 			});
 		},
 	});

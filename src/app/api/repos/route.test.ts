@@ -1,10 +1,10 @@
 /**
  * The repository surface, and the property it exists to preserve.
  *
- * Harbor's divergence from the reference implementation is one function:
- * `verifyRepoAccess`, asked with the **requesting user's own** token, so that a
- * shared app installation does not become "everyone can reach everything the app
- * can reach". That function was written, documented and tested — and
+ * The property lives in one function: `verifyRepoAccess`, asked with the
+ * **requesting user's own** token, so that a shared app installation does not
+ * become "everyone can reach everything the app can reach". That function was
+ * written, documented and tested — and
  * `connectRepo`, its only caller, had no caller of its own. Repositories arrived
  * by direct insert, which is to say the check ran in zero production paths.
  *

@@ -117,13 +117,18 @@ describe("tools/list", () => {
 		await client.close();
 	});
 
-	it("keeps the whole tool surface under a 1500-token budget", async () => {
+	it("keeps the whole tool surface under a 1200-token budget", async () => {
 		// This is the product claim, asserted. The tool list is re-read by the model
 		// on every turn, so a regression here is paid forever, by every agent.
+		//
+		// The cap sits just above the actual cost (~1,130 tokens) rather than at a
+		// round number well above it. A budget with 30% headroom is not a budget: it
+		// passes while a sixth tool is added, which is the exact regression it exists
+		// to catch. Rewording a description stays green; adding a tool does not.
 		const client = await connect(apiKey);
 		const { tools } = await client.listTools();
 		const cost = Math.ceil(JSON.stringify(tools).length / 4);
-		expect(cost).toBeLessThan(1500);
+		expect(cost).toBeLessThan(1200);
 		await client.close();
 	});
 

@@ -2,11 +2,11 @@
  * Slack.
  *
  * This is the connector that decides whether anyone adopts the product, and the
- * reason is not technical. Ramp's account of rolling out an internal background
- * agent says adoption came from virality rather than mandate: they let it work in
- * public spaces, people watched colleagues use it, and it spread. A background
- * agent that only exists behind a dashboard login is a background agent whose
- * users have to already know it exists.
+ * reason is not technical. A background agent spreads by being watched: someone
+ * @-mentions it in a public channel, a colleague reads the thread, and now two
+ * people use it. A background agent that only exists behind a dashboard login has
+ * no such path — every user has to already know it exists and go looking, which
+ * means adoption needs a mandate instead of a demonstration.
  *
  * Two rules shape everything below.
  *

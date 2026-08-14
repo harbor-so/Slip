@@ -494,8 +494,8 @@ describe("credential brokering", () => {
 
 	it("refuses a repository the session does not include, even though the app can see it", async () => {
 		// The App installation reaches every repository in the org; the session's own
-		// snapshot is the authorisation. This is the multi-tenancy hole in the
-		// competing implementation, at the credential layer.
+		// snapshot is the authorisation. This is the multi-tenancy hole closed at the
+		// credential layer, so it holds even if a caller reaches this directly.
 		await db
 			.insert(repos)
 			.values({ orgId, provider: "github", owner: "acme", name: "billing", installationId: "4242" });

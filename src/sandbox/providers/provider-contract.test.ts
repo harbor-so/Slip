@@ -529,7 +529,7 @@ if ("reason" in dockerFixture) {
 			const error = await provider
 				.restoreFromSnapshot(
 					{
-						provider: "modal",
+						provider: "kubernetes",
 						handle: "some-remote-handle",
 						sourceExternalId: "x",
 						takenAt: new Date().toISOString(),

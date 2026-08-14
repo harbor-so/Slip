@@ -469,8 +469,9 @@ export const agentPresence = pgTable(
  * run is a child process on the host running the server, wired to Harbor's own MCP
  * endpoint — enough to launch work from the dashboard on a laptop or a single
  * box, and deliberately not enough to run somebody else's code. Multi-tenant
- * execution needs an isolation boundary bought from Modal or Daytona, not a
- * spawn() call, and pretending otherwise is how you ship an RCE.
+ * execution needs a real isolation boundary — a container or a VM, which is what
+ * the sandbox providers give — not a spawn() call, and pretending otherwise is
+ * how you ship an RCE.
  */
 export const runs = pgTable(
 	"runs",
@@ -771,7 +772,7 @@ export const sandboxes = pgTable(
 			.notNull()
 			.references(() => sessions.id),
 		provider: text("provider").notNull(),
-		/** The provider's own id: a container id, a Modal sandbox id, a Fly machine id. */
+		/** The provider's own id: a Docker container id, a Fly machine id, and so on. */
 		externalId: text("external_id"),
 		/** One of SANDBOX_STATUSES in src/contracts. */
 		status: text("status").notNull().default("requested"),

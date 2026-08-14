@@ -5,12 +5,15 @@
 
 ## Context
 
-The competing open implementation is built on one coding agent and could not
-easily use another. That is a defensible choice for a team building for itself —
-they had already picked one — and it is a fatal one for a project that wants to be
-adopted, because a company evaluating a background agent platform has already
-standardised on an agent. Asking them to switch is asking them to re-run an
-evaluation they finished last quarter, as the price of trying your infrastructure.
+Building the platform around a single coding agent is the cheaper choice, and for
+a team building only for itself it is the right one — they have already picked an
+agent, and coupling to it buys deep integration with that agent's plugin system.
+
+It is the wrong choice for a project meant to be adopted. A company evaluating a
+background agent platform has already standardised on a coding agent; that
+decision came with a procurement cycle, a security review and a set of habits.
+Requiring them to switch makes re-running last quarter's evaluation the price of
+trying our infrastructure, which means most of them do not try it.
 
 Harbor already had most of what was needed: `src/activity/` contains stream
 normalizers for Claude Code, Codex, OpenCode and Cursor, written for a different

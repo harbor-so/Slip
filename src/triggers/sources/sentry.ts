@@ -14,9 +14,9 @@
  * `level:error`, `resource:issue`, `project:<slug>` and so on, and an operator who
  * wants "only new issues, only errors" writes an ordinary
  * `label any_of ["action:created", "level:error"]` condition. One evaluator gates
- * every source; the reference implementation instead grew a bespoke per-source
- * filter registry, and the cost of that shows up as five slightly different
- * condition languages a reader has to learn.
+ * every source, deliberately: a bespoke per-source filter registry is the easy
+ * thing to grow into, and its cost shows up later as five slightly different
+ * condition languages an operator has to learn one at a time.
  */
 
 import { createHmac } from "node:crypto";

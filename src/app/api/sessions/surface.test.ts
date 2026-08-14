@@ -1,7 +1,7 @@
 /**
- * The session surface the reference design has and Harbor did not.
+ * The session surface, and the six routes that were missing from it.
  *
- * Six of these routes did not exist. Their absence was not cosmetic: `archived`
+ * Their absence was not cosmetic: `archived`
  * was a status `promptability` refused prompts to, with a message telling people
  * to "unarchive it", and nothing in the product could archive OR unarchive a
  * session — the door had no handle on either side. `stop` was a bridge verb the

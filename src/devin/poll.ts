@@ -26,9 +26,10 @@
 
 import { eq, notInArray, sql as raw } from "drizzle-orm";
 import { setting } from "../config.js";
-import { db, sql } from "../db/index.js";
+import { db } from "../db/index.js";
 import { artifacts, devinSessions } from "../db/schema.js";
 import { recordActivity } from "../lib/activity.js";
+import { globalLock, withLock } from "../lib/locks.js";
 import type { NormalizedActivity } from "../activity/types.js";
 import {
 	DEVIN_TERMINAL_STATUSES,
@@ -59,26 +60,13 @@ const EMPTY: DevinPollResult = { polled: 0, skipped: 0, recorded: 0, finished: 0
 /**
  * One tick. Safe to call from every replica: only the lock-holder does work.
  *
- * The reserved (not pooled) connection matters for the same reason it does in
- * `tickAutomations` — an advisory lock belongs to the connection that took it, and
- * unlocking on a different pooled backend silently strands the lock indefinitely.
+ * A lost race is not a failure and not a retry — the replica that holds the lock
+ * is doing the work, so returning EMPTY is the honest answer. See
+ * `src/lib/locks.ts` for why the lock is taken on a reserved connection.
  */
 export async function tickDevinPoll(now = new Date()): Promise<DevinPollResult> {
-	const reserved = await sql.reserve();
-	try {
-		const [lock] = await reserved`
-			select pg_try_advisory_lock(hashtext('harbor:devin-poll')) as acquired
-		`;
-		if (!lock?.acquired) return EMPTY;
-
-		try {
-			return await runDuePolls(now);
-		} finally {
-			await reserved`select pg_advisory_unlock(hashtext('harbor:devin-poll'))`;
-		}
-	} finally {
-		reserved.release();
-	}
+	const outcome = await withLock(globalLock("harbor:devin-poll"), () => runDuePolls(now));
+	return outcome.acquired ? outcome.result : EMPTY;
 }
 
 async function runDuePolls(now: Date): Promise<DevinPollResult> {

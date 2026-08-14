@@ -19,11 +19,12 @@ with zero mocks at exact boundary values. `supervisor.ts` and `bridge.ts` resolv
 configuration, read files and spawn processes, and they ask `boot-decisions.ts`
 what to do rather than deciding for themselves.
 
-That second constraint is a direct response to the implementation Harbor is an
-alternative to, whose supervisor is 2,523 lines in one class with boot-mode
-branching at roughly fifteen scattered call sites. Nobody can say what a
-`snapshot_restore` boot does there without reading all fifteen, so nobody does,
-and the least observable component in the system is also the first one to run.
+That second constraint exists because the supervisor is the least observable
+component in the system and also the first one to run. A supervisor that branches
+on boot mode at a dozen scattered call sites cannot be read: answering "what does
+a `snapshot_restore` boot actually do" means finding every branch, so nobody
+answers it, and the code drifts unchallenged. Keeping the branching in one pure,
+zero-mock module makes that question a single file to read and a test to run.
 
 ---
 
@@ -435,17 +436,6 @@ stranger.
 
 ## Known gaps
 
-- **`BridgeCommand.prompt` has no identity mode.** The contract carries `author` and
-  `author_email` but nothing that says "nobody is claiming authorship", so
-  `agent-only` is currently expressible only as "email is null" — which is exactly
-  the ambiguity `GitIdentity` exists to remove. The bridge reads an optional `mode`
-  field when the control plane sends one and refuses when it does not. The fix is a
-  one-field addition to `src/contracts/index.ts`:
-  `mode?: "agent-only" | "attributed-user"`.
-- **`session_prompts` has no `author_email` column**, so the commands route sends
-  `author_email: null` honestly rather than guessing. Until both of the above land,
-  every attributed prompt is refused at the bridge — which is the correct failure
-  direction, and it is loud.
 - **There is no gap-marker event type.** The overflow marker rides on `log` with a
   structured payload, because inventing a `SandboxEventType` in the sandbox is
   exactly the drift `src/contracts` exists to prevent.

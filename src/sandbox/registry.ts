@@ -7,9 +7,9 @@
  * configuration reference advertises six providers, five of which fail on the
  * first spawn, after the operator has already written their compose file and
  * their secrets. A provider that does not exist is simply absent from the union,
- * so `HARBOR_SANDBOX_PROVIDER=modal` fails at the first call with a message that
- * lists what actually works, and `providerFor` cannot return something that is
- * not a working provider because there is nothing for it to return.
+ * so `HARBOR_SANDBOX_PROVIDER=kubernetes` fails at the first call with a message
+ * that lists what actually works, and `providerFor` cannot return something that
+ * is not a working provider because there is nothing for it to return.
  *
  * Adding a backend is therefore three edits: the name goes in the array, the
  * case goes in the switch (omitting it is a compile error, by construction), and

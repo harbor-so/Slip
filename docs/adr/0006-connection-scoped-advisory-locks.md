@@ -7,8 +7,9 @@
 
 Harbor uses Postgres advisory locks in three places, and each is load-bearing:
 
-- `withSessionLock` — exactly one runner drives a session, which is the
-  single-writer property a Durable Object would otherwise provide.
+- `withSessionLock` — exactly one runner drives a session. This is the
+  single-writer property the whole session model rests on; see
+  [ADR 0001](./0001-postgres-as-the-only-dependency.md).
 - `tickAutomations` — one replica runs the scheduler tick, so there is no
   singleton scheduler process to elect, monitor or restart.
 - The test suite's global setup — one test run at a time against a shared database.

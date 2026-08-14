@@ -194,13 +194,31 @@ wide enough that it must be stated rather than implied.
 | Tier | Providers | Boundary | Safe for |
 |---|---|---|---|
 | None | `local` | The agent runs as the server user, on the server's filesystem and network. | Your own laptop, your own repo. Nothing else. |
-| Container | `docker`, `cloudflare`, `northflank`, `codesandbox` | Kernel shared with the host or the vendor's node. | A single-tenant deployment; for the hosted three, whatever the vendor's own multi-tenancy is worth. |
-| VM / microVM | `fly`, `e2b`, `modal`, `daytona`, `morph`, `runloop`, `blaxel`, `vercel` | Hardware virtualisation (Firecracker, gVisor, or the vendor's equivalent). | The strongest boundary Harbor can offer. |
+| Container | `docker`, `modal`, `daytona`, `cloudflare`, `northflank` | Kernel shared with the host or the vendor's node. `modal` is gVisor-isolated, a stronger container boundary than the default — but still not a VM. | A single-tenant deployment; for the hosted four, whatever the vendor's own multi-tenancy is worth. |
+| VM / microVM | `fly`, `morph`, `blaxel`, `codesandbox`, `vercel` | Hardware virtualisation — a VM or microVM per sandbox. | The strongest boundary Harbor can offer. |
+| Unrecorded | `e2b`, `runloop` | Both vendors advertise microVM isolation, and Harbor's integration neither states nor verifies it. | Treat it as the vendor's claim until somebody confirms it. |
+
+Each tier comes from what the provider module itself documents
+(`src/sandbox/providers/*.ts`), because that is the only claim this repository can
+be held to. **Do not infer a tier from the vendor's marketing.** An earlier version
+of this table put `modal` and `daytona` in the VM row and `codesandbox` in the
+container row; `modal.ts` says "a real, gVisor-isolated container", `daytona.ts`
+says "containers booted from a snapshot", and `codesandbox.ts` says "a hosted
+micro-VM sandbox". All three were backwards, in the document a reviewer reads to
+decide whether the boundary is good enough.
 
 The authoritative list is `SANDBOX_PROVIDER_NAMES` in
 `src/sandbox/registry.ts` — a second list in prose is a list that rots, and this
 table said "`local` and `docker` are the ONLY shipped providers" for three
 releases after that stopped being true.
+
+One thing follows that the tiers alone do not say. Every provider with a hardware
+virtualisation boundary buys it by running your source on somebody else's
+hardware, which is the opposite of the trade a self-hosted deployment is usually
+making. **A VM boundary inside your own infrastructure does not exist yet.** If
+that is the requirement, the honest answer today is `docker` on a dedicated host,
+and the contract suite in `src/sandbox/providers/provider-contract.test.ts` is
+what would prove a contributed Kubernetes or Firecracker backend correct.
 
 **Choosing a remote provider moves your secrets across a vendor boundary.** This
 is the sentence this document most needed and did not contain. `buildSandboxEnv`

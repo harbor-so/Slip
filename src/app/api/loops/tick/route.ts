@@ -5,8 +5,8 @@
  * have zero warm instances at any moment, so a `setInterval` there is a promise
  * the runtime cannot keep. That is the right call and it left a hole: a
  * deployment that runs *only* the dashboard has never swept an expired lease, a
- * deadline, or an event log. This is the hole's other half. Point Vercel Cron, a
- * Kubernetes CronJob, or a line in crontab at it:
+ * deadline, or an event log. This is the hole's other half. Point a Kubernetes
+ * CronJob, a line in crontab, or any hosted scheduler at it:
  *
  *     * / 5 * * * *  curl -fsS -XPOST -H "Authorization: Bearer $TOKEN" https://…/api/loops/tick
  *

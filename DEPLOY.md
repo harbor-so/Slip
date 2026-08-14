@@ -148,8 +148,9 @@ pod — that is root on the node, for a pod that runs attacker-influenced text a
 instructions. Either run the Harbor deployment on a dedicated node pool with the
 `docker` provider and accept that, or use one of the VM-isolated remote providers,
 which is what `deploy/k8s/configmap.yaml` defaults to. A first-class Kubernetes
-Job provider does not exist yet and is the obvious contribution; the provider
-contract test suite is what proves one correct.
+Job provider does not exist yet and is the obvious contribution — it is the only
+way to get a real isolation boundary that stays inside your own cluster — and the
+provider contract test suite is what proves one correct.
 
 The full provider list is `SANDBOX_PROVIDER_NAMES` in `src/sandbox/registry.ts`,
 and their isolation tiers are in [docs/SECURITY.md](./docs/SECURITY.md). It is

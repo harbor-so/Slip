@@ -99,7 +99,7 @@ export default async function UsagePage() {
 	const peak = Math.max(1, ...days.map((d) => Number(d.micro)));
 
 	/**
-	 * How many sessions produced a MERGED pull request — Ramp's metric, and the right one.
+	 * How many sessions produced a MERGED pull request — the headline metric.
 	 *
 	 * The filter is `merged_at is not null`, not `kind = 'pull_request'`. Counting
 	 * opened pull requests under a "merged" label is the flattering version of this

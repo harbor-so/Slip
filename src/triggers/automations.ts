@@ -25,9 +25,10 @@
  */
 
 import { and, eq, isNull, lte, or, sql as raw } from "drizzle-orm";
-import { db, sql } from "../db/index.js";
+import { db } from "../db/index.js";
 import { automationRuns, automations, sessions } from "../db/schema.js";
 import { setting } from "../config.js";
+import { globalLock, withLock } from "../lib/locks.js";
 import { createSession } from "../lib/sessions.js";
 import { enqueueSessionPrompt } from "../lib/session-runner.js";
 import { environmentRepoIds } from "../lib/secrets.js";
@@ -60,38 +61,14 @@ export async function tickAutomations(now = new Date()): Promise<{
 	skipped: number;
 	paused: number;
 }> {
-	// A RESERVED connection, not a pooled one, and this is not a detail.
-	//
-	// An advisory lock taken with `pg_try_advisory_lock` belongs to the connection
-	// that took it. Issue it through the pool and the matching unlock is a separate
-	// statement that may be routed to a different backend, where it does nothing at
-	// all — and the lock is then held until that pooled connection is recycled,
-	// which is indefinitely.
-	//
-	// The symptom is the worst kind: automations run exactly once after a deploy and
-	// then silently never again, with no error anywhere, on work that by definition
-	// nobody is watching. It only reproduces with a pool of more than one connection,
-	// so it would pass every test run against a single-connection script.
-	//
-	// `withSessionLock` in the session runner had this reasoning already; this
-	// function was written afterwards and did not.
-	const reserved = await sql.reserve();
-	try {
-		const [lock] = await reserved`
-			select pg_try_advisory_lock(hashtext('harbor:automations')) as acquired
-		`;
-		if (!lock?.acquired) return { ran: 0, skipped: 0, paused: 0 };
-
-		try {
-			return await runDueAutomations(now);
-		} finally {
-			// Same reserved connection that took it. In a `finally` so a thrown body
-			// cannot strand the whole deployment's automations.
-			await reserved`select pg_advisory_unlock(hashtext('harbor:automations'))`;
-		}
-	} finally {
-		reserved.release();
-	}
+	// The lock is taken on a reserved connection rather than a pooled one, which is
+	// not a detail — see `src/lib/locks.ts` for why, and for the failure it avoids:
+	// automations that run exactly once after a deploy and then silently never
+	// again, on work that by definition nobody is watching.
+	const outcome = await withLock(globalLock("harbor:automations"), () =>
+		runDueAutomations(now),
+	);
+	return outcome.acquired ? outcome.result : { ran: 0, skipped: 0, paused: 0 };
 }
 
 async function runDueAutomations(now: Date): Promise<{

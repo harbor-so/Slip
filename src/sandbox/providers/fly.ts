@@ -3,10 +3,11 @@
  *
  * A Fly Machine is a hardware-virtualised VM booted from an image, created and
  * destroyed through one small REST API (`https://api.machines.dev`). That makes
- * it the natural first remote provider: unlike Modal (a Python SDK over gRPC) it
- * needs no vendor library and no language shim, so the whole backend is this one
- * file, injected `fetch` and all, and it plugs into the same spawn-saga, fencing,
- * reconciliation and circuit-breaker machinery `docker` does.
+ * it the natural first remote provider: a plain REST API needs no vendor SDK and
+ * no language shim, so the whole backend is this one file, injected `fetch` and
+ * all, and it plugs into the same spawn-saga, fencing, reconciliation and
+ * circuit-breaker machinery `docker` does. A backend reachable only through a
+ * gRPC SDK in another language would have cost a subprocess or a sidecar first.
  *
  * `kind: "ephemeral"`. A Machine can technically be stopped and started again,
  * which would make it `persistent` — but Harbor's rule is *advertise the capability

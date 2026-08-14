@@ -1,7 +1,6 @@
 import { channelByKey, mayRead } from "../../../../../lib/chat.js";
 import { resolveConn } from "../../../../../lib/conn.js";
-import postgres from "postgres";
-import { databaseUrl } from "../../../../../db/index.js";
+import { subscribe } from "../../../../../lib/bus.js";
 
 /**
  * A live feed for one channel, over Server-Sent Events.
@@ -10,12 +9,12 @@ import { databaseUrl } from "../../../../../db/index.js";
  * no new infrastructure — but on the `harbor_chat` channel and filtered to a
  * single room.
  *
- * The access check happens BEFORE the LISTEN, and that ordering is the point. buzz
- * flags "check access before subscription registration — no race window for
- * private channel leaks" as the exact bug that leaks private rooms; a stream that
- * subscribes first and filters later has already accepted the connection to the
- * fan-out before deciding whether the caller was allowed. Here a non-member of a
- * direct channel is refused with a 403 and never reaches the LISTEN at all.
+ * The access check happens BEFORE the LISTEN, and that ordering is the point. A
+ * stream that subscribes first and filters later has already attached the caller
+ * to the fan-out before deciding whether they were allowed — so the window
+ * between the two is a private-room leak, and it is a window that widens every
+ * time someone adds an `await` to the check. Here a non-member of a direct
+ * channel is refused with a 403 and never reaches the LISTEN at all.
  *
  * Durable events are announced by `{seq}` only; the client fetches the body from
  * the events endpoint. Ephemeral events (typing/presence) carry their small actor
@@ -34,11 +33,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 	const as = new URL(request.url).searchParams.get("as") ?? undefined;
 	if (!(await mayRead(channel, as))) return new Response("Not a member.", { status: 403 });
 
-	// The one resolution of DATABASE_URL, shared with every other SSE route.
-	// This line previously carried its own fallback naming a DIFFERENT database
-	// (harbor_raleigh) than the rest of the product — exactly the drift the
-	// shared resolver and its test exist to prevent.
-	const listener = postgres(databaseUrl(), { max: 1 });
 	const encoder = new TextEncoder();
 
 	const stream = new ReadableStream({
@@ -53,7 +47,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 
 			send("ready", { channelId: channel.id });
 
-			const subscription = await listener.listen("harbor_chat", (payload) => {
+			const unsubscribe = await subscribe("harbor_chat", (payload) => {
 				try {
 					const change = JSON.parse(payload) as {
 						orgId?: string;
@@ -81,8 +75,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ key:
 
 			request.signal.addEventListener("abort", () => {
 				clearInterval(keepAlive);
-				void subscription.unlisten().catch(() => {});
-				void listener.end({ timeout: 1 }).catch(() => {});
+				void unsubscribe().catch(() => {});
 				try {
 					controller.close();
 				} catch {

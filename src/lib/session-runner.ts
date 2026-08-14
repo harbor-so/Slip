@@ -2,9 +2,9 @@
  * The loop that drives one session, and the authority checks that guard the
  * sandbox's edge of the wire.
  *
- * Harbor has no Durable Object, no per-session actor process and no leader
- * election service. The single-writer property that a session needs — exactly one
- * runner deciding what happens next — is bought with one Postgres call:
+ * Harbor has no per-session actor process and no leader election service. The
+ * single-writer property that a session needs — exactly one runner deciding what
+ * happens next — is bought with one Postgres call:
  * `pg_try_advisory_lock`. A second runner that cannot take the lock returns
  * immediately with a typed "somebody else has it" rather than blocking, because a
  * blocked runner is a held connection and a queue of them is an outage that
@@ -84,6 +84,8 @@ import type { EnsureSandboxInput, FenceVerdict } from "../sandbox/manager.js";
 import { ensureSandbox } from "../sandbox/manager.js";
 import { budgetStatus } from "./cost.js";
 import { secretEquals } from "./crypto.js";
+import type { LockOutcome } from "./locks.js";
+import { sessionLock, withLock } from "./locks.js";
 import { promptabilityOf } from "./promptability.js";
 import { appendEvent } from "./session-events.js";
 import { queuePrompt } from "./sessions.js";
@@ -94,80 +96,31 @@ import { claim, HarborError, notifyChange, release } from "./work.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Namespace for the per-session advisory lock.
+ * The per-session single-writer property, which now lives in `src/lib/locks.ts`.
  *
- * Advisory locks are global to the database and keyed only by integers, so two
- * unrelated features that both hash an id into a lock key silently serialise
- * against each other — and can deadlock if either ever takes the other's lock
- * second. A fixed first key word makes the two spaces disjoint by construction.
- * `cost.ts` reserves `HBUD` for budget admission; this is `HSES`, and the value
- * is findable as ASCII in `pg_locks` when somebody is staring at a stuck query.
+ * The namespacing rationale moved there with it: advisory locks are global to the
+ * database and keyed only by integers, so two unrelated features that both hash an
+ * id into a lock key silently serialise against each other — and can deadlock if
+ * either ever takes the other's lock second. `cost.ts` reserves `HBUD` for budget
+ * admission; sessions are `HSES`, and the value is findable as ASCII in `pg_locks`
+ * when somebody is staring at a stuck query.
  */
-const SESSION_LOCK_NAMESPACE = 0x48534553;
-
-export type SessionLockOutcome<T> =
-	| { acquired: true; result: T }
-	/** Somebody else is driving this session. Not an error, and not a retry. */
-	| { acquired: false };
+export type SessionLockOutcome<T> = LockOutcome<T>;
 
 /**
  * Run `body` as the only writer for this session, or return without running it.
  *
- * **Why a reserved connection and not `db.execute`.** An advisory lock taken with
- * `pg_try_advisory_lock` belongs to the *connection* that took it. Issue the lock
- * on a pooled handle and the unlock is a different statement that may be routed to
- * a different backend, which does nothing at all — and the lock is then held until
- * that pooled connection is recycled, which is indefinitely. The symptom is a
- * session that no runner will ever drive again, with no error anywhere, and it
- * only reproduces under a pool with more than one connection. Reserving pins every
- * statement in this function to one backend, and releasing it after the unlock
- * puts it back.
- *
- * **Why not the transaction-scoped variant.** `pg_advisory_xact_lock` is released
- * by COMMIT or ROLLBACK, including the rollback Postgres performs when a
- * connection dies, which is strictly better crash behaviour. It is not usable here
- * because the body boots a sandbox: the transaction would sit open for minutes,
- * holding a snapshot that blocks vacuum on the busiest tables in the system, and
- * every write the body performs would be entangled in one transaction that a
- * single failure rolls back wholesale. A crashed process still releases this lock
- * — the backend dies with the socket and Postgres drops its session locks — which
- * covers the failure that actually happens.
- *
- * Re-entrancy is deliberately not offered. `pg_try_advisory_lock` is re-entrant
- * within one connection, but each call here reserves a *fresh* connection, so a
- * nested call for the same session is correctly refused rather than quietly
- * granted to code that believes it is the only writer.
+ * A thin name over `withLock(sessionLock(id), body)`. It stays because the call
+ * sites read better for it and because "the session's single writer" is a concept
+ * worth having a name for even when its implementation is one line — the reasoning
+ * that makes it correct (reserved connection, session-scoped rather than
+ * transaction-scoped, no re-entrancy) is in `src/lib/locks.ts`.
  */
 export async function withSessionLock<T>(
 	sessionId: string,
 	body: () => Promise<T>,
 ): Promise<SessionLockOutcome<T>> {
-	const reserved = await sql.reserve();
-	try {
-		const [taken] = await reserved`
-			select pg_try_advisory_lock(
-				${SESSION_LOCK_NAMESPACE}::int,
-				hashtext(${sessionId})::int
-			) as acquired
-		`;
-		if (!taken?.acquired) return { acquired: false };
-
-		try {
-			return { acquired: true, result: await body() };
-		} finally {
-			// In a `finally` so a thrown body cannot strand the session. The unlock
-			// runs on the same reserved connection that took it, which is the entire
-			// reason this function exists.
-			await reserved`
-				select pg_advisory_unlock(
-					${SESSION_LOCK_NAMESPACE}::int,
-					hashtext(${sessionId})::int
-				)
-			`;
-		}
-	} finally {
-		reserved.release();
-	}
+	return withLock(sessionLock(sessionId), body);
 }
 
 // ---------------------------------------------------------------------------

@@ -4,10 +4,10 @@
  * Every number below is already computed somewhere in Harbor as a side effect of
  * doing the work — a sandbox row knows when it was requested and when it became
  * ready, the event log knows every claim conflict, the circuit breaker table
- * knows every trip. The competing implementation computes the same facts and
- * throws them away, leaving "read the logs" as the operations posture for a
- * system whose critical dependencies are external providers that fail in ways you
- * cannot reproduce.
+ * knows every trip. Computing those facts and then throwing them away leaves
+ * "read the logs" as the operations posture for a system whose critical
+ * dependencies are external providers that fail in ways you cannot reproduce —
+ * which is the posture this file exists to avoid.
  *
  * So this file does no new measurement. It reads what is already there and
  * renders it in a format a scrape can consume.
