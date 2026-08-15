@@ -240,13 +240,12 @@ export function normalizeProviderState(raw: string): ProviderSandboxState {
 /**
  * Everything a provider needs to start one box, and nothing else.
  *
- * The field count is a design constraint, not an accident. The reference
- * implementation's equivalent has about twenty-five fields, three of which are
- * booleans that all mean "install this optional thing", and the result is that
- * every provider has to read the whole struct to find out that two of the three
- * are irrelevant to it. Optional behaviour goes in `features`, which is one map
- * with one rule (below), so adding an optional capability never widens this
- * interface and never touches a provider that does not implement it.
+ * The field count is a design constraint, not an accident. A struct that grows a
+ * field per optional behaviour — several of them booleans that all mean "install
+ * this optional thing" — forces every provider to read the whole thing to find out
+ * which parts are irrelevant to it. Optional behaviour goes in `features` instead,
+ * which is one map with one rule (below), so adding an optional capability never
+ * widens this interface and never touches a provider that does not implement it.
  */
 export interface CreateSandboxConfig {
 	sessionId: string;

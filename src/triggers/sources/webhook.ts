@@ -4,11 +4,11 @@
  * Any external system that can compute an HMAC can drive an automation: CI,
  * an internal tool, a cron in another system, a Zapier-style bridge. The
  * authenticity model is the GitHub connector's — `X-Harbor-Signature: sha256=<hex>`
- * over the raw body — which is a deliberate step *up* from the reference
- * implementation, whose inbound webhook authenticates with a static bearer token
- * only: a bearer token in a URL or a header is replayable forever and offers no
- * integrity over the body, so a proxy that logs it, or a captured request, is a
- * standing spawn primitive. An HMAC over the bytes is neither.
+ * over the raw body — and deliberately not the easier option of a static bearer
+ * token. A bearer token in a URL or a header is replayable forever and offers no
+ * integrity over the body, so a proxy that logs it, or a single captured request,
+ * becomes a standing spawn primitive. An HMAC over the bytes is neither: it does
+ * not survive being logged, and it covers the payload the conditions read.
  *
  * Because an arbitrary JSON body has no canonical shape, `normalize` reads a
  * documented convention of top-level fields, plus one escape hatch: a sender that

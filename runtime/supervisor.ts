@@ -3,12 +3,10 @@
  *
  * This file executes effects. It decides nothing — every branch it takes comes
  * from `boot-decisions.ts`, which is pure and tested at its boundaries with no
- * mocks. The split is the point, and it is a direct response to the reference
- * implementation this project replaces: 2,523 lines in one class, with boot-mode
- * branching at roughly fifteen scattered call sites. Nobody there can answer
- * "what does a snapshot_restore boot actually do" without reading all fifteen, so
- * nobody does, so the least observable component in the system is also the one
- * that runs first and blames the repository when it goes wrong.
+ * mocks. The split is the point. Fold the decisions back in here and "what does a
+ * snapshot_restore boot actually do" stops having an answer anyone can read in one
+ * place, which would make the component that runs first also the least observable
+ * one — and it is the component that blames the repository when it goes wrong.
  *
  * The boot sequence, in order, once:
  *

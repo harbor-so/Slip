@@ -7,11 +7,15 @@
 
 Harbor shipped the *consumer* of prebuilt images and none of the producer. `repo_image`
 was in `BOOT_MODES`, `boot-decisions.ts` already skipped `setup.sh` for it — and nothing
-ever built such an image or selected the mode, so the branch was dead. This is the
-largest cold-start gap versus the reference (`ColeMurray/background-agents` / Ramp
-Inspect), whose Layer-1 job rebuilds a per-repo image every ~30 minutes with
-dependencies installed; sessions consume the *previous* image, so build time is
-invisible and repo state is at most one interval stale.
+ever built such an image or selected the mode, so the branch was dead. That dead branch
+is the largest remaining cold-start gap: every session pays a full dependency install
+before the agent does any work.
+
+The technique that closes it is to rebuild a per-repo image on an interval with
+dependencies already installed, and have sessions boot the *previous* image. Build time
+then falls entirely outside the spawn path — it is never on a user's clock — and the
+cost is bounded staleness: the checkout and the installed dependencies are at most one
+interval old.
 
 Building this touches four decisions where the obvious answer is the wrong one, and
 each is the kind that passes review and fails later.
@@ -31,9 +35,9 @@ if (provider.capabilities.supportsImages) await provider.buildImage!(cfg);
 Nothing ties the boolean to the method. `local` sets `supportsImages: false` and omits
 `buildImage`, and the day a caller forgets the guard, `provider.buildImage?.(cfg)`
 returns `undefined` and the repo's image simply never appears, with no error anywhere.
-This is the exact Open-Inspect failure the whole provider abstraction was built to
-avoid, and CLAUDE-era convention here is explicit: *capability is a type, not a
-boolean.*
+A capability the compiler cannot check is one that silently degrades in production, and
+this is the exact failure mode the whole provider abstraction exists to prevent. The
+convention here is explicit: *capability is a type, not a boolean.*
 
 **The pointer looks like an append-only log.** "Write every build to a table, read the
 latest by `built_at`" is one partial write away from reading a half-finished failed row
@@ -46,10 +50,11 @@ passes it every time.
 
 **Freshness looks like re-cloning.** It is tempting to bake dependencies and then
 `git pull` the latest code at boot so the checkout is never stale. That is
-`read-before-sync`, explicitly out of scope — and the reference's *docker image* path
-does not do it either. Its 30-minute rebuild bakes the checkout at the build SHA and
-boots it as-is; the "sync the last 30 minutes of commits" behaviour belongs to Ramp's
-*filesystem-snapshot* path, which Harbor already models as `snapshot_restore`.
+`read-before-sync`, explicitly out of scope here, and conflating it with image-building
+is what makes the two modes hard to reason about. A prebuilt image bakes the checkout at
+the build SHA and boots it as-is; catching a workspace up to recent commits is the job
+of the *filesystem-snapshot* path, which Harbor already models separately as
+`snapshot_restore`. Keeping them distinct is what lets each one be explained on its own.
 
 ## Decision
 
@@ -105,7 +110,8 @@ build bill.
 **Boot semantics: bake the checkout and dependencies, boot as-is.** The `build` mode
 clones the pinned SHA and runs `setup.sh` fatally; `repo_image` boots that image, skips
 `setup.sh` (baked) and runs `start.sh`, and does not re-clone. Repo state is therefore
-at most `imageBuildIntervalMs` stale, which is the reference's accepted trade and keeps
+at most `imageBuildIntervalMs` stale. That is the trade this ADR accepts deliberately:
+bounded staleness in exchange for a cold start that costs no install, and it keeps
 `read-before-sync` out.
 
 **Spend is attributed.** Builds reserve budget under a new `image_build` cost kind with

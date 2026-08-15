@@ -161,8 +161,29 @@ describe("the docs describe Harbor and nothing else", () => {
 		"competing implementation",
 		"reference implementation",
 		"the reference design",
+		"the reference's",
 		"block/buzz",
 	];
+
+	/**
+	 * Match against normalized text, not the raw bytes.
+	 *
+	 * The first version of this check tested `raw.includes(term)`, and six files
+	 * passed it while containing a banned phrase in full — because a comment had
+	 * wrapped it: `* ...the reference\n * implementation's...`. The substring is
+	 * split by a newline and a ` * ` leader, so it never matched, and the check
+	 * reported clean on exactly the prose it existed to find.
+	 *
+	 * Joining comment-continuation lines and collapsing whitespace closes that.
+	 * Do not "simplify" this back to a raw `includes` — the wrapping is invisible
+	 * in a diff and the check goes quietly vacuous again.
+	 */
+	function normalize(raw: string): string {
+		return raw
+			.toLowerCase()
+			.replace(/\s*\n\s*\*?\s*/g, " ")
+			.replace(/\s+/g, " ");
+	}
 
 	function sources(): string[] {
 		const out: string[] = [];
@@ -188,7 +209,7 @@ describe("the docs describe Harbor and nothing else", () => {
 		for (const file of sources()) {
 			// This file necessarily contains the banned strings, as data.
 			if (file.endsWith("readme-claims.test.ts")) continue;
-			const text = readFileSync(file, "utf8").toLowerCase();
+			const text = normalize(readFileSync(file, "utf8"));
 			for (const term of BANNED) {
 				if (text.includes(term)) offenders.push(`${file.replace(ROOT + "/", "")}: "${term}"`);
 			}
