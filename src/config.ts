@@ -608,7 +608,7 @@ export const SETTINGS = {
 		env: "HARBOR_IMAGE_BUILD_INTERVAL_MS",
 		fallback: 1_800_000,
 		derivation:
-			"Thirty minutes, the reference implementation's cadence. It is the staleness "
+			"Thirty minutes. It is the staleness "
 			+ "bound on baked dependencies: a new dependency added to the repo is absent "
 			+ "from the image until the next build, so this is the longest a session may "
 			+ "boot with a slightly old lockfile installed. Shorter means fresher images "

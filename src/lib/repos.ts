@@ -1,13 +1,13 @@
 /**
  * Connecting a repository, and the access check that makes Harbor multi-tenant.
  *
- * This is the file where Harbor diverges hardest from the reference
- * implementation, and the divergence is one function. There, a single shared
- * GitHub App installation performs every git operation and there is **no per-user
- * repository access check at all** — so any user of the deployment can start a
- * session against any repository the App is installed on. That is a defensible
- * choice for a tool built for one internal team, and it is disqualifying for
- * anyone with contractors, a second team, or an intern.
+ * The tempting shape is to let a single shared GitHub App installation perform
+ * every git operation and do **no per-user repository access check at all**. It
+ * works, it is less code, and it is defensible for a tool built for one internal
+ * team where everybody can already read everything. It is disqualifying the moment
+ * a deployment has contractors, a second team, or an intern: any user could start
+ * a session against any repository the App is installed on, and the App's reach is
+ * the union of every repository anyone connected.
  *
  * `connectRepo` therefore verifies access with the **requesting user's own**
  * source-control token before writing a row, and `assertRepoAccess` re-checks at

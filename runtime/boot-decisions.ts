@@ -1,14 +1,13 @@
 /**
  * Every branch the in-sandbox runtime takes, as a function of its inputs alone.
  *
- * This module exists because of a specific, documented failure in the reference
- * implementation Harbor is a response to: its supervisor is 2,523 lines in one
- * class, and boot-mode branching happens at roughly fifteen scattered call sites.
- * Nobody can say what a `snapshot_restore` boot does without reading all fifteen,
- * and when one of them is wrong the symptom is "setup.sh ran twice" or "setup.sh
- * never ran", observed hours later as a mysteriously broken environment. It is the
- * least observable component in that system, and the reason is not that boot is
- * hard — it is that the decisions are interleaved with the effects.
+ * This module exists because of a specific failure mode. When boot-mode branching
+ * is scattered across a supervisor that also performs the effects, nobody can say
+ * what a `snapshot_restore` boot does without reading every call site, and when
+ * one of them is wrong the symptom is "setup.sh ran twice" or "setup.sh never
+ * ran", observed hours later as a mysteriously broken environment. Boot then
+ * becomes the least observable component in the system, and the reason is not
+ * that boot is hard — it is that the decisions are interleaved with the effects.
  *
  * So the decisions live here and nothing in this file performs one. No `fs`, no
  * `child_process`, no `fetch`, no clock, no `process.env`, no `setting()` — every

@@ -42,6 +42,21 @@ The consequence is the point: a pull request's author cannot approve it, so the
 engineer who prompted the agent cannot rubber-stamp its output. Unreviewed agent
 code becomes structurally impossible rather than policy-prohibited.
 
+**Which half performs the push, as shipped.** The **supervisor** runs the push —
+`pushWorkingBranch` in `runtime/supervisor.ts`, gated by the pure `pushDecision()`
+in `runtime/boot-decisions.ts`, and it runs *before* `agent_finished`, because that
+event closes the turn and hands the lease back. `branch_pushed` is emitted from
+there. The agent is not relied on to push: "bring your own agent" goes down to an
+argv template, so a guarantee that depends on the agent choosing to run `git push`
+against the right ref is not a guarantee.
+
+This is worth stating explicitly because an alternative was considered and *not*
+adopted — leaving the push to the agent and having the supervisor merely observe
+git state afterwards to infer whether a push happened. A commit in the history
+carries a description of that alternative, but it landed as an empty merge and
+changed no code. The shipped behaviour is the one described above; when the two
+disagree, this ADR is correct and the commit message is not.
+
 ### Author and committer are separate properties, tested separately
 
 The pull request's *author* comes from the token used to create it. The commit's

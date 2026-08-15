@@ -3,10 +3,10 @@
  *
  * A prebuilt-image pipeline that rebuilds on a timer does the same work whether
  * or not anything changed, and the same work is not free: it is a container, an
- * install, and a registry push per repository per interval. The reference
- * implementation Harbor is measured against rebuilds every thirty minutes
- * unconditionally, which is affordable for one team and is not affordable for a
- * deployment with two hundred repositories.
+ * install, and a registry push per repository per interval. Rebuilding every
+ * thirty minutes unconditionally is affordable for one team with a handful of
+ * repositories and is not affordable for a deployment with two hundred, where the
+ * bill scales with repository count rather than with how much anything changed.
  *
  * The observation this exploits: an image is interesting only because of what
  * `setup.sh` (or auto-detection) installed into it, and what gets installed is a
