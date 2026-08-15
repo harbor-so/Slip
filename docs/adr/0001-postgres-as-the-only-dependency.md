@@ -91,9 +91,21 @@ substitute for the actor design but an improvement on it.
   account of any kind.
 - One store rather than six. No dual-write between a per-session store and a
   shared coordination index, and so no reconciliation path to get wrong.
-- Real transactions. Lease admission, budget reservation and event append are
-  atomic *with each other* — which is not available when the lease and the
-  transcript live in different stores.
+- Real transactions, and one store to have them in. Lease admission
+  (`claim` in `src/lib/work.ts`), budget reservation (`reserveBudget` in
+  `src/lib/cost.ts`) and event append are each atomic, and each is free to compose
+  reads and writes across several tables inside one transaction — `reserveBudget`
+  reads the day's spend and writes the reservation under one org-budget lock, which
+  is what makes the cap hold under concurrency.
+
+  Stated precisely, because an earlier version of this line overstated it: these
+  three are **not** a single transaction with each other. `claim` commits when the
+  lease is taken; `reserveBudget` runs later, in its own transaction, on the spawn
+  path. The guarantee is that they share one store, so there is no dual-write
+  between systems and no reconciliation path to get wrong — not that a lease and
+  its first reservation commit or roll back together. A backend that serialises
+  these per scope by another means is therefore not required to reproduce a
+  cross-entity transaction that does not exist here.
 - Deployable into a VPC, on-premises, or air-gapped.
 
 ### Negative — the accepted costs
