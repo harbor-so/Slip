@@ -18,12 +18,12 @@ import { createHash } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { POST as postSandboxEvents } from "./[id]/events/route.js";
-import { db, sql } from "../../../core/schema/index.js";
-import { claims, costEvents, orgs, sandboxes, sessionPrompts, sessions } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, costEvents, orgs, sandboxes, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { budgetStatus } from "../../lib/cost.js";
 import { takeNextPrompt } from "../../lib/session-runner.js";
 import { createSession, queuePrompt } from "../../lib/sessions.js";
-import { claim, createTask } from "../../../core/kernel/work.js";
+import { claim, createTask } from "@core/kernel/work.js";
 
 let orgId: string;
 let sessionId: string;

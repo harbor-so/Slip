@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { db } from "../../../core/schema/index.js";
-import { apiKeys, runs } from "../../../core/schema/schema.js";
-import { hashApiKey, mintApiKey } from "../../../core/kernel/keys.js";
+import { db } from "@core/schema/index.js";
+import { apiKeys, runs } from "@core/schema/schema.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { launchRun, RunnerDisabledError, RUNTIME_IDS, type Runtime } from "../../lib/runner.js";
 import { currentSession } from "../../lib/session.js";
 

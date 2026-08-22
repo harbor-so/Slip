@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST as postSandboxEvents } from "./[id]/events/route.js";
-import { db, sql } from "../../../core/schema/index.js";
+import { db, sql } from "@core/schema/index.js";
 import {
 	artifacts,
 	orgs,
@@ -29,10 +29,10 @@ import {
 	sessionRepos,
 	sessions,
 	users,
-} from "../../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import { createSession } from "../../lib/sessions.js";
 import { enqueueSessionPrompt } from "../../lib/session-runner.js";
-import { claim, createTask } from "../../../core/kernel/work.js";
+import { claim, createTask } from "@core/kernel/work.js";
 import { harborBranchName } from "../../git/provider.js";
 import type { CreatePullRequestInput, PullRequestOutcome, ScmProvider } from "../../git/provider.js";
 import * as githubModule from "../../git/github.js";

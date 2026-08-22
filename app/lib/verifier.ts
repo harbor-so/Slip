@@ -16,8 +16,8 @@
  */
 
 import { and, desc, eq, gte, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { events } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { events } from "@core/schema/schema.js";
 
 /**
  * Closed set. A verifier either passed, failed, or could not run — there is no

@@ -14,11 +14,11 @@
  *   DATABASE_URL=... npm run demo:chat   # in another
  */
 
-import { db, sql } from "../core/schema/index.js";
-import { apiKeys, orgs } from "../core/schema/schema.js";
-import { ChatClient } from "../app/lib/chat-client.js";
-import { generateKeypair } from "../app/lib/signing.js";
-import { hashApiKey, mintApiKey } from "../core/kernel/keys.js";
+import { db, sql } from "@core/schema/index.js";
+import { apiKeys, orgs } from "@core/schema/schema.js";
+import { ChatClient } from "@app/lib/chat-client.js";
+import { generateKeypair } from "@app/lib/signing.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 
 const BASE = process.env.HARBOR_URL ?? "http://localhost:3000";
 

@@ -11,7 +11,7 @@
 import Link from "next/link";
 import { listChannels } from "../lib/chat.js";
 import { currentSession } from "../lib/session.js";
-import { relTime } from "../../core/kernel/format.js";
+import { relTime } from "@core/kernel/format.js";
 import { Badge, Card, Empty, SectionLabel } from "../components/ui.js";
 import { NewChannel } from "./new-channel.js";
 

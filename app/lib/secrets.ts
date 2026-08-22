@@ -23,10 +23,10 @@
  */
 
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { environmentRepos, secrets } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { environmentRepos, secrets } from "@core/schema/schema.js";
 import { decrypt, encrypt } from "./crypto.js";
-import { HarborError } from "../../core/kernel/work.js";
+import { HarborError } from "@core/kernel/work.js";
 
 export type SecretScope = "global" | "repo" | "environment";
 

@@ -24,8 +24,8 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../../core/schema/index.js";
-import { artifacts, orgs, sessions } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { artifacts, orgs, sessions } from "@core/schema/schema.js";
 import { appendEvent } from "../../lib/session-events.js";
 import { createSession, queuePrompt } from "../../lib/sessions.js";
 

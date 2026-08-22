@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { and, eq, isNull } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { setting } from "../../../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { SandboxEvent, SandboxEventType, SessionEventType } from "../../../../contracts/index.js";
 import { SANDBOX_EVENT_TYPES } from "../../../../contracts/index.js";
-import { db } from "../../../../../core/schema/index.js";
-import { artifacts, claims, sandboxes, sessions } from "../../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { artifacts, claims, sandboxes, sessions } from "@core/schema/schema.js";
 import { openPullRequestForBranch } from "../../../../git/pull-request.js";
 import { pinWorkingBranch, resolvePushBranch } from "../../../../git/working-branch.js";
 import { assertNever } from "../../../../sandbox/decisions.js";

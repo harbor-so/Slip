@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { channelByKey, mayRead } from "../../../../lib/chat.js";
 import { resolveConn } from "../../../../lib/conn.js";
-import { subscribe } from "../../../../../core/kernel/bus.js";
+import { subscribe } from "@core/kernel/bus.js";
 
 /**
  * A live feed for one channel, over Server-Sent Events.

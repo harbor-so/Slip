@@ -12,8 +12,8 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { imageBuilds, orgs, repoImages, repos } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { imageBuilds, orgs, repoImages, repos } from "@core/schema/schema.js";
 import { recordCost } from "../lib/cost.js";
 import type { SandboxProvider } from "../sandbox/provider.js";
 import type { BuildRequest, BuildResult } from "./builder.js";

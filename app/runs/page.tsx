@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { desc, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { runs } from "../../core/schema/schema.js";
-import { relTime } from "../../core/kernel/format.js";
+import { db } from "@core/schema/index.js";
+import { runs } from "@core/schema/schema.js";
+import { relTime } from "@core/kernel/format.js";
 import { runnerEnabled } from "../lib/runner.js";
 import { currentSession } from "../lib/session.js";
 import { Badge, Card, Empty, SectionLabel, type Tone } from "../components/ui.js";

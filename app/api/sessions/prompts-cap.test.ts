@@ -18,7 +18,7 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../../core/schema/index.js";
+import { db, sql } from "@core/schema/index.js";
 import {
 	artifacts,
 	automationRuns,
@@ -26,7 +26,7 @@ import {
 	orgs,
 	sessionPrompts,
 	sessions,
-} from "../../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import { createSession, queuePrompt } from "../../lib/sessions.js";
 import { handleSlackWebhook } from "../../connectors/slack.js";
 import { runAutomation } from "../../triggers/automations.js";

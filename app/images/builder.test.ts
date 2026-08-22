@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { setting } from "../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { ImageBuildConfig, ImageBuildingProvider, SandboxProvider } from "../sandbox/provider.js";
 import { localProvider } from "../sandbox/providers/local.js";
 import { buildRepoImage, repoImageTag } from "./builder.js";

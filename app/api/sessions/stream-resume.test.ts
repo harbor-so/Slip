@@ -19,9 +19,9 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { GET as getSessionStream } from "./[key]/stream/route.js";
-import { db, sql } from "../../../core/schema/index.js";
-import { apiKeys, orgs, sessions } from "../../../core/schema/schema.js";
-import { hashApiKey, mintApiKey } from "../../../core/kernel/keys.js";
+import { db, sql } from "@core/schema/index.js";
+import { apiKeys, orgs, sessions } from "@core/schema/schema.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { appendEvent, compactSession } from "../../lib/session-events.js";
 import { createSession } from "../../lib/sessions.js";
 

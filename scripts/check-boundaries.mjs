@@ -261,4 +261,42 @@ if (violations.length > 0) {
 
 assertZonesPopulated(zoneCounts, "check-boundaries");
 
-console.log("check-boundaries: core/ imports nothing outside core/, and app/ imports nothing from pilot/.");
+/**
+ * runtime/ may not use the `@core/` or `@app/` aliases, and this is the one rule
+ * here whose violation is invisible until production.
+ *
+ * Everything else in the repository resolves those aliases: Next.js and tsx read
+ * `paths` out of tsconfig.json, and vitest.config.ts declares them by hand. So an
+ * aliased import in runtime/ typechecks, passes the suite, and looks correct.
+ *
+ * It then fails in the only place nobody is looking. sandbox/Dockerfile compiles
+ * runtime/ with its own generated tsconfig, which has no `paths`, and the emit runs
+ * under bare Node inside the agent image with no node_modules and no resolver. A
+ * specifier of `@app/activity/types.js` is not resolvable there, so the sandbox
+ * every agent session runs in dies on import — after a green CI run.
+ */
+const aliasedRuntime = [];
+for (const absolute of walk("runtime")) {
+	const file = path.relative(ROOT, path.resolve(absolute)).replaceAll("\\", "/");
+	for (const { specifier, line } of importsOf(readFileSync(absolute, "utf8")).imports) {
+		if (/^@(core|app)\//.test(specifier)) aliasedRuntime.push(`${file}:${line}  "${specifier}"`);
+	}
+}
+if (aliasedRuntime.length > 0) {
+	console.error(
+		`check-boundaries: ${aliasedRuntime.length} aliased import(s) under runtime/.\n`,
+	);
+	for (const hit of aliasedRuntime) console.error(`  ${hit}`);
+	console.error(
+		"\n    runtime/ is compiled by sandbox/Dockerfile with a tsconfig that has no `paths`,\n"
+		+ "    and its emit runs under bare Node with no node_modules. Use a relative specifier\n"
+		+ "    (../../core/kernel/config.js). This passes tsc and the test suite either way —\n"
+		+ "    the failure only appears inside the sandbox image, at import time.",
+	);
+	process.exit(1);
+}
+
+console.log(
+	"check-boundaries: core/ imports nothing outside core/, app/ imports nothing from pilot/,\n"
+	+ "                 and runtime/ uses no path aliases.",
+);

@@ -21,8 +21,8 @@ vi.mock("next/headers", () => ({
 }));
 
 import { eq } from "drizzle-orm";
-import { db, sql } from "../../../core/schema/index.js";
-import { automations, orgs, repos } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { automations, orgs, repos } from "@core/schema/schema.js";
 import { POST } from "./route.js";
 
 let orgId: string;

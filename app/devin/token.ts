@@ -15,8 +15,8 @@
  */
 
 import { and, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { connectors } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { connectors } from "@core/schema/schema.js";
 
 /** The `connectors.type` a Devin token is stored under. */
 export const DEVIN_CONNECTOR_TYPE = "devin";

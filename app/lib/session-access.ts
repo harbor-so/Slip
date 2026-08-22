@@ -22,7 +22,7 @@
  * one of them to compare without the org.
  */
 
-import { orgIdForKey } from "../../core/kernel/auth.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 import { currentSession } from "./session.js";
 import { sessionByKey } from "./sessions.js";
 

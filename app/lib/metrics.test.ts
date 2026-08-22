@@ -16,8 +16,8 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs } from "@core/schema/schema.js";
 import { recordProviderFailure, recordProviderSuccess } from "../sandbox/circuit.js";
 import { recordOrphanReconciled } from "../sandbox/manager.js";
 import { collectMetrics } from "./metrics.js";

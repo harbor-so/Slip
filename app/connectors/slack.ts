@@ -24,11 +24,11 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { artifacts, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { artifacts, sessions } from "@core/schema/schema.js";
 import { createSession } from "../lib/sessions.js";
 import { enqueueSessionPrompt } from "../lib/session-runner.js";
-import { linkBaseUrl } from "../../core/kernel/urls.js";
+import { linkBaseUrl } from "@core/kernel/urls.js";
 import { resolveTarget } from "./routing.js";
 import type {
 	Connector,

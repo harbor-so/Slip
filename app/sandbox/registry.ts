@@ -20,7 +20,7 @@
  * that `stop` is idempotent or that `findByAttemptId` fails closed.
  */
 
-import { setting } from "../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import { SandboxProviderError, assertNever } from "./provider.js";
 import type { SandboxProvider } from "./provider.js";
 import { blaxelProvider } from "./providers/blaxel.js";

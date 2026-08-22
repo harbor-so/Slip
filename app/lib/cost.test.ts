@@ -17,8 +17,8 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { claims, costEvents, orgs, repos, sessions, tasks } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, costEvents, orgs, repos, sessions, tasks } from "@core/schema/schema.js";
 import {
 	budgetStatus,
 	canAdmitNewWork,

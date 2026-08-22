@@ -20,9 +20,9 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs, sandboxes, sessions } from "../../core/schema/schema.js";
-import { claim, createTask } from "../../core/kernel/work.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, sandboxes, sessions } from "@core/schema/schema.js";
+import { claim, createTask } from "@core/kernel/work.js";
 import { createSession } from "../lib/sessions.js";
 import { sweepProviderOrphans } from "./orphans.js";
 import type { SandboxInspection, SandboxProvider } from "./provider.js";
@@ -200,7 +200,7 @@ describe("sweepProviderOrphans", () => {
 		expect(held.deferred).toEqual(["ext-held"]);
 		expect(fleet.running.has("ext-held")).toBe(true);
 
-		const { release } = await import("../../core/kernel/work");
+		const { release } = await import("@core/kernel/work");
 		await release(orgId, task.id, "agent-a", "done");
 		const after = await sweepProviderOrphans(new Date(), { provider: fleet.provider });
 		expect(after.stopped).toEqual(["ext-held"]);

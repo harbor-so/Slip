@@ -12,8 +12,8 @@ process.env.HARBOR_ENCRYPTION_KEY = Buffer.from(
 ).toString("base64");
 
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs, repos, secrets, sessionRepos, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, repos, secrets, sessionRepos, sessions } from "@core/schema/schema.js";
 import { encrypt } from "../lib/crypto.js";
 import { buildSandboxEnv, resumeTokenForBoot } from "./env.js";
 

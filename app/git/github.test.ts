@@ -18,8 +18,8 @@ import { generateKeyPairSync, verify as verifySignature } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SANDBOX_STATUSES } from "../contracts/index.js";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs, repos, sandboxes, sessionRepos, sessions, users } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, repos, sandboxes, sessionRepos, sessions, users } from "@core/schema/schema.js";
 import {
 	DEAD_STATUSES_FOR_CREDENTIALS,
 	authoriseGitHost,

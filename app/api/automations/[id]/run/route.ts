@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../../../../core/schema/index.js";
-import { automations } from "../../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { automations } from "@core/schema/schema.js";
 import { currentSession } from "../../../../lib/session.js";
 import { runAutomation } from "../../../../triggers/automations.js";
 

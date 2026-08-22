@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Card, Empty, SectionLabel } from "../../components/ui.js";
 import { ChatClient, type ChannelRef } from "../../lib/chat-client.js";
 import { ensureIdentity } from "../../lib/identity-browser.js";
-import { relTime } from "../../../core/kernel/format.js";
+import { relTime } from "@core/kernel/format.js";
 
 /**
  * The live room, entirely client-side.

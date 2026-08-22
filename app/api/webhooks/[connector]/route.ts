@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { connectorFor } from "../../../connectors/registry.js";
 import type { ConnectorContext } from "../../../connectors/types.js";
-import { db } from "../../../../core/schema/index.js";
-import { connectors, events } from "../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { connectors, events } from "@core/schema/schema.js";
 
 /**
  * One route per connector, and the ordering inside it is the security model.

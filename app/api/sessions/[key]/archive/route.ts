@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../../../../core/schema/index.js";
-import { sessions } from "../../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { sessions } from "@core/schema/schema.js";
 import { resolveSession } from "../../../../lib/session-access.js";
-import { notifyChange } from "../../../../../core/kernel/work.js";
+import { notifyChange } from "@core/kernel/work.js";
 
 /**
  * File a session away.

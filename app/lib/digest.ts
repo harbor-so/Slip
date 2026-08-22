@@ -11,8 +11,8 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { and, asc, eq, gte, inArray, lt } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { digests, events, projects, tasks } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { digests, events, projects, tasks } from "@core/schema/schema.js";
 import { recordTokenUsage } from "./cost.js";
 
 const DIGEST_INSTRUCTION =

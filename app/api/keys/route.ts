@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
-import { db } from "../../../core/schema/index.js";
-import { apiKeys } from "../../../core/schema/schema.js";
-import { hashApiKey, mintApiKey } from "../../../core/kernel/keys.js";
+import { db } from "@core/schema/index.js";
+import { apiKeys } from "@core/schema/schema.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { currentSession } from "../../lib/session.js";
 
 /**

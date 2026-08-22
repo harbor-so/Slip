@@ -6,8 +6,8 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs } from "@core/schema/schema.js";
 import { verifierHistory, writeVerifierOutcome } from "./verifier.js";
 
 let orgId: string;

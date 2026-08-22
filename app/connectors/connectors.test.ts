@@ -7,10 +7,10 @@
 import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { artifacts, orgs, tasks } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { artifacts, orgs, tasks } from "@core/schema/schema.js";
 import { createSession } from "../lib/sessions.js";
-import { claim } from "../../core/kernel/work.js";
+import { claim } from "@core/kernel/work.js";
 import {
 	handleGitHubWebhook,
 	verifyGitHubWebhook,

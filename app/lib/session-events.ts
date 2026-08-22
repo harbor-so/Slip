@@ -36,7 +36,7 @@
  */
 
 import { and, asc, desc, eq, gt, inArray, lt, sql as raw } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import {
 	ARTIFACT_KINDS,
 	BOOT_MODES,
@@ -49,7 +49,7 @@ import {
 	type SessionEventType,
 	type SessionSnapshot,
 } from "../contracts/index.js";
-import { db } from "../../core/schema/index.js";
+import { db } from "@core/schema/index.js";
 import {
 	artifacts,
 	sandboxes,
@@ -57,8 +57,8 @@ import {
 	sessionParticipants,
 	sessionPrompts,
 	sessions,
-} from "../../core/schema/schema.js";
-import { HarborError, notifyChange } from "../../core/kernel/work.js";
+} from "@core/schema/schema.js";
+import { HarborError, notifyChange } from "@core/kernel/work.js";
 
 /**
  * The db handle or a transaction on it.

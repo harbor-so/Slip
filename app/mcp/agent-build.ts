@@ -22,7 +22,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { agentTools, type AgentToolContext } from "./agent-tools.js";
-import { toToolError } from "../../core/mcp/tools";
+import { toToolError } from "@core/mcp/tools";
 
 export const AGENT_INSTRUCTIONS =
 	"You are running inside a Harbor sandbox on one session. Use report_progress to "

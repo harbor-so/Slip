@@ -51,8 +51,8 @@ import {
 	type ProviderErrorType,
 	type SandboxStatus,
 } from "../contracts/index.js";
-import { db } from "../../core/schema/index.js";
-import { repos, sandboxes, sessionRepos, userScmTokens } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { repos, sandboxes, sessionRepos, userScmTokens } from "@core/schema/schema.js";
 import { CryptoError, decrypt, encrypt } from "../lib/crypto.js";
 import { type FetchLike, createScmProvider, looksLikeRefreshToken } from "./github.js";
 import {

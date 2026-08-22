@@ -26,10 +26,10 @@
  */
 
 import { and, eq, isNull, lte, or, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { automationRuns, automations, sessions } from "../../core/schema/schema.js";
-import { setting } from "../../core/kernel/config.js";
-import { globalLock, withLock } from "../../core/kernel/locks.js";
+import { db } from "@core/schema/index.js";
+import { automationRuns, automations, sessions } from "@core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
+import { globalLock, withLock } from "@core/kernel/locks.js";
 import { createSession } from "../lib/sessions.js";
 import { enqueueSessionPrompt } from "../lib/session-runner.js";
 import { environmentRepoIds } from "../lib/secrets.js";

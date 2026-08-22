@@ -21,9 +21,9 @@
 import { cookies } from "next/headers";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { orgs, users } from "../../core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { orgs, users } from "@core/schema/schema.js";
 
 const COOKIE = "harbor_session";
 

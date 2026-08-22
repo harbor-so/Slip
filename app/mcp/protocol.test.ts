@@ -24,9 +24,9 @@ import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index";
-import { apiKeys, orgs, projects, tasks } from "../../core/schema/schema";
-import { hashApiKey, mintApiKey } from "../../core/kernel/keys";
+import { db, sql } from "@core/schema/index";
+import { apiKeys, orgs, projects, tasks } from "@core/schema/schema";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys";
 import { app } from "../../app/mcp/server.js";
 
 let server: Server;

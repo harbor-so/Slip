@@ -21,7 +21,7 @@
  */
 
 import { createHmac } from "node:crypto";
-import { setting } from "../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import { secretEquals } from "../../lib/crypto.js";
 import type { ConditionSubject } from "../conditions.js";
 import { isRecord, type TriggerSource } from "./types.js";

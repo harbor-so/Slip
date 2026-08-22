@@ -43,8 +43,8 @@
  */
 
 import { sql as raw } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
+import { setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
 
 interface Metric {
 	name: string;
@@ -323,7 +323,7 @@ export async function readiness(): Promise<{ ok: boolean; checks: Record<string,
 	// a rolling environment change should stop taking traffic, not serve requests
 	// that will kill every sandbox they create.
 	try {
-		const { validateConfig } = await import("../../core/kernel/config");
+		const { validateConfig } = await import("@core/kernel/config");
 		validateConfig();
 		checks.config = "ok";
 	} catch (error) {

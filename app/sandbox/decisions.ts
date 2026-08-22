@@ -36,7 +36,7 @@
  *    isolation it looks like an inconsistency to be "fixed".
  */
 
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
 import {
 	CIRCUIT_TRIPPING_ERROR_TYPES,
 	DEAD_SANDBOX_STATUSES,

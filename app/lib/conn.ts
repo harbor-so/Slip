@@ -12,7 +12,7 @@
  * a stronger statement of intent than an ambient one, and it is the agent path.
  */
 
-import { orgIdForKey } from "../../core/kernel/auth.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 import { currentSession } from "./session.js";
 
 export interface Conn {

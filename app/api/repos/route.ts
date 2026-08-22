@@ -5,7 +5,7 @@ import { listsRepositories } from "../../git/provider.js";
 import { connectRepo, listRepos } from "../../lib/repos.js";
 import { currentSession } from "../../lib/session.js";
 import { viewerScmToken } from "../../lib/viewer-scm.js";
-import { HarborError } from "../../../core/kernel/work.js";
+import { HarborError } from "@core/kernel/work.js";
 
 /**
  * Repositories: the ones this org has connected, and the ones you could connect.

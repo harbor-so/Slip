@@ -29,8 +29,8 @@
  */
 
 import { asc, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { repos, sessionRepos, type sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { repos, sessionRepos, type sessions } from "@core/schema/schema.js";
 import { AGENT_RUNTIMES } from "../contracts/agent.js";
 import { resolveSecrets } from "../lib/secrets.js";
 

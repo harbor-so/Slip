@@ -20,15 +20,15 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { GET as getSandboxCommands } from "./[id]/commands/route.js";
 import { identityForPrompt } from "../../../runtime/bridge.js";
-import { db, sql } from "../../../core/schema/index.js";
-import { orgs, sandboxes } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, sandboxes } from "@core/schema/schema.js";
 import {
 	enqueueSessionPrompt,
 	sha256Hex,
 	takeNextPrompt,
 } from "../../lib/session-runner.js";
 import { createSession, queuePrompt } from "../../lib/sessions.js";
-import { notifyChange } from "../../../core/kernel/work.js";
+import { notifyChange } from "@core/kernel/work.js";
 
 let orgId: string;
 let sessionId: string;
@@ -260,7 +260,7 @@ describe("prompt commands carry a complete, runnable identity", () => {
 			body: "raw, no email",
 		});
 
-		const { sessionPrompts } = await import("../../../core/schema/schema");
+		const { sessionPrompts } = await import("@core/schema/schema");
 		const { eq } = await import("drizzle-orm");
 		const rows = await db
 			.select()

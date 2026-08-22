@@ -14,9 +14,9 @@ vi.mock("../../../devin/client.js", async (importOriginal) => {
 	return { ...actual, createDevinSession: vi.fn() };
 });
 
-import { db, sql } from "../../../../core/schema/index.js";
-import { apiKeys, connectors, devinSessions, orgs, sessions, tasks } from "../../../../core/schema/schema.js";
-import { hashApiKey, mintApiKey } from "../../../../core/kernel/keys.js";
+import { db, sql } from "@core/schema/index.js";
+import { apiKeys, connectors, devinSessions, orgs, sessions, tasks } from "@core/schema/schema.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { createDevinSession } from "../../../devin/client.js";
 import { POST } from "./route.js";
 

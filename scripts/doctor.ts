@@ -24,11 +24,11 @@
  * the database is down is useless on the day the database is down.
  */
 
-import { describeConfig, validateConfig } from "../core/kernel/config.js";
-import { databaseUrl } from "../core/schema/index.js";
-import { describeDatabaseTls } from "../core/schema/tls.js";
-import { agentMcpUrl, mcpUrl, publicUrl, warnAboutAddressing } from "../core/kernel/urls.js";
-import { SANDBOX_PROVIDER_NAMES, providerFor } from "../app/sandbox/registry.js";
+import { describeConfig, validateConfig } from "@core/kernel/config.js";
+import { databaseUrl } from "@core/schema/index.js";
+import { describeDatabaseTls } from "@core/schema/tls.js";
+import { agentMcpUrl, mcpUrl, publicUrl, warnAboutAddressing } from "@core/kernel/urls.js";
+import { SANDBOX_PROVIDER_NAMES, providerFor } from "@app/sandbox/registry.js";
 
 const problems: string[] = [];
 

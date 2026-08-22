@@ -75,22 +75,22 @@
 
 import { and, asc, eq, isNull, sql as raw } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
-import type { RepoOverrides } from "../../core/kernel/config.js";
-import { setting } from "../../core/kernel/config.js";
+import type { RepoOverrides } from "@core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { SpawnOutcome, SpawnRefusal } from "../contracts/index.js";
-import { db, sql } from "../../core/schema/index.js";
-import { claims, sandboxes, sessionPrompts, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, sandboxes, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { assertNever } from "../sandbox/decisions.js";
 import type { EnsureSandboxInput, FenceVerdict } from "../sandbox/manager.js";
 import { ensureSandbox } from "../sandbox/manager.js";
 import { budgetStatus } from "./cost.js";
 import { secretEquals } from "./crypto.js";
-import type { LockOutcome } from "../../core/kernel/locks.js";
-import { sessionLock, withLock } from "../../core/kernel/locks.js";
+import type { LockOutcome } from "@core/kernel/locks.js";
+import { sessionLock, withLock } from "@core/kernel/locks.js";
 import { promptabilityOf } from "./promptability.js";
 import { appendEvent } from "./session-events.js";
 import { queuePrompt } from "./sessions.js";
-import { claim, HarborError, notifyChange, release } from "../../core/kernel/work.js";
+import { claim, HarborError, notifyChange, release } from "@core/kernel/work.js";
 
 // ---------------------------------------------------------------------------
 // Single writer

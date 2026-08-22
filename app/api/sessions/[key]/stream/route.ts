@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { and, asc, eq, gt } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { setting } from "../../../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { SessionEvent, SessionEventType } from "../../../../contracts/index.js";
-import { db } from "../../../../../core/schema/index.js";
-import { sessionEvents } from "../../../../../core/schema/schema.js";
-import { orgIdForKey } from "../../../../../core/kernel/auth.js";
-import { subscribe } from "../../../../../core/kernel/bus.js";
+import { db } from "@core/schema/index.js";
+import { sessionEvents } from "@core/schema/schema.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
+import { subscribe } from "@core/kernel/bus.js";
 import { currentSession } from "../../../../lib/session.js";
 import { retainedFromSeq, snapshotSession } from "../../../../lib/session-events.js";
 import { sessionByKey } from "../../../../lib/sessions.js";

@@ -14,7 +14,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { allConnectors } from "../app/connectors/registry.js";
+import { allConnectors } from "@app/connectors/registry.js";
 
 const START = "<!-- BEGIN GENERATED: outbound writes -->";
 const END = "<!-- END GENERATED: outbound writes -->";

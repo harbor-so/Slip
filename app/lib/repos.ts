@@ -18,9 +18,9 @@
  */
 
 import { and, eq, isNull } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { environmentRepos, environments, repos, sessionRepos } from "../../core/schema/schema.js";
-import { HarborError } from "../../core/kernel/work.js";
+import { db } from "@core/schema/index.js";
+import { environmentRepos, environments, repos, sessionRepos } from "@core/schema/schema.js";
+import { HarborError } from "@core/kernel/work.js";
 
 export interface ConnectRepoInput {
 	orgId: string;

@@ -31,7 +31,7 @@
  * useless in a support conversation, "skipped: head_unchanged" ends it.
  */
 
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
 
 /**
  * The subset of a `repo_images` row the decisions read.

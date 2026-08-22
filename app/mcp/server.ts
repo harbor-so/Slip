@@ -21,7 +21,7 @@
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type Request, type Response } from "express";
-import { orgIdForKey } from "../../core/kernel/auth.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 import { runStartupChecks, startBackgroundLoops } from "../lib/loops.js";
 import {
 	authenticateSandbox,
@@ -30,8 +30,8 @@ import {
 } from "../lib/session-runner.js";
 import { validateFence } from "../sandbox/manager.js";
 import { buildAgentServer } from "./agent-build";
-import { buildServer } from "../../core/mcp/build.js";
-import { tools } from "../../core/mcp/tools.js";
+import { buildServer } from "@core/mcp/build.js";
+import { tools } from "@core/mcp/tools.js";
 
 export { buildServer };
 

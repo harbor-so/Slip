@@ -24,9 +24,9 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { claims, orgs, sandboxes, sessionEvents, sessions, tasks } from "../../core/schema/schema.js";
-import { claim, createTask, release } from "../../core/kernel/work.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, orgs, sandboxes, sessionEvents, sessions, tasks } from "@core/schema/schema.js";
+import { claim, createTask, release } from "@core/kernel/work.js";
 import { createSession } from "../lib/sessions.js";
 import {
 	ensureSandbox,

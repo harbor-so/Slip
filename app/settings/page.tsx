@@ -12,7 +12,7 @@ import { scmIdentitySummary } from "../git/credentials.js";
 import { listApiKeys } from "../lib/dashboard.js";
 import { signInGrantsAuthorship } from "../lib/github-oauth.js";
 import { currentSession, oauthConfigured } from "../lib/session.js";
-import { dashboardUrl, mcpUrl } from "../../core/kernel/urls.js";
+import { dashboardUrl, mcpUrl } from "@core/kernel/urls.js";
 import { Badge, Card, Empty, SectionLabel } from "../components/ui.js";
 import { CreateKeyPanel } from "./create-key.js";
 import { ScmIdentityPanel } from "./scm-identity.js";

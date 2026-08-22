@@ -30,9 +30,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
-import { db, sql } from "../../core/schema/index.js";
-import { type ImageBuild, imageBuilds, repoImages, repos } from "../../core/schema/schema.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
+import { db, sql } from "@core/schema/index.js";
+import { type ImageBuild, imageBuilds, repoImages, repos } from "@core/schema/schema.js";
 import { reserveBudget } from "../lib/cost.js";
 import { defaultProvider } from "../sandbox/registry.js";
 import { type SandboxProvider, isImageBuildingProvider } from "../sandbox/provider.js";

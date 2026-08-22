@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
-import { setting } from "../../../core/kernel/config.js";
-import { subscribe } from "../../../core/kernel/bus.js";
+import { setting } from "@core/kernel/config.js";
+import { subscribe } from "@core/kernel/bus.js";
 import { currentSession } from "../../lib/session.js";
 
 /**

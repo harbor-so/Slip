@@ -22,12 +22,12 @@
 
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { artifacts, orgs, repos, sessionRepos, sessions, users } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { artifacts, orgs, repos, sessionRepos, sessions, users } from "@core/schema/schema.js";
 import { markPullRequestMerged } from "../lib/artifacts.js";
 import { createSession } from "../lib/sessions.js";
 import { enqueueSessionPrompt } from "../lib/session-runner.js";
-import { claim, createTask } from "../../core/kernel/work.js";
+import { claim, createTask } from "@core/kernel/work.js";
 import { harborBranchName } from "./provider.js";
 import type { CreatePullRequestInput, PullRequestOutcome, ScmProvider } from "./provider.js";
 import { openPullRequestForBranch, sweepDeferredPullRequests } from "./pull-request.js";

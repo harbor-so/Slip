@@ -9,8 +9,8 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { events, orgs, projects, tasks } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { events, orgs, projects, tasks } from "@core/schema/schema.js";
 
 const anthropicConstructor = vi.fn();
 

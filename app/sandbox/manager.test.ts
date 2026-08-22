@@ -17,9 +17,9 @@ import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { DEAD_SANDBOX_STATUSES } from "../contracts/index.js";
-import { db, sql } from "../../core/schema/index.js";
-import { circuitBreakers, orgs, sandboxes, sessions, tasks } from "../../core/schema/schema.js";
-import { claim, createTask } from "../../core/kernel/work.js";
+import { db, sql } from "@core/schema/index.js";
+import { circuitBreakers, orgs, sandboxes, sessions, tasks } from "@core/schema/schema.js";
+import { claim, createTask } from "@core/kernel/work.js";
 import { createSession } from "../lib/sessions.js";
 import {
 	currentFencingToken,

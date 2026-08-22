@@ -19,11 +19,11 @@
  */
 
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { activity, claims, tasks } from "../../core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { activity, claims, tasks } from "@core/schema/schema.js";
 import type { NormalizedActivity } from "../activity/types.js";
-import { notifyChange, touchPresence } from "../../core/kernel/work.js";
+import { notifyChange, touchPresence } from "@core/kernel/work.js";
 
 function boundPayload(payload: Record<string, unknown> | undefined): Record<string, unknown> | null {
 	if (!payload) return null;

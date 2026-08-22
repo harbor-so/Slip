@@ -21,7 +21,7 @@ process.env.HARBOR_ENCRYPTION_KEY = Buffer.from(
 import { createHmac } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
+import { db, sql } from "@core/schema/index.js";
 import {
 	automationRuns,
 	automations,
@@ -30,7 +30,7 @@ import {
 	orgs,
 	repos,
 	sessions,
-} from "../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import { encrypt } from "../lib/crypto.js";
 import { deliverEvent } from "./inbound.js";
 import { tickAutomations } from "./automations.js";

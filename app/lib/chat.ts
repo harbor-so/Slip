@@ -23,14 +23,14 @@
  */
 
 import { and, asc, desc, eq, gt, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { channelMembers, channels, chatEvents, principals } from "../../core/schema/schema.js";
-import type { Channel, ChannelMember, ChatEvent, Principal } from "../../core/schema/schema.js";
-import { setting } from "../../core/kernel/config.js";
-import { publish } from "../../core/kernel/bus.js";
+import { db } from "@core/schema/index.js";
+import { channelMembers, channels, chatEvents, principals } from "@core/schema/schema.js";
+import type { Channel, ChannelMember, ChatEvent, Principal } from "@core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
+import { publish } from "@core/kernel/bus.js";
 import { EVENT_KINDS, computeId, isEphemeral, verifyEvent } from "./signing.js";
 import type { EventKind, SignedEvent } from "./signing.js";
-import { HarborError } from "../../core/kernel/work.js";
+import { HarborError } from "@core/kernel/work.js";
 
 /**
  * Kinds a client is allowed to author.

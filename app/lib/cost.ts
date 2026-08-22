@@ -54,9 +54,9 @@
 
 import { createHash } from "node:crypto";
 import { eq, type SQL, sql as raw } from "drizzle-orm";
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { costEvents } from "../../core/schema/schema.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { costEvents } from "@core/schema/schema.js";
 import {
 	assertNever,
 	type PriceQuote,
@@ -65,7 +65,7 @@ import {
 	stampModel,
 	type TokenUsage,
 } from "./pricing.js";
-import { HarborError, notifyChange } from "../../core/kernel/work.js";
+import { HarborError, notifyChange } from "@core/kernel/work.js";
 
 /**
  * The db handle or a transaction on it. Same derivation as `work.ts`, and for

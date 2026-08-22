@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { normalizerFor } from "../../../activity/registry.js";
 import { recordActivity } from "../../../lib/activity.js";
-import { orgIdForKey } from "../../../../core/kernel/auth.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 
 /**
  * The passive-tracking counterpart to the connector webhook route.

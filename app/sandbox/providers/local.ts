@@ -51,7 +51,7 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { setting } from "../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import {
 	SandboxProviderError,
 	assertFeaturesSupported,

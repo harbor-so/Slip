@@ -9,7 +9,7 @@
  */
 
 import { notFound } from "next/navigation";
-import { relTime } from "../../../core/kernel/format.js";
+import { relTime } from "@core/kernel/format.js";
 import { currentSession } from "../../lib/session.js";
 import { participantsOf, promptsOf, sessionByKey } from "../../lib/sessions.js";
 import { Badge, Card, Empty, SectionLabel } from "../../components/ui.js";

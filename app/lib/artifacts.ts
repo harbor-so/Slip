@@ -15,8 +15,8 @@
  */
 
 import { and, eq, isNull } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { artifacts } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { artifacts } from "@core/schema/schema.js";
 
 /**
  * Stamp a pull-request artifact as merged, matched on its URL.

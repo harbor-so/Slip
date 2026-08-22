@@ -24,9 +24,9 @@
 
 import { createHash } from "node:crypto";
 import { and, eq, gte, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { automationRuns, automations, events } from "../../core/schema/schema.js";
-import { setting } from "../../core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { automationRuns, automations, events } from "@core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
 import { CryptoError, decrypt } from "../lib/crypto.js";
 import { budgetStatusSafe } from "./budget-bridge.js";
 import { evaluateAll, parseConditions } from "./conditions.js";

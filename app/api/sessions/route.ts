@@ -4,7 +4,7 @@ import { assertRepoAccess } from "../../lib/repos.js";
 import { createSession, listSessions } from "../../lib/sessions.js";
 import { currentSession } from "../../lib/session.js";
 import { viewerScmToken } from "../../lib/viewer-scm.js";
-import { HarborError } from "../../../core/kernel/work.js";
+import { HarborError } from "@core/kernel/work.js";
 
 export async function GET() {
 	const viewer = await currentSession();

@@ -25,9 +25,9 @@
  * timeliness, not the actions.
  */
 
-import { type SettingKey, setting, validateConfig } from "../../core/kernel/config.js";
-import { databaseUrl } from "../../core/schema/index.js";
-import { describeDatabaseTls } from "../../core/schema/tls.js";
+import { type SettingKey, setting, validateConfig } from "@core/kernel/config.js";
+import { databaseUrl } from "@core/schema/index.js";
+import { describeDatabaseTls } from "@core/schema/tls.js";
 import { tickDevinPoll } from "../devin/poll.js";
 import { warnScmAttributionAtStartup } from "../git/credentials.js";
 import { sweepDeferredPullRequests } from "../git/pull-request.js";
@@ -37,8 +37,8 @@ import { sweepDeadlines } from "../sandbox/manager.js";
 import { tickAutomations } from "../triggers/automations.js";
 import { compactEligibleSessions } from "./session-events.js";
 import { tickSessions } from "./session-tick.js";
-import { warnAboutAddressing } from "../../core/kernel/urls.js";
-import { sweepExpiredClaims } from "../../core/kernel/work.js";
+import { warnAboutAddressing } from "@core/kernel/urls.js";
+import { sweepExpiredClaims } from "@core/kernel/work.js";
 
 /**
  * Closed set, on purpose: `backgroundLoops()` returns exactly one spec per

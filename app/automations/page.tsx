@@ -16,8 +16,8 @@
  */
 
 import { desc, eq, inArray } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { automationRuns, automations, environments, repos } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { automationRuns, automations, environments, repos } from "@core/schema/schema.js";
 import { currentSession } from "../lib/session.js";
 import { AGENT_RUNTIMES } from "../contracts/agent.js";
 import { nextRun } from "../triggers/cron.js";

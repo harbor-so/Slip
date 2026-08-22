@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { db } from "../../../../../core/schema/index.js";
-import { users } from "../../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { users } from "@core/schema/schema.js";
 import { storeUserScmToken } from "../../../../git/credentials.js";
 import {
 	SCM_AUTHORSHIP_SCOPE,

@@ -9,8 +9,8 @@
  */
 
 import { and, desc, eq, gte } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { apiKeys, connectors, digests, events, projects, repoImages, repos, tasks } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { apiKeys, connectors, digests, events, projects, repoImages, repos, tasks } from "@core/schema/schema.js";
 
 export async function recentEvents(orgId: string, limit = 40) {
 	return db

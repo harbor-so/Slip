@@ -22,7 +22,7 @@
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { setting } from "../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { StoredScmToken } from "../git/credentials.js";
 
 export type FetchLike = typeof fetch;

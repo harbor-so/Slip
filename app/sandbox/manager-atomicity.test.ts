@@ -26,8 +26,8 @@
 import { and, eq } from "drizzle-orm";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { costEvents, orgs, sandboxes, sessionEvents, sessionPrompts, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { costEvents, orgs, sandboxes, sessionEvents, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { appendEvent, appendEvents } from "../lib/session-events.js";
 import { completeTurn, takeNextPrompt } from "../lib/session-runner.js";
 import { createSession, queuePrompt } from "../lib/sessions.js";

@@ -22,7 +22,7 @@
  *    straight out of here. Nothing here catches it to publish anyway.
  */
 
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
 import { BAKED_WORKSPACE_ROOT } from "../contracts/index.js";
 import { SandboxProviderError, isImageBuildingProvider, type SandboxProvider } from "../sandbox/provider.js";
 

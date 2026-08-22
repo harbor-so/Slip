@@ -17,8 +17,8 @@
 import { asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SESSION_EVENT_TYPES, type SessionEvent } from "../contracts/index.js";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs, sessionEvents, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, sessionEvents, sessions } from "@core/schema/schema.js";
 import {
 	appendEvent,
 	appendEvents,

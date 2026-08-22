@@ -26,11 +26,11 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { GET as getSandboxCommands } from "./[id]/commands/route.js";
-import { db, sql } from "../../../core/schema/index.js";
-import { orgs, sandboxes } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, sandboxes } from "@core/schema/schema.js";
 import { enqueueSessionPrompt, sha256Hex, takeNextPrompt } from "../../lib/session-runner.js";
 import { createSession } from "../../lib/sessions.js";
-import { notifyChange } from "../../../core/kernel/work.js";
+import { notifyChange } from "@core/kernel/work.js";
 
 let orgId: string;
 let sessionId: string;

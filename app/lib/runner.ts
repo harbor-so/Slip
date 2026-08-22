@@ -23,11 +23,11 @@
 
 import { spawn } from "node:child_process";
 import { eq, sql as raw } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { runs } from "../../core/schema/schema.js";
-import { mcpUrl } from "../../core/kernel/urls.js";
-import { notifyChange, touchPresence } from "../../core/kernel/work.js";
+import { setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { runs } from "@core/schema/schema.js";
+import { mcpUrl } from "@core/kernel/urls.js";
+import { notifyChange, touchPresence } from "@core/kernel/work.js";
 
 /** Only these two. An arbitrary command from a request body is a shell. */
 const RUNTIMES = {

@@ -17,8 +17,8 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { AGENT_RUNTIMES } from "../app/contracts/agent.js";
-import { SANDBOX_PROVIDER_NAMES } from "../app/sandbox/registry.js";
+import { AGENT_RUNTIMES } from "@app/contracts/agent.js";
+import { SANDBOX_PROVIDER_NAMES } from "@app/sandbox/registry.js";
 import { adapterFor } from "../runtime/adapters/index.js";
 
 const ROOT = process.cwd();

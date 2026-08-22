@@ -74,7 +74,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, isNotNull, isNull, notInArray, sql as raw } from "drizzle-orm";
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
 import {
 	DEAD_SANDBOX_STATUSES,
 	type ProviderErrorType,
@@ -83,13 +83,13 @@ import {
 	type SpawnOutcome,
 	type SpawnRefusal,
 } from "../contracts/index.js";
-import { db } from "../../core/schema/index.js";
-import { claims, events, repoImages, repos, sandboxes, sessionPrompts, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { claims, events, repoImages, repos, sandboxes, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { evaluateImageFreshness } from "../images/decisions.js";
 import { budgetStatus, finalizeReservation, recordCost, reserveBudget } from "../lib/cost.js";
 import { type Executor, appendEvent } from "../lib/session-events.js";
-import { PUBLIC_URL_MISSING_MESSAGE, agentMcpUrl, publicUrl } from "../../core/kernel/urls.js";
-import { HarborError, notifyChange } from "../../core/kernel/work.js";
+import { PUBLIC_URL_MISSING_MESSAGE, agentMcpUrl, publicUrl } from "@core/kernel/urls.js";
+import { HarborError, notifyChange } from "@core/kernel/work.js";
 import { readCircuit, recordProviderFailure, recordProviderSuccess } from "./circuit.js";
 import { buildSandboxEnv, resumeTokenForBoot } from "./env.js";
 import {

@@ -10,14 +10,14 @@
 
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
+import { db, sql } from "@core/schema/index.js";
 import {
 	orgs,
 	sessionParticipants,
 	sessionPrompts,
 	sessions,
 	tasks,
-} from "../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import {
 	createSession,
 	dequeuePrompt,

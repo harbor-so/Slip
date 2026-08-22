@@ -8,9 +8,9 @@
  */
 
 import { conflictsPrevented, listRepoImages, recentEvents } from "./lib/dashboard.js";
-import { relTime, shortId } from "../core/kernel/format.js";
+import { relTime, shortId } from "@core/kernel/format.js";
 import { currentSession } from "./lib/session.js";
-import { listWork, presenceWindowMs, presentAgents } from "../core/kernel/work.js";
+import { listWork, presenceWindowMs, presentAgents } from "@core/kernel/work.js";
 import { Badge, Card, Empty, SectionLabel, Stat, type Tone } from "./components/ui.js";
 import { LiveRefresh } from "./live.js";
 

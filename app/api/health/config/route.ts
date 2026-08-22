@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
-import { describeConfig } from "../../../../core/kernel/config.js";
+import { describeConfig } from "@core/kernel/config.js";
 import { scmOAuthConfig } from "../../../git/credentials.js";
 import { startupAttributionWarning } from "../../../git/provider.js";
 import { currentSession } from "../../../lib/session.js";

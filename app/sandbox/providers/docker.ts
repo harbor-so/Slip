@@ -34,7 +34,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { setting } from "../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { ProviderErrorType } from "../../contracts/index.js";
 import {
 	SandboxProviderError,

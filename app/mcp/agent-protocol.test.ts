@@ -11,8 +11,8 @@
 
 import { eq, sql as raw } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index";
-import { artifacts, orgs, sandboxes, sessionPrompts, sessions } from "../../core/schema/schema";
+import { db, sql } from "@core/schema/index";
+import { artifacts, orgs, sandboxes, sessionPrompts, sessions } from "@core/schema/schema";
 import { createSession } from "../../app/lib/sessions.js";
 import {
 	AGENT_TOOL_BUDGET_CHARS,
@@ -21,7 +21,7 @@ import {
 	contextForSandboxToken,
 	type AgentToolContext,
 } from "./agent-tools.js";
-import { tools as coordinationTools } from "../../core/mcp/tools";
+import { tools as coordinationTools } from "@core/mcp/tools";
 
 let orgId: string;
 let ctx: AgentToolContext;

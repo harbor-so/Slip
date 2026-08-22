@@ -28,8 +28,8 @@
  */
 
 import { and, eq, isNull } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { environments, repos } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { environments, repos } from "@core/schema/schema.js";
 import type { RouteConfidence, RouteTarget } from "../contracts/index.js";
 
 /**

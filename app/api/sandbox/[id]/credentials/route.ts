@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
-import { setting } from "../../../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { GitOperation } from "../../../../git/credentials.js";
 import { GIT_OPERATIONS, mintGitCredential } from "../../../../git/credentials.js";
 import { assertNever } from "../../../../sandbox/decisions.js";

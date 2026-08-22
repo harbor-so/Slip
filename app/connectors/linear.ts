@@ -7,9 +7,9 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { tasks } from "../../core/schema/schema.js";
-import { createTask } from "../../core/kernel/work.js";
+import { db } from "@core/schema/index.js";
+import { tasks } from "@core/schema/schema.js";
+import { createTask } from "@core/kernel/work.js";
 import type { Connector, ConnectorActivity, ConnectorContext, WebhookResult } from "./types.js";
 
 interface LinearIssue {

@@ -17,7 +17,7 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { setting, type RepoOverrides } from "../../core/kernel/config.js";
+import { setting, type RepoOverrides } from "@core/kernel/config.js";
 import { PROVIDER_ERROR_TYPES, SANDBOX_STATUSES } from "../contracts/index.js";
 import {
 	classifyCircuitContribution,
@@ -66,7 +66,7 @@ describe("module boundary", () => {
 
 	it("imports only from contracts and config", () => {
 		expect(new Set(specifiers)).toEqual(
-			new Set(["../../core/kernel/config.js", "../contracts/index.js"]),
+			new Set(["@core/kernel/config.js", "../contracts/index.js"]),
 		);
 	});
 

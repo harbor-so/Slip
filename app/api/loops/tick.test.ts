@@ -14,9 +14,9 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../../core/schema/index.js";
-import { claims, events, orgs, tasks } from "../../../core/schema/schema.js";
-import { claim } from "../../../core/kernel/work.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, events, orgs, tasks } from "@core/schema/schema.js";
+import { claim } from "@core/kernel/work.js";
 import { POST } from "./tick/route.js";
 
 const TOKEN = "maintenance-token-for-tests";

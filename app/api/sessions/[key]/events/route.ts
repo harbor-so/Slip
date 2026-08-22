@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
-import { orgIdForKey } from "../../../../../core/kernel/auth.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 import { currentSession } from "../../../../lib/session.js";
 import { eventPage } from "../../../../lib/session-events.js";
 import { sessionByKey } from "../../../../lib/sessions.js";
-import { HarborError } from "../../../../../core/kernel/work.js";
+import { HarborError } from "@core/kernel/work.js";
 
 /**
  * Page through a session's retained history.

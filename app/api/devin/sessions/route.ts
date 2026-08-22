@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../../../core/schema/index.js";
-import { devinSessions, tasks } from "../../../../core/schema/schema.js";
-import { orgIdForKey } from "../../../../core/kernel/auth.js";
+import { db } from "@core/schema/index.js";
+import { devinSessions, tasks } from "@core/schema/schema.js";
+import { orgIdForKey } from "@core/kernel/auth.js";
 import { createSession } from "../../../lib/sessions.js";
 import { createDevinSession, DevinApiError } from "../../../devin/client.js";
 import { devinTokenFor } from "../../../devin/token.js";

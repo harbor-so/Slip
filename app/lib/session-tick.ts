@@ -16,8 +16,8 @@
 
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { hostname } from "node:os";
-import { db } from "../../core/schema/index.js";
-import { sessionPrompts, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { sessionPrompts, sessions } from "@core/schema/schema.js";
 import { defaultSandboxGateway, runSessionTurn } from "./session-runner.js";
 
 /**

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import Link from "next/link";
-import { relTime } from "../../core/kernel/format.js";
+import { relTime } from "@core/kernel/format.js";
 import { currentSession } from "../lib/session.js";
 import { listSessions } from "../lib/sessions.js";
 import { Badge, Card, Empty, SectionLabel } from "../components/ui.js";

@@ -22,8 +22,8 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../../core/schema/index.js";
-import { orgs, users, userScmTokens } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, users, userScmTokens } from "@core/schema/schema.js";
 import { prAuthorityForUser, scmIdentitySummary } from "../../git/credentials.js";
 import { signSession } from "../../lib/session.js";
 

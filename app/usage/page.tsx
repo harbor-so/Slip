@@ -19,8 +19,8 @@
  */
 
 import { and, desc, eq, gte, isNotNull, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { claims, costEvents, repos, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { claims, costEvents, repos, sessions } from "@core/schema/schema.js";
 import { currentSession } from "../lib/session.js";
 import { Badge, Card, Empty, SectionLabel, Stat } from "../components/ui.js";
 

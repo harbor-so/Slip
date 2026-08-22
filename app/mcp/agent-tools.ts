@@ -35,10 +35,10 @@
 
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index";
-import { artifacts, sandboxes, sessions } from "../../core/schema/schema";
-import { setting } from "../../core/kernel/config";
-import { HarborError } from "../../core/kernel/work";
+import { db } from "@core/schema/index";
+import { artifacts, sandboxes, sessions } from "@core/schema/schema";
+import { setting } from "@core/kernel/config";
+import { HarborError } from "@core/kernel/work";
 
 /**
  * A sandbox's authority, resolved from its token, and re-checked on every call.

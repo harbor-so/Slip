@@ -17,8 +17,8 @@ vi.mock("./client.js", async (importOriginal) => {
 	return { ...actual, getDevinSession: vi.fn() };
 });
 
-import { db, sql } from "../../core/schema/index.js";
-import { activity, artifacts, connectors, devinSessions, orgs, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { activity, artifacts, connectors, devinSessions, orgs, sessions } from "@core/schema/schema.js";
 import { DevinApiError, getDevinSession, type DevinSession } from "./client.js";
 import { tickDevinPoll } from "./poll.js";
 

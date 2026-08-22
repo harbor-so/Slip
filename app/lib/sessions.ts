@@ -27,15 +27,15 @@
  */
 
 import { and, asc, desc, eq, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
+import { db } from "@core/schema/index.js";
 import {
 	sessionParticipants,
 	sessionPrompts,
 	sessions,
 	tasks,
-} from "../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import { snapshotSessionRepos } from "./repos.js";
-import { HarborError, notifyChange } from "../../core/kernel/work.js";
+import { HarborError, notifyChange } from "@core/kernel/work.js";
 
 /**
  * 22 characters of base32, ~110 bits.

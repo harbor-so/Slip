@@ -12,8 +12,8 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { orgs, repos, sessionRepos, sessions } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, repos, sessionRepos, sessions } from "@core/schema/schema.js";
 import { createSession } from "./sessions.js";
 import {
 	archiveRepo,

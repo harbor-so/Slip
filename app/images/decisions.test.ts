@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { setting } from "../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import {
 	evaluateAutoPause,
 	evaluateBuildDue,
@@ -49,7 +49,7 @@ describe("module boundary", () => {
 	const specifiers = [...source.matchAll(/\bfrom\s+"([^"]+)"/g)].map((match) => match[1]!);
 
 	it("imports only from config — no database, no git, no container runtime", () => {
-		expect(new Set(specifiers)).toEqual(new Set(["../../core/kernel/config.js"]));
+		expect(new Set(specifiers)).toEqual(new Set(["@core/kernel/config.js"]));
 	});
 });
 

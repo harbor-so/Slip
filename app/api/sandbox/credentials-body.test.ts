@@ -17,8 +17,8 @@
 
 import { afterAll, describe, expect, it } from "vitest";
 import { POST as postCredentials } from "./[id]/credentials/route.js";
-import { setting } from "../../../core/kernel/config.js";
-import { sql } from "../../../core/schema/index.js";
+import { setting } from "@core/kernel/config.js";
+import { sql } from "@core/schema/index.js";
 
 afterAll(async () => {
 	await sql.end({ timeout: 5 });

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-FSL-1.1-Apache-2.0
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { setting } from "../../../../../core/kernel/config.js";
+import { setting } from "@core/kernel/config.js";
 import type { BridgeCommand } from "../../../../contracts/index.js";
-import { db } from "../../../../../core/schema/index.js";
-import { subscribe } from "../../../../../core/kernel/bus.js";
-import { sandboxes, sessionPrompts, sessions } from "../../../../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { subscribe } from "@core/kernel/bus.js";
+import { sandboxes, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { resolvePushBranch } from "../../../../git/working-branch.js";
 import { isReconnectBlockedStatus } from "../../../../sandbox/decisions.js";
 import { validateFence } from "../../../../sandbox/manager.js";

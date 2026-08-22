@@ -18,10 +18,10 @@
 
 import { eq } from "drizzle-orm";
 import { afterEach, afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { claims, orgs, sessionPrompts, tasks } from "../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { claims, orgs, sessionPrompts, tasks } from "@core/schema/schema.js";
 import { createSession, queuePrompt } from "./sessions.js";
-import { claim, createTask } from "../../core/kernel/work.js";
+import { claim, createTask } from "@core/kernel/work.js";
 import {
 	LOOP_NAMES,
 	backgroundLoops,
@@ -55,7 +55,7 @@ describe("the registry is complete", () => {
 	});
 
 	it("gives every loop a real interval setting that resolves to a positive integer", async () => {
-		const { setting } = await import("../../core/kernel/config");
+		const { setting } = await import("@core/kernel/config");
 		for (const spec of backgroundLoops()) {
 			const interval = setting(spec.intervalSetting);
 			expect(typeof interval, spec.name).toBe("number");
@@ -123,7 +123,7 @@ describe("the registry entries are wired to the real functions", () => {
 			// Push the seq counter past retention without inserting 600 rows: the
 			// candidate filter reads next_event_seq, and compactSession recounts
 			// precisely inside its own transaction.
-			const { sessions } = await import("../../core/schema/schema");
+			const { sessions } = await import("@core/schema/schema");
 			await db
 				.update(sessions)
 				.set({ nextEventSeq: 700 })
@@ -154,7 +154,7 @@ describe("startBackgroundLoops", () => {
 		// iteration here against stubbed runs because startBackgroundLoops reads
 		// the module-level registry — the scheduler behaviour under test (timers,
 		// stop, isolation) is identical.
-		const { setting } = await import("../../core/kernel/config");
+		const { setting } = await import("@core/kernel/config");
 		const timers = specs.map((spec) =>
 			setInterval(() => {
 				void spec.run();

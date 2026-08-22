@@ -19,7 +19,7 @@
 import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SpawnOutcome } from "../contracts/index.js";
-import { db, sql } from "../../core/schema/index.js";
+import { db, sql } from "@core/schema/index.js";
 import {
 	apiKeys,
 	claims,
@@ -29,11 +29,11 @@ import {
 	sessionPrompts,
 	sessions,
 	tasks,
-} from "../../core/schema/schema.js";
+} from "@core/schema/schema.js";
 import { GET as getSandboxCommands } from "../api/sandbox/[id]/commands/route.js";
 import { POST as postSandboxEvents } from "../api/sandbox/[id]/events/route.js";
 import { GET as getSessionStream } from "../api/sessions/[key]/stream/route.js";
-import { hashApiKey, mintApiKey } from "../../core/kernel/keys.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { promptability, promptabilityOf } from "./promptability.js";
 import { appendEvent } from "./session-events.js";
 import {

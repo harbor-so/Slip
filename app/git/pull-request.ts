@@ -29,10 +29,10 @@
  */
 
 import { and, desc, eq, isNotNull, sql as raw } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { artifacts, claims, repos, sessionPrompts, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { artifacts, claims, repos, sessionPrompts, sessions } from "@core/schema/schema.js";
 import { appendEvent } from "../lib/session-events.js";
-import { notifyChange } from "../../core/kernel/work.js";
+import { notifyChange } from "@core/kernel/work.js";
 import { prAuthorityForUser } from "./credentials.js";
 import { createScmProvider } from "./github.js";
 import {

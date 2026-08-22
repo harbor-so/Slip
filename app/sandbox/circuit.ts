@@ -37,9 +37,9 @@
  */
 
 import { and, eq, sql as raw } from "drizzle-orm";
-import { type RepoOverrides, setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { circuitBreakers, events } from "../../core/schema/schema.js";
+import { type RepoOverrides, setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { circuitBreakers, events } from "@core/schema/schema.js";
 import {
 	type CircuitBreakerState,
 	type CircuitDecision,

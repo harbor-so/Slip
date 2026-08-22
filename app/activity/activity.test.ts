@@ -12,10 +12,10 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { db, sql } from "../../core/schema/index.js";
-import { activity, apiKeys, orgs, tasks } from "../../core/schema/schema.js";
-import { claim } from "../../core/kernel/work.js";
-import { hashApiKey, mintApiKey } from "../../core/kernel/keys.js";
+import { db, sql } from "@core/schema/index.js";
+import { activity, apiKeys, orgs, tasks } from "@core/schema/schema.js";
+import { claim } from "@core/kernel/work.js";
+import { hashApiKey, mintApiKey } from "@core/kernel/keys.js";
 import { claudeCodeNormalizer } from "./claude-code.js";
 import { cursorNormalizer } from "./cursor.js";
 import { opencodeNormalizer } from "./opencode.js";

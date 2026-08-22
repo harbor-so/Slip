@@ -39,8 +39,8 @@
  */
 
 import { eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { sandboxes, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { sandboxes, sessions } from "@core/schema/schema.js";
 import { evaluateDestruction, isDeadSandboxStatus } from "./decisions.js";
 import { type SweepOptions, readDestructionAuthority, recordOrphanReconciled } from "./manager.js";
 import type { SandboxInspection } from "./provider.js";

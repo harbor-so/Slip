@@ -26,11 +26,11 @@
  */
 
 import { eq, notInArray, sql as raw } from "drizzle-orm";
-import { setting } from "../../core/kernel/config.js";
-import { db } from "../../core/schema/index.js";
-import { artifacts, devinSessions } from "../../core/schema/schema.js";
+import { setting } from "@core/kernel/config.js";
+import { db } from "@core/schema/index.js";
+import { artifacts, devinSessions } from "@core/schema/schema.js";
 import { recordActivity } from "../lib/activity.js";
-import { globalLock, withLock } from "../../core/kernel/locks.js";
+import { globalLock, withLock } from "@core/kernel/locks.js";
 import type { NormalizedActivity } from "../activity/types.js";
 import {
 	DEVIN_TERMINAL_STATUSES,

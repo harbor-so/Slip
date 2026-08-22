@@ -16,8 +16,8 @@
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, sql } from "../../../core/schema/index.js";
-import { orgs, repos, users } from "../../../core/schema/schema.js";
+import { db, sql } from "@core/schema/index.js";
+import { orgs, repos, users } from "@core/schema/schema.js";
 import { clearRepoAccessCache } from "../../git/github.js";
 import { forgetUserScmToken, storeUserScmToken } from "../../git/credentials.js";
 import { signSession } from "../../lib/session.js";

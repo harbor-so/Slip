@@ -15,10 +15,10 @@
  */
 
 import { and, eq } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { tasks } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { tasks } from "@core/schema/schema.js";
 import { secretEquals } from "../lib/crypto.js";
-import { createTask } from "../../core/kernel/work.js";
+import { createTask } from "@core/kernel/work.js";
 import type { Connector, ConnectorContext, WebhookResult } from "./types.js";
 
 interface GitLabAttributes {

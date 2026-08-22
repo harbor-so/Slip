@@ -42,8 +42,8 @@
  */
 
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { db } from "../../core/schema/index.js";
-import { claims, repos, sessionRepos, sessions } from "../../core/schema/schema.js";
+import { db } from "@core/schema/index.js";
+import { claims, repos, sessionRepos, sessions } from "@core/schema/schema.js";
 import { GitAttributionError, harborBranchName } from "./provider.js";
 
 export interface PushTarget {
